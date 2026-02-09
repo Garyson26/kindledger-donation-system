@@ -115,7 +115,7 @@ function SignupPage({ onSignup }) {
   };
 
   return (
-    <div className="h-screen box-mrg bg-gradient-to-br from-blue-50 via-white to-blue-50 flex items-center justify-center px-4 sm:px-6 lg:px-8">
+    <div className="box-mrg bg-gradient-to-br from-blue-50 via-white to-blue-50 flex items-center justify-center px-4 sm:px-6 lg:px-8">
       {/* Toast Messages */}
       {toasts.map((toast) => (
         <Toast
@@ -127,7 +127,7 @@ function SignupPage({ onSignup }) {
         />
       ))}
 
-      <div className="max-w-md w-full space-y-8">
+      <div className="max-w-md w-full">
         {/* Header */}
         <div className="text-center">
           <div className="flex justify-center mb-6">

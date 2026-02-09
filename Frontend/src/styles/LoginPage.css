@@ -8,10 +8,11 @@
 
 
     .box-mrg {
-            height: calc(100vh - 109px);
+            min-height: calc(100vh - 109px);
+            padding: 1.3rem;
     }
 
-    @media (min-width: 992px) and (max-width: 1199px) {
+    /* @media (min-width: 992px) and (max-width: 1199px) {
         .box-mrg {
             height: calc(100vh - -220px);
             padding: 1.5rem;
@@ -44,7 +45,7 @@
             height: calc(100vh - -170px);
             padding: 0.5rem;
         }
-    }
+    } */
 
     /* Extra small devices */
     @media (max-width: 360px) {
