@@ -144,7 +144,8 @@ function AppContent() {
       setUserRole(role);
       localStorage.setItem("userId", uid);
       // No longer storing userRole in localStorage - it's in the JWT token
-      navigate("/");
+      // Redirect admin to dashboard, regular users to home
+      navigate(role === "admin" ? "/admin/dashboard" : "/");
     }} />;
   };
 
