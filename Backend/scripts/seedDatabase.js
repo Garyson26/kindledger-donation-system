@@ -171,33 +171,102 @@ async function seedDatabase() {
     const insertedUsers = await User.insertMany(users);
     console.log(`✅ Created ${insertedUsers.length} users`);
 
-    // Generate donations (each user makes 2-8 donations)
-    console.log('\n💰 Generating donation records...');
+    // Generate donations with yearly amount control
+    console.log('\n💰 Generating donation records with yearly amount control...');
+    console.log('   Rules:');
+    console.log('   - Minimum ₹2,50,000 per year');
+    console.log('   - Stop between ₹3,00,000 to ₹4,00,000');
+    console.log('   - Maximum ₹4,00,000 per year\n');
+
     const donations = [];
-    const twoYearsAgo = new Date();
-    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
-    const now = new Date();
+    const MIN_YEARLY_AMOUNT = 250000;
+    const TARGET_MIN = 300000;
+    const TARGET_MAX = 400000;
+    const ABSOLUTE_MAX = 400000;
+
+    // Define years to generate data for (last 3 years)
+    const currentYear = new Date().getFullYear();
+    const years = [currentYear - 2, currentYear - 1, currentYear];
+
+    // Track yearly totals
+    const yearlyTotals = {};
+    years.forEach(year => yearlyTotals[year] = 0);
 
     let totalDonations = 0;
-    for (let i = 0; i < insertedUsers.length; i++) {
-      const user = insertedUsers[i];
-      const numDonations = randomInt(2, 8); // Each user makes 2-8 donations
+    let userIndex = 0;
 
-      for (let j = 0; j < numDonations; j++) {
-        const baseAmounts = [300, 2000, 50000];
-        const baseAmount = randomElement(baseAmounts);
+    // Generate donations for each year
+    for (const year of years) {
+      console.log(`\n📅 Generating donations for year ${year}...`);
+      const yearStart = new Date(year, 0, 1);
+      const yearEnd = new Date(year, 11, 31, 23, 59, 59);
+      
+      userIndex = 0; // Reset user index for each year
+
+      // Keep generating until we reach the target range
+      while (yearlyTotals[year] < TARGET_MIN || 
+             (yearlyTotals[year] < TARGET_MAX && yearlyTotals[year] < MIN_YEARLY_AMOUNT)) {
+        
+        // Select a random user
+        const user = insertedUsers[userIndex % insertedUsers.length];
+        userIndex++;
+
+        // Select donation amount based on how much we need
+        const remaining = TARGET_MAX - yearlyTotals[year];
+        let baseAmount;
+        
+        if (remaining > 150000) {
+          // If we need a lot more, balanced distribution favoring smaller amounts for more transactions
+          const rand = Math.random();
+          if (rand < 0.4) baseAmount = 300;
+          else if (rand < 0.7) baseAmount = 2000;
+          else baseAmount = 50000;
+        } else if (remaining > 50000) {
+          // Mid-range, prefer small and medium donations
+          const rand = Math.random();
+          if (rand < 0.5) baseAmount = 300;
+          else if (rand < 0.85) baseAmount = 2000;
+          else baseAmount = 50000;
+        } else if (remaining > 10000) {
+          // Getting close, avoid large donations
+          const rand = Math.random();
+          if (rand < 0.6) baseAmount = 300;
+          else baseAmount = 2000;
+        } else if (remaining > 2000) {
+          // Very close, mostly small
+          const rand = Math.random();
+          if (rand < 0.7) baseAmount = 300;
+          else baseAmount = 2000;
+        } else {
+          // Very close, use smallest
+          baseAmount = 300;
+        }
+
         const category = categoryMap[baseAmount];
 
-        // Extra amount (0 to 50% of base amount)
-        const extraAmount = randomInt(0, Math.floor(baseAmount * 0.5));
+        // Extra amount (0 to 30% of base amount to have better control)
+        const extraAmount = randomInt(0, Math.floor(baseAmount * 0.3));
         const totalAmount = baseAmount + extraAmount;
 
-        // Payment status (90% successful, 8% pending, 2% failed)
+        // Check if adding this donation would exceed ABSOLUTE_MAX
+        if (yearlyTotals[year] + totalAmount > ABSOLUTE_MAX) {
+          // Try with a smaller amount
+          if (baseAmount > 300) {
+            continue; // Skip and try with potentially smaller amount in next iteration
+          } else {
+            // Even smallest amount exceeds, stop for this year
+            break;
+          }
+        }
+
+        // Payment status (95% successful, 4% pending, 1% failed)
         const rand = Math.random();
         let paymentStatus;
-        if (rand < 0.90) paymentStatus = 'Paid';
-        else if (rand < 0.98) paymentStatus = 'Pending';
+        if (rand < 0.95) paymentStatus = 'Paid';
+        else if (rand < 0.99) paymentStatus = 'Pending';
         else paymentStatus = 'Failed';
+
+        const donationDate = generateRandomDate(yearStart, yearEnd);
 
         const donation = {
           userId: user._id,
@@ -212,17 +281,34 @@ async function seedDatabase() {
           amount: totalAmount,
           paymentStatus: paymentStatus,
           paymentMethod: randomElement(paymentMethods),
-          transactionId: paymentStatus === 'Paid' ? `TXN${Date.now()}${randomInt(1000, 9999)}` : null,
-          date: generateRandomDate(twoYearsAgo, now),
-          createdAt: generateRandomDate(twoYearsAgo, now)
+          transactionId: paymentStatus === 'Paid' ? `TXN${year}${Date.now()}${randomInt(1000, 9999)}` : null,
+          date: donationDate,
+          createdAt: donationDate
         };
 
         donations.push(donation);
         totalDonations++;
+        
+        // Only count paid donations towards yearly total
+        if (paymentStatus === 'Paid') {
+          yearlyTotals[year] += totalAmount;
+        }
+
+        // Log progress
+        if (totalDonations % 50 === 0) {
+          console.log(`   Generated ${totalDonations} donations... Year ${year}: ₹${yearlyTotals[year].toLocaleString('en-IN')}`);
+        }
+
+        // Stop if we've reached the target range
+        if (yearlyTotals[year] >= TARGET_MIN && yearlyTotals[year] <= TARGET_MAX) {
+          console.log(`   ✅ Year ${year} complete: ₹${yearlyTotals[year].toLocaleString('en-IN')} (${donations.filter(d => new Date(d.date).getFullYear() === year && d.paymentStatus === 'Paid').length} paid donations)`);
+          break;
+        }
       }
 
-      if ((i + 1) % 100 === 0) {
-        console.log(`   Generated donations for ${i + 1}/1000 users... (${totalDonations} donations so far)`);
+      // Ensure minimum is met
+      if (yearlyTotals[year] < MIN_YEARLY_AMOUNT) {
+        console.log(`   ⚠️  Year ${year} below minimum: ₹${yearlyTotals[year].toLocaleString('en-IN')}`);
       }
     }
 
@@ -258,6 +344,18 @@ async function seedDatabase() {
     console.log(`   ❌ Failed Donations: ${failedDonations} (${((failedDonations/totalDonationsCount)*100).toFixed(1)}%)`);
     console.log(`   💵 Total Amount Collected: ₹${(totalAmount[0]?.total || 0).toLocaleString('en-IN')}`);
 
+    // Yearly breakdown
+    console.log('\n📅 Yearly Breakdown (Paid Donations Only):');
+    for (const year of years) {
+      const yearDonations = await Donation.countDocuments({ 
+        paymentStatus: 'Paid',
+        date: { 
+          $gte: new Date(year, 0, 1), 
+          $lte: new Date(year, 11, 31, 23, 59, 59) 
+        }
+      });
+      console.log(`   ${year}: ₹${yearlyTotals[year].toLocaleString('en-IN')} (${yearDonations} donations)`);
+    }
     console.log('\n🎉 Database seeding completed successfully!');
     console.log('\n📝 Sample User Credentials:');
     console.log('   Email: (any generated email)');

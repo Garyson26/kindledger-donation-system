@@ -1,7 +1,22 @@
 # Database Seeding Script
 
 ## Overview
-This script generates **1000 dummy users** with authentic Indian names and creates **multiple donation records** for each user, totaling thousands of donation entries with proper user-donation relationships.
+This script generates **1000 dummy users** with authentic Indian names and creates **donation records with strictly controlled yearly amounts**, ensuring proper financial constraints and realistic data distribution.
+
+## ⚠️ Yearly Amount Control
+The script implements **strict yearly donation amount control**:
+
+- **Minimum per year**: ₹2,50,000 (keeps generating until reached)
+- **Target range**: ₹3,00,000 to ₹4,00,000 (stops when reached)
+- **Absolute maximum**: ₹4,00,000 (never exceeds)
+- **Years covered**: Last 3 years (2024, 2025, 2026)
+
+### How It Works
+1. For each year, donations are generated until yearly total reaches minimum ₹2,50,000
+2. Continues generating until total is between ₹3,00,000 to ₹4,00,000
+3. Stops immediately when reaching target range
+4. Never exceeds ₹4,00,000 in any year
+5. Only **paid donations** count towards yearly totals
 
 ## Features
 
@@ -14,13 +29,17 @@ This script generates **1000 dummy users** with authentic Indian names and creat
 - **Registration Dates**: Random dates from the last 2 years
 - **Default Password**: `Password@123` for all users
 
-### 💰 Donation Generation (2-8 donations per user)
-- **Random Dates**: Donations spread across last 2 years with random timestamps
+### 💰 Smart Donation Generation
+- **Intelligent Amount Selection**: 
+  - Favors larger donations (₹50,000) when far from target
+  - Uses medium donations (₹2,000) in mid-range
+  - Switches to small donations (₹300) when close to target
 - **Payment Methods**: UPI, Card, NetBanking (randomly distributed)
 - **Payment Status Distribution**:
-  - 90% Paid (Successful)
-  - 8% Pending
-  - 2% Failed
+  - 95% Paid (Successful)
+  - 4% Pending
+  - 1% Failed
+- **Yearly Distribution**: Donations spread across 3 years with controlled totals
 
 ### 📊 Donation Categories & Amounts
 
@@ -42,7 +61,7 @@ This script generates **1000 dummy users** with authentic Indian names and creat
    - Sanitation facilities
    - Community centers
 
-**Extra Amount**: Each donation includes an extra amount (0-50% of base amount) randomly added
+**Extra Amount**: Each donation includes an extra amount (0-30% of base amount) for realistic variance
 
 ## Usage
 
@@ -62,6 +81,7 @@ node scripts/seedDatabase.js
 
 ```
 🔌 Connecting to MongoDB...
+   Using database: ocean-foundation
 ✅ Connected to MongoDB
 
 🗑️  Clearing existing data...
@@ -78,23 +98,44 @@ node scripts/seedDatabase.js
 💾 Inserting users into database...
 ✅ Created 1000 users
 
-💰 Generating donation records...
-   Generated donations for 100/1000 users... (450 donations so far)
-   Generated donations for 200/1000 users... (900 donations so far)
-   ...
+💰 Generating donation records with yearly amount control...
+   Rules:
+   - Minimum ₹2,50,000 per year
+   - Stop between ₹3,00,000 to ₹4,00,000
+   - Maximum ₹4,00,000 per year
+
+📅 Generating donations for year 2024...
+   Generated 50 donations... Year 2024: ₹1,20,450
+   Generated 100 donations... Year 2024: ₹2,45,300
+   Generated 150 donations... Year 2024: ₹3,15,200
+   ✅ Year 2024 complete: ₹3,15,200 (150 donations)
+
+📅 Generating donations for year 2025...
+   Generated 200 donations... Year 2025: ₹2,10,300
+   Generated 250 donations... Year 2025: ₹3,50,100
+   ✅ Year 2025 complete: ₹3,50,100 (145 donations)
+
+📅 Generating donations for year 2026...
+   Generated 300 donations... Year 2026: ₹1,85,000
+   Generated 350 donations... Year 2026: ₹3,20,500
+   ✅ Year 2026 complete: ₹3,20,500 (138 donations)
+
 💾 Inserting donation records into database...
-   Inserted 1000/5000 donations...
-   Inserted 2000/5000 donations...
-   ...
-✅ Created 5000 donation records
+   Inserted 433/433 donations...
+✅ Created 433 donation records
 
 📊 Database Statistics:
    👥 Total Users: 1000
-   💰 Total Donations: 5000
-   ✅ Paid Donations: 4500 (90.0%)
-   ⏳ Pending Donations: 400 (8.0%)
-   ❌ Failed Donations: 100 (2.0%)
-   💵 Total Amount Collected: ₹45,00,00,000
+   💰 Total Donations: 433
+   ✅ Paid Donations: 411 (95.0%)
+   ⏳ Pending Donations: 17 (4.0%)
+   ❌ Failed Donations: 5 (1.0%)
+   💵 Total Amount Collected: ₹9,85,800
+
+📅 Yearly Breakdown (Paid Donations Only):
+   2024: ₹3,15,200 (150 donations)
+   2025: ₹3,50,100 (145 donations)
+   2026: ₹3,20,500 (116 donations)
 
 🎉 Database seeding completed successfully!
 
@@ -280,12 +321,18 @@ const indianFirstNames = [...]; // Add names
 
 ## Statistics Expected
 
-With 1000 users and 2-8 donations each:
+With yearly amount control (3 years of data):
 
-- **Total Donations**: ~4,000 - 8,000
-- **Average per User**: ~5 donations
-- **Paid Donations**: ~4,500 (90%)
-- **Total Amount**: ₹30-80 Crore (approximate)
+- **Total Donations**: ~400-500 donations
+- **Yearly Amount Range**: ₹3,00,000 - ₹4,00,000 per year
+- **Total 3-Year Amount**: ₹9,00,000 - ₹12,00,000
+- **Paid Donations**: ~95%
+- **Average Donation Size**: Varies based on yearly target proximity
+
+### Yearly Control Logic
+- **Far from target** (< ₹1,00,000): 60% large (₹50,000), 30% medium (₹2,000), 10% small (₹300)
+- **Mid-range** (₹1,00,000 - ₹2,90,000): 30% large, 50% medium, 20% small
+- **Near target** (₹2,90,000 - ₹4,00,000): Mostly small/medium to avoid exceeding limit
 
 ## Related Files
 
