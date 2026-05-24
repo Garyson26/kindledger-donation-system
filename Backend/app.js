@@ -2,8 +2,8 @@ const express = require("express");
 const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
+const helmet = require("helmet");
 const connectDB = require("./config/db");
-const { initializeCleanupScheduler } = require("./services/dataCleanupService");
 
 // Load environment variables
 require("dotenv").config();
@@ -18,35 +18,61 @@ const paymentRoutes = require("./routes/payment");
 
 const app = express();
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // For PayU form data
+// Security headers (BE-HIGH-05)
+app.use(helmet({
+  contentSecurityPolicy: false, // CSP is handled via Vercel headers on the frontend
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+// Body size limits (BE-HIGH-09)
+app.use(express.json({ limit: '32kb' }));
+app.use(express.urlencoded({ extended: true, limit: '32kb' })); // For PayU form data
 app.use(morgan("dev"));
 app.use(cookieParser());
-app.use(cors());
+
+// CORS — allow only configured origins (BE-HIGH-04)
+// In development, localhost ports are allowed automatically.
+const configuredOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
+const localhostPattern = /^http:\/\/localhost(:\d+)?$/;
+
+const restrictiveCors = cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // allow same-origin / server-to-server
+    if (configuredOrigins.includes(origin)) return cb(null, true);
+    if (process.env.NODE_ENV !== 'production' && localhostPattern.test(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+});
+
+// Payment callbacks are browser-redirects from PayU (Origin = payu.in domain) and are
+// secured by hash verification — open CORS is safe and required here.
+const openCors = cors();
 
 // Routes
-app.use("/api/auth", authRoutes);
-app.use("/api/categories", categoryRoutes);
-app.use("/api/donations", donationRoutes);
-app.use("/api/admin", adminRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/payment", paymentRoutes);
-
-// Fallback routes for PayU callbacks (redirect to payment routes)
-// PayU sometimes strips the /api/payment prefix, so we handle both
-app.use("/webhook", paymentRoutes);
-app.use("/success", paymentRoutes);
-app.use("/failure", paymentRoutes);
-app.use("/cancel", paymentRoutes);
-
+app.use("/api/auth", restrictiveCors, authRoutes);
+app.use("/api/categories", restrictiveCors, categoryRoutes);
+app.use("/api/donations", restrictiveCors, donationRoutes);
+app.use("/api/admin", restrictiveCors, adminRoutes);
+app.use("/api/users", restrictiveCors, userRoutes);
+app.use("/api/payment", openCors, paymentRoutes);
 
 // Connect Database
 connectDB();
 
-// Initialize automated data cleanup scheduler
-// This will automatically remove records older than 10 years
-initializeCleanupScheduler();
+// Do NOT initialize node-cron scheduler on Vercel (BE-MED-02) — use Vercel Cron Jobs instead
+// initializeCleanupScheduler() is intentionally omitted for serverless environments
+
+// Generic error handler — never expose raw error messages to clients (BE-MED-08)
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+  });
+});
 
 // Server
 const PORT = process.env.PORT || 5000;

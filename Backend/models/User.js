@@ -12,7 +12,9 @@ const userSchema = new mongoose.Schema({
   resetPasswordCode: { type: String },
   resetPasswordExpires: { type: Date },
   loginOTP: { type: String },
-  loginOTPExpires: { type: Date }
+  loginOTPExpires: { type: Date },
+  loginOTPAttempts: { type: Number, default: 0 },
+  resetPasswordAttempts: { type: Number, default: 0 }
 }, { timestamps: true });
 
 // Indexes for better query performance

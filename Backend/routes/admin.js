@@ -10,6 +10,9 @@ const { triggerManualCleanup, cleanupOldDonations, cleanupInactiveUsers } = requ
 // Protect all admin routes
 router.use(adminAuth);
 
+// Escape user input for use in MongoDB regex (BE-HIGH-08)
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 router.get("/stats", async (req, res) => {
   const users = await User.countDocuments();
   const donations = await Donation.countDocuments();
@@ -36,12 +39,13 @@ router.get("/users", async (req, res) => {
     // Build filter query
     const filter = {};
 
-    // Search filter (name, email, or phone)
+    // Search filter (name, email, or phone) — escaped to prevent ReDoS (BE-HIGH-08)
     if (search) {
+      const safe = escapeRegex(search);
       filter.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } }
+        { name: { $regex: safe, $options: 'i' } },
+        { email: { $regex: safe, $options: 'i' } },
+        { phone: { $regex: safe, $options: 'i' } }
       ];
     }
 
@@ -151,6 +155,11 @@ router.put("/users/:id", async (req, res) => {
   try {
     const { name, email, role, phone, address } = req.body;
 
+    // Prevent admin from demoting themselves (BE-MED-06)
+    if (role && role !== 'admin' && req.user.id === req.params.id) {
+      return res.status(400).json({ error: "Cannot demote your own account" });
+    }
+
     const updateFields = {};
     if (name !== undefined) updateFields.name = name;
     if (email !== undefined) updateFields.email = email;
@@ -204,7 +213,7 @@ router.patch("/users/:id/change-password", async (req, res) => {
   try {
     const { newPassword } = req.body;
 
-    if (!newPassword || newPassword.length < 6) {
+    if (!newPassword || newPassword.length < 10) {
       return res.status(400).json({ error: "Password must be at least 6 characters long" });
     }
 
@@ -229,12 +238,24 @@ router.patch("/users/:id/change-password", async (req, res) => {
 // Delete user (Admin)
 router.delete("/users/:id", async (req, res) => {
   try {
-    const user = await User.findByIdAndDelete(req.params.id);
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
+    // Prevent self-deletion (BE-MED-06)
+    if (req.user.id === req.params.id) {
+      return res.status(400).json({ error: "Cannot delete your own account" });
     }
 
+    // Prevent deleting the last admin (BE-MED-06)
+    const targetUser = await User.findById(req.params.id);
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    if (targetUser.role === 'admin') {
+      const adminCount = await User.countDocuments({ role: 'admin' });
+      if (adminCount <= 1) {
+        return res.status(400).json({ error: "Cannot delete the last admin account" });
+      }
+    }
+
+    await User.findByIdAndDelete(req.params.id);
     res.json({ message: "User deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: err.message });

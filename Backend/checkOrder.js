@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 require('dotenv').config();
 const Category = require('./models/Category');
 
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
     console.log('\n📋 Categories in database (sorted by displayOrder):\n');
     

@@ -5,6 +5,12 @@ const User = require('../models/User');
 const Donation = require('../models/Donation');
 const Category = require('../models/Category');
 
+// Production guard — refuse to run without explicit opt-in (BE-MED-07)
+if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SEED !== 'true') {
+  console.error('Seed script aborted: set NODE_ENV != production AND ALLOW_SEED=true to run');
+  process.exit(1);
+}
+
 // Indian names data
 const indianFirstNames = [
   'Aarav', 'Vivaan', 'Aditya', 'Vihaan', 'Arjun', 'Sai', 'Arnav', 'Ayaan', 'Krishna', 'Ishaan',

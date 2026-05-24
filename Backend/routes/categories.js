@@ -1,9 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const Category = require("../models/Category");
+const adminAuth = require("../middleware/adminAuth");
 
-// Add category with validation
-router.post("/", async (req, res) => {
+// Add category with validation (admin only)
+router.post("/", adminAuth, async (req, res) => {
   try {
     const { name, sortDescription, donationAmount, descriptions } = req.body;
 
@@ -72,8 +73,8 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Reorder categories - MUST be before /:id routes
-router.put("/reorder", async (req, res) => {
+// Reorder categories - MUST be before /:id routes (admin only)
+router.put("/reorder", adminAuth, async (req, res) => {
   try {
     const { categories } = req.body; // Array of { id, displayOrder }
 
@@ -94,8 +95,8 @@ router.put("/reorder", async (req, res) => {
   }
 });
 
-// Update category
-router.put("/:id", async (req, res) => {
+// Update category (admin only)
+router.put("/:id", adminAuth, async (req, res) => {
   try {
     const { name, donationAmount, sortDescription, descriptions } = req.body;
 
@@ -118,8 +119,8 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// Delete category
-router.delete("/:id", async (req, res) => {
+// Delete category (admin only)
+router.delete("/:id", adminAuth, async (req, res) => {
   try {
     const category = await Category.findByIdAndDelete(req.params.id);
     if (!category) return res.status(404).json({ error: "Category not found" });

@@ -3,39 +3,29 @@ const router = express.Router();
 const crypto = require('crypto');
 const payuConfig = require('../config/payu');
 const Donation = require('../models/Donation');
+const Category = require('../models/Category');
 
 // Helper function to generate PayU hash
 function generateHash(data) {
   // Formula: sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
   const hashString = `${payuConfig.MERCHANT_KEY}|${data.txnid}|${data.amount}|${data.productinfo}|${data.firstname}|${data.email}|${data.udf1 || ''}|${data.udf2 || ''}|${data.udf3 || ''}|${data.udf4 || ''}|${data.udf5 || ''}||||||${payuConfig.MERCHANT_SALT}`;
-  console.log('Hash String:', hashString);
-  const hash = crypto
-      .createHash("sha512")
-      .update(hashString)
-      .digest("hex");
-  console.log('Generated Hash:', hash);
-  return hash;
+  return crypto.createHash("sha512").update(hashString).digest("hex");
 }
 
-// Helper function to verify response hash
+// Helper function to verify response hash (timing-safe comparison)
 function verifyHash(data) {
   // Response formula: sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
   const hashString = `${payuConfig.MERCHANT_SALT}|${data.status}||||||${data.udf5 || ''}|${data.udf4 || ''}|${data.udf3 || ''}|${data.udf2 || ''}|${data.udf1 || ''}|${data.email}|${data.firstname}|${data.productinfo}|${data.amount}|${data.txnid}|${payuConfig.MERCHANT_KEY}`;
-  const hash = crypto
-      .createHash("sha512")
-      .update(hashString)
-      .digest("hex");
-  return hash === data.hash;
+  const expected = crypto.createHash("sha512").update(hashString).digest("hex");
+  const received = data.hash || '';
+  if (expected.length !== received.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(received, 'hex'));
 }
 
 // Initiate Payment
 router.post('/initiate', async (req, res) => {
   try {
     const {
-      donationId,
-      amount,
-      baseAmount,
-      extraAmount,
       firstname,
       email,
       phone,
@@ -43,13 +33,14 @@ router.post('/initiate', async (req, res) => {
       category,
       item,
       quantity,
+      extraAmount,
       userId // Optional - will be present if user is logged in
     } = req.body;
 
     // Validation
-    if (!amount || !firstname || !email) {
+    if (!firstname || !email) {
       return res.status(400).json({
-        error: 'Amount, firstname, and email are required'
+        error: 'Firstname and email are required'
       });
     }
 
@@ -58,6 +49,17 @@ router.post('/initiate', async (req, res) => {
         error: 'Category is required'
       });
     }
+
+    // Server-side amount calculation — never trust client-supplied amount (BE-CRIT-01)
+    const dbCategory = await Category.findById(category);
+    if (!dbCategory) {
+      return res.status(400).json({ error: 'Invalid category' });
+    }
+
+    const qty = Math.max(1, parseInt(quantity, 10) || 1);
+    const extra = Math.max(0, Math.min(1_000_000, parseFloat(extraAmount) || 0));
+    const baseAmt = dbCategory.donationAmount * qty;
+    const totalAmt = +(baseAmt + extra).toFixed(2);
 
     // Generate unique transaction ID
     const txnid = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
@@ -70,23 +72,22 @@ router.post('/initiate', async (req, res) => {
       userId: userId || null, // Will be null for guest users
       item: item || productinfo || 'Donation',
       category: category,
-      quantity: parseInt(quantity) || 1,
-      amount: parseFloat(amount),
-      baseAmount: parseFloat(baseAmount) || 0,
-      extraAmount: parseFloat(extraAmount) || 0,
+      quantity: qty,
+      amount: totalAmt,
+      baseAmount: baseAmt,
+      extraAmount: extra,
       status: 'Pending',
       paymentStatus: 'Pending',
       transactionId: txnid
     });
 
     const savedDonation = await newDonation.save();
-    console.log('Donation record created:', savedDonation._id);
 
     // Prepare payment data
     const paymentData = {
       key: payuConfig.MERCHANT_KEY,
       txnid: txnid,
-      amount: parseFloat(amount).toFixed(2),
+      amount: totalAmt.toFixed(2),
       productinfo: productinfo || 'Donation',
       firstname: firstname,
       email: email,
@@ -95,15 +96,14 @@ router.post('/initiate', async (req, res) => {
       furl: payuConfig.FAILURE_URL,
       curl: payuConfig.CANCEL_URL,
       notify_url: payuConfig.NOTIFY_URL, // Webhook for automatic status updates
-      // service_provider: 'payu_paisa',
       // UDF fields for custom data
       udf1: category || '',
       udf2: item || '',
-      udf3: quantity || '1',
+      udf3: qty.toString(),
       udf4: savedDonation._id.toString(), // Use the saved donation ID
       udf5: userId || '' // Store userId for reference
     };
-    console.log('paymentData',paymentData);
+
     // Generate hash
     paymentData.hash = generateHash(paymentData);
 
@@ -119,8 +119,7 @@ router.post('/initiate', async (req, res) => {
   } catch (error) {
     console.error('Payment initiation error:', error);
     res.status(500).json({
-      error: 'Failed to initiate payment',
-      details: error.message
+      error: 'Failed to initiate payment'
     });
   }
 });
@@ -176,7 +175,7 @@ router.post('/success', async (req, res) => {
     }
 
     // Redirect to frontend success page
-    res.redirect(`${payuConfig.FRONTEND_SUCCESS_URL}?txnid=${paymentData.txnid}&amount=${paymentData.amount}&status=${paymentData.status}`);
+    res.redirect(`${payuConfig.FRONTEND_SUCCESS_URL}?txnid=${encodeURIComponent(paymentData.txnid || '')}&amount=${encodeURIComponent(paymentData.amount || '')}&status=${encodeURIComponent(paymentData.status || '')}`);
 
   } catch (error) {
     console.error('Payment success handler error:', error);
@@ -190,15 +189,14 @@ router.post('/failure', async (req, res) => {
   try {
     const paymentData = req.body;
 
-    console.log('========================================');
-    console.log('Payment Failure Callback - Full Request Body:', JSON.stringify(paymentData, null, 2));
-    console.log('Payment Failure Callback - All Keys:', Object.keys(paymentData));
-    console.log('========================================');
+    // Verify hash before mutating any state (BE-CRIT-03)
+    if (!verifyHash(paymentData)) {
+      console.warn('Failure callback: hash mismatch from', req.ip);
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
+    }
 
     // Extract donation ID - try multiple possible field names
     const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
-
-    console.log('Extracted donationId:', donationId);
 
     // Store exact error message from PayU as-is
     const errorMessage = paymentData.error_Message ||
@@ -212,17 +210,14 @@ router.post('/failure', async (req, res) => {
                          paymentData['field[9]'] ||
                          '';
 
-    console.log('Error Message:', errorMessage);
-    console.log('Failure Reason (field9):', failureReason);
-
     // Update donation status if donationId exists
     if (donationId) {
       const updateData = {
         status: 'Rejected',
         paymentStatus: 'Failed',
         transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
-        failureReason: failureReason || errorMessage, // Use failureReason from field9, fallback to errorMessage
-        errorMessage: errorMessage, // Store the exact error message from PayU
+        failureReason: failureReason || errorMessage,
+        errorMessage: errorMessage,
         paymentDetails: {
           mihpayid: paymentData.mihpayid || paymentData.MIHPAYID || null,
           amount: paymentData.amount || paymentData.AMOUNT || 0,
@@ -234,50 +229,26 @@ router.post('/failure', async (req, res) => {
         }
       };
 
-      console.log('Attempting to update donation:', donationId);
-      console.log('Update data:', JSON.stringify(updateData, null, 2));
-
       try {
         const updatedDonation = await Donation.findByIdAndUpdate(
           donationId,
           updateData,
-          { new: true, runValidators: false }
+          { new: true }
         );
 
-        if (updatedDonation) {
-          console.log('✓ Donation successfully marked as failed:', donationId);
-          console.log('Updated donation failureReason:', updatedDonation.failureReason);
-          console.log('Updated donation errorMessage:', updatedDonation.errorMessage);
-        } else {
-          console.error('✗ Donation NOT FOUND in database:', donationId);
-          console.error('Please check if the donation ID is valid');
+        if (!updatedDonation) {
+          console.error('Failure callback: donation not found', donationId);
         }
       } catch (updateError) {
-        console.error('✗ DATABASE UPDATE ERROR:', updateError);
-        console.error('Update error details:', updateError.message);
-        console.error('Update error stack:', updateError.stack);
+        console.error('Failure callback: DB update error', updateError.message);
       }
-    } else {
-      console.error('✗ No donation ID found in payment data. Cannot update database.');
-      console.error('Available UDF fields:', {
-        udf1: paymentData.udf1,
-        udf2: paymentData.udf2,
-        udf3: paymentData.udf3,
-        udf4: paymentData.udf4,
-        udf5: paymentData.udf5
-      });
     }
 
     // Redirect to frontend failure page
-    const redirectUrl = `${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&error=${encodeURIComponent(errorMessage)}`;
-    console.log('Redirecting to:', redirectUrl);
-    res.redirect(redirectUrl);
+    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&error=${encodeURIComponent(errorMessage)}`);
 
   } catch (error) {
-    console.error('========================================');
-    console.error('Payment failure handler CRITICAL ERROR:', error);
-    console.error('Error stack:', error.stack);
-    console.error('========================================');
+    console.error('Payment failure handler error:', error);
     res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
   }
 });
@@ -287,9 +258,11 @@ router.post('/cancel', async (req, res) => {
   try {
     const paymentData = req.body;
 
-    console.log('========================================');
-    console.log('Payment Cancel Callback - Full Request Body:', JSON.stringify(paymentData, null, 2));
-    console.log('========================================');
+    // Verify hash before mutating any state (BE-CRIT-03)
+    if (!verifyHash(paymentData)) {
+      console.warn('Cancel callback: hash mismatch from', req.ip);
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
+    }
 
     // Extract donation ID - try multiple possible field names
     const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
@@ -306,10 +279,6 @@ router.post('/cancel', async (req, res) => {
                            paymentData.field_9 ||
                            paymentData['field[9]'] ||
                            '';
-
-      console.log('Updating donation:', donationId);
-      console.log('Cancel Error Message:', errorMessage);
-      console.log('Cancel Failure Reason:', failureReason);
 
       try {
         const updatedDonation = await Donation.findByIdAndUpdate(
@@ -330,30 +299,22 @@ router.post('/cancel', async (req, res) => {
               error_Message: errorMessage
             }
           },
-          { new: true, runValidators: false }
+          { new: true }
         );
 
-        if (updatedDonation) {
-          console.log('✓ Payment cancelled:', donationId);
-          console.log('Updated donation failureReason:', updatedDonation.failureReason);
-          console.log('Updated donation errorMessage:', updatedDonation.errorMessage);
-        } else {
-          console.error('✗ Donation NOT FOUND in database:', donationId);
+        if (!updatedDonation) {
+          console.error('Cancel callback: donation not found', donationId);
         }
       } catch (updateError) {
-        console.error('✗ DATABASE UPDATE ERROR:', updateError);
-        console.error('Update error details:', updateError.message);
+        console.error('Cancel callback: DB update error', updateError.message);
       }
-    } else {
-      console.error('✗ No donation ID found in payment data');
     }
 
     // Redirect to frontend
-    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${paymentData.txnid || 'N/A'}&status=cancelled`);
+    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&status=cancelled`);
 
   } catch (error) {
     console.error('Payment cancel handler error:', error);
-    console.error('Error stack:', error.stack);
     res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
   }
 });

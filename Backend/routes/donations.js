@@ -55,8 +55,8 @@ router.post("/", optionalAuth, async (req, res) => {
   }
 });
 
-// Get All Donations with dynamic filtering and pagination
-router.get("/", async (req, res) => {
+// Get All Donations with dynamic filtering and pagination (admin only)
+router.get("/", adminAuth, async (req, res) => {
   try {
     const {
       userType,        // 'all', 'registered', 'guest'
@@ -98,38 +98,32 @@ router.get("/", async (req, res) => {
       }
     }
 
+    // Add search filter directly into MongoDB query (BE-MED-01)
+    if (searchQuery && searchQuery.trim()) {
+      const safe = searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { donorName: { $regex: safe, $options: 'i' } },
+        { donorEmail: { $regex: safe, $options: 'i' } },
+      ];
+    }
+
     // Calculate pagination
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
-    // Execute query with filters and sort by createdAt descending (newest first)
-    let query = Donation.find(filter)
+    // MongoDB-side count and pagination — no full-collection load (BE-MED-01)
+    const total = await Donation.countDocuments(filter);
+    const donations = await Donation.find(filter)
       .populate("category")
       .populate("userId", "name email")
-      .sort({ createdAt: -1 }); // Sort by creation date, newest first
-
-    // Search Query Filter (applied after population)
-    let donations = await query;
-
-    if (searchQuery && searchQuery.trim()) {
-      const search = searchQuery.toLowerCase();
-      donations = donations.filter(d => {
-        const name = (d.userId?.name || d.donorName || '').toLowerCase();
-        const email = (d.userId?.email || d.donorEmail || '').toLowerCase();
-        return name.includes(search) || email.includes(search);
-      });
-    }
-
-    // Get total count
-    const total = donations.length;
-
-    // Apply pagination to the filtered results
-    const paginatedDonations = donations.slice(skip, skip + limitNum);
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
 
     // Return paginated response
     res.json({
-      donations: paginatedDonations,
+      donations,
       pagination: {
         total,
         page: pageNum,
@@ -138,63 +132,48 @@ router.get("/", async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Failed to fetch donations" });
   }
 });
 
-// Get Filter Options - Returns unique values for filters
-router.get("/filter-options", async (req, res) => {
+// Get Filter Options - Returns unique values for filters (admin only)
+// Uses aggregation to avoid loading entire collection (BE-MED-01)
+router.get("/filter-options", adminAuth, async (req, res) => {
   try {
-    // Get all donations to extract unique values
-    const donations = await Donation.find().sort({ createdAt: -1 });
+    const [statusAgg, dateAgg, countAgg] = await Promise.all([
+      Donation.distinct("paymentStatus"),
+      Donation.aggregate([
+        { $group: { _id: null, min: { $min: "$date" }, max: { $max: "$date" } } }
+      ]),
+      Donation.aggregate([
+        { $group: { _id: "$paymentStatus", count: { $sum: 1 } } }
+      ]),
+    ]);
 
-    // Get unique payment statuses
-    const paymentStatuses = [...new Set(
-      donations
-        .map(d => d.paymentStatus)
-        .filter(status => status)
-    )];
+    const registeredCount = await Donation.countDocuments({ userId: { $ne: null } });
+    const guestCount = await Donation.countDocuments({ userId: null });
+    const total = registeredCount + guestCount;
 
-    // Check if we have registered and guest users
-    const hasRegistered = donations.some(d => d.userId);
-    const hasGuest = donations.some(d => !d.userId);
     const userTypes = [];
-    if (hasRegistered) userTypes.push('registered');
-    if (hasGuest) userTypes.push('guest');
+    if (registeredCount > 0) userTypes.push('registered');
+    if (guestCount > 0) userTypes.push('guest');
 
-    // Get date range
-    const dates = donations
-      .map(d => new Date(d.date))
-      .filter(date => !isNaN(date.getTime()));
+    const byStatus = {};
+    countAgg.forEach(({ _id, count }) => { if (_id) byStatus[_id] = count; });
 
-    const minDate = dates.length > 0 ? new Date(Math.min(...dates)) : null;
-    const maxDate = dates.length > 0 ? new Date(Math.max(...dates)) : null;
-
-    // Get counts for each option
-    const registeredCount = donations.filter(d => d.userId).length;
-    const guestCount = donations.filter(d => !d.userId).length;
-
-    const statusCounts = {};
-    paymentStatuses.forEach(status => {
-      statusCounts[status] = donations.filter(d => d.paymentStatus === status).length;
-    });
+    const dateRange = dateAgg[0] || { min: null, max: null };
 
     res.json({
-      paymentStatuses,
+      paymentStatuses: statusAgg.filter(Boolean),
       userTypes,
       dateRange: {
-        min: minDate ? minDate.toISOString().split('T')[0] : null,
-        max: maxDate ? maxDate.toISOString().split('T')[0] : null
+        min: dateRange.min ? new Date(dateRange.min).toISOString().split('T')[0] : null,
+        max: dateRange.max ? new Date(dateRange.max).toISOString().split('T')[0] : null,
       },
-      counts: {
-        total: donations.length,
-        registered: registeredCount,
-        guest: guestCount,
-        byStatus: statusCounts
-      }
+      counts: { total, registered: registeredCount, guest: guestCount, byStatus },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Failed to fetch filter options" });
   }
 });
 
@@ -263,8 +242,8 @@ router.get("/user/:userId", authMiddleware, async (req, res) => {
   }
 });
 
-// Update Donation Status
-router.put("/:id", async (req, res) => {
+// Update Donation Status (admin only)
+router.put("/:id", adminAuth, async (req, res) => {
   try {
     const { status } = req.body;
     const donation = await Donation.findByIdAndUpdate(
@@ -279,21 +258,28 @@ router.put("/:id", async (req, res) => {
 });
 
 
-// Get Single Donation Details
-router.get("/:id", async (req, res) => {
+// Get Single Donation Details (auth required; owner or admin)
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const donation = await Donation.findById(req.params.id)
       .populate("category", "name description price")
-      .populate("userId", "name email phone role");
+      .populate("userId", "name email");
 
     if (!donation) {
       return res.status(404).json({ error: "Donation not found" });
     }
 
+    const ownerId = donation.userId?._id?.toString() || null;
+    const isOwner = ownerId && ownerId === req.user.id;
+    const isAdmin = req.user.role === 'admin';
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
     res.json(donation);
   } catch (err) {
     console.error("Error fetching donation details:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Failed to fetch donation" });
   }
 });
 

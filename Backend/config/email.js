@@ -1,5 +1,15 @@
 const nodemailer = require('nodemailer');
 
+// HTML escape helper to prevent injection in email templates (BE-MED-05)
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // Email configuration
 const createTransporter = () => {
   // For Gmail service
@@ -55,7 +65,7 @@ const sendVerificationEmail = async (email, code, userName = 'User') => {
               <h1>Password Reset Request</h1>
             </div>
             <div class="content">
-              <p>Hi ${userName},</p>
+              <p>Hi ${escapeHtml(userName)},</p>
               <p>We received a request to reset your password for your For Ocean Foundation account.</p>
               
               <div class="code-box">
@@ -134,7 +144,7 @@ async function sendLoginOTP(email, otp, userName = 'User') {
               <h1>🔐 Login Verification</h1>
             </div>
             <div class="content">
-              <p>Hi ${userName},</p>
+              <p>Hi ${escapeHtml(userName)},</p>
               <p>Someone is trying to log in to your For Ocean Foundation account. To continue, please use this verification code:</p>
               
               <div class="code-box">
@@ -200,7 +210,7 @@ async function sendSignupOTP(email, otp, userName = 'User') {
               <h1>🌊 Welcome to For Ocean Foundation!</h1>
             </div>
             <div class="content">
-              <p>Hi ${userName},</p>
+              <p>Hi ${escapeHtml(userName)},</p>
               <p>Thank you for joining For Ocean Foundation! To complete your registration, please verify your email address with this code:</p>
               
               <div class="code-box">

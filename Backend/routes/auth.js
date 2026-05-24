@@ -2,19 +2,30 @@ const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
 const User = require("../models/User");
 const PendingSignup = require("../models/PendingSignup");
 const authMiddleware = require("../middleware/authMiddleware");
 const { JWT_SECRET } = require("../config/jwt");
 const { sendVerificationEmail, sendLoginOTP, sendSignupOTP } = require("../config/email");
 
-// Helper function to generate random 6-digit code
+// Helper function to generate cryptographically secure 6-digit OTP (BE-HIGH-02)
 const generateVerificationCode = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 1000000).toString();
 };
 
+// Rate limiter for auth endpoints (BE-HIGH-03)
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
 // Signup - Step 1: Register user and send OTP
-router.post("/signup", async (req, res) => {
+router.post("/signup", authLimiter, async (req, res) => {
   try {
     const { name, email, password, role, adminKey } = req.body;
 
@@ -38,7 +49,7 @@ router.post("/signup", async (req, res) => {
     }
 
     // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const otpExpiry = new Date();
     otpExpiry.setMinutes(otpExpiry.getMinutes() + 10); // 10 minutes expiry
 
@@ -165,7 +176,7 @@ router.post("/signup/resend-otp", async (req, res) => {
     }
 
     // Generate new OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const otpExpiry = new Date();
     otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);
 
@@ -188,7 +199,7 @@ router.post("/signup/resend-otp", async (req, res) => {
 });
 
 // Login - Step 1: Verify credentials and send OTP
-router.post("/login", async (req, res) => {
+router.post("/login", authLimiter, async (req, res) => {
   const { email, password } = req.body;
   try {
     // Check if there's a pending signup for this email (not yet verified)
@@ -198,7 +209,7 @@ router.post("/login", async (req, res) => {
       const isMatch = await bcrypt.compare(password, pendingSignup.password);
       if (isMatch) {
         // Resend signup OTP
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = crypto.randomInt(100000, 1000000).toString();
         const otpExpiry = new Date();
         otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);
 
@@ -234,7 +245,7 @@ router.post("/login", async (req, res) => {
     }
 
     // Generate 6-digit login OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const otpExpiry = new Date();
     otpExpiry.setMinutes(otpExpiry.getMinutes() + 10); // 10 minutes expiry
 
@@ -262,7 +273,7 @@ router.post("/login", async (req, res) => {
 });
 
 // Login - Step 2: Verify OTP and complete login
-router.post("/login/verify-otp", async (req, res) => {
+router.post("/login/verify-otp", authLimiter, async (req, res) => {
   const { email, otp } = req.body;
   try {
     if (!email || !otp) {
@@ -271,11 +282,22 @@ router.post("/login/verify-otp", async (req, res) => {
 
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(400).json({ error: "Invalid credentials" });
+    }
+
+    // Enforce OTP attempt limit (BE-HIGH-02)
+    if ((user.loginOTPAttempts || 0) >= 5) {
+      user.loginOTP = undefined;
+      user.loginOTPExpires = undefined;
+      user.loginOTPAttempts = 0;
+      await user.save();
+      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
     }
 
     // Check OTP
     if (!user.loginOTP || user.loginOTP !== otp) {
+      user.loginOTPAttempts = (user.loginOTPAttempts || 0) + 1;
+      await user.save();
       return res.status(400).json({ error: "Invalid OTP" });
     }
 
@@ -284,9 +306,10 @@ router.post("/login/verify-otp", async (req, res) => {
       return res.status(400).json({ error: "OTP has expired. Please login again." });
     }
 
-    // Clear OTP
+    // Clear OTP and attempts
     user.loginOTP = undefined;
     user.loginOTPExpires = undefined;
+    user.loginOTPAttempts = 0;
     await user.save();
 
     // Generate token
@@ -299,12 +322,12 @@ router.post("/login/verify-otp", async (req, res) => {
     });
   } catch (err) {
     console.error("OTP verification error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "An error occurred. Please try again." });
   }
 });
 
 // Resend Login OTP
-router.post("/login/resend-otp", async (req, res) => {
+router.post("/login/resend-otp", authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -318,7 +341,7 @@ router.post("/login/resend-otp", async (req, res) => {
     }
 
     // Generate new OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const otpExpiry = new Date();
     otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);
 
@@ -341,7 +364,8 @@ router.post("/login/resend-otp", async (req, res) => {
 });
 
 // Request Password Reset (sends verification code to email)
-router.post("/forgot-password/request", async (req, res) => {
+// Generic response regardless of email existence to prevent user enumeration (BE-HIGH-06)
+router.post("/forgot-password/request", authLimiter, async (req, res) => {
   const { email } = req.body;
 
   try {
@@ -350,32 +374,29 @@ router.post("/forgot-password/request", async (req, res) => {
     }
 
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: "No account found with this email address" });
+    if (user) {
+      // Generate 6-digit verification code
+      const verificationCode = generateVerificationCode();
+
+      // Set expiry to 15 minutes from now
+      const expiryTime = new Date();
+      expiryTime.setMinutes(expiryTime.getMinutes() + 15);
+
+      user.resetPasswordCode = verificationCode;
+      user.resetPasswordExpires = expiryTime;
+      user.resetPasswordAttempts = 0;
+      await user.save();
+
+      // Fire-and-forget — don't let email errors reveal user existence
+      sendVerificationEmail(email, verificationCode, user.name).catch(err => {
+        console.error("Forgot-password email error:", err.message);
+      });
     }
 
-    // Generate 6-digit verification code
-    const verificationCode = generateVerificationCode();
-
-    // Set expiry to 15 minutes from now
-    const expiryTime = new Date();
-    expiryTime.setMinutes(expiryTime.getMinutes() + 15);
-
-    // Save code and expiry to user
-    user.resetPasswordCode = verificationCode;
-    user.resetPasswordExpires = expiryTime;
-    await user.save();
-
-    // Send email
-    const emailResult = await sendVerificationEmail(email, verificationCode, user.name);
-
-    if (!emailResult.success) {
-      return res.status(500).json({ error: "Failed to send verification email. Please try again." });
-    }
-
+    // Always return the same response (BE-HIGH-06)
     res.json({
-      message: "Verification code sent to your email",
-      email: email // Return email for frontend to display
+      message: "If an account exists for this email, a verification code has been sent.",
+      email: email
     });
   } catch (err) {
     console.error("Forgot password request error:", err);
@@ -430,8 +451,8 @@ router.post("/forgot-password/reset", async (req, res) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: "Password must be at least 6 characters long" });
+    if (newPassword.length < 10) {
+      return res.status(400).json({ error: "Password must be at least 10 characters long" });
     }
 
     const user = await User.findOne({ email });
