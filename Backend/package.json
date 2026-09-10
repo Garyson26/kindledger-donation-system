@@ -7,7 +7,19 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "seed": "node scripts/seedDatabase.js"
+    "seed": "node scripts/seedDatabase.js",
+    "db:generate": "prisma generate",
+    "db:migrate": "node db/require-mysql-version.js && prisma migrate deploy",
+    "db:validate": "prisma validate",
+    "db:seed": "node db/require-mysql-version.js && node db/seed.js",
+    "test:schema": "node --test test/schema.test.js",
+    "db:check-server": "node db/require-mysql-version.js",
+    "prisma": "node db/no-migrate-dev.js",
+    "migrate": "node db/no-migrate-dev.js",
+    "migrate:dev": "node db/no-migrate-dev.js",
+    "prisma:migrate:dev": "node db/no-migrate-dev.js",
+    "db:check-drift": "node db/check-drift.js",
+    "test:guard": "node --test test/server-guard.test.js"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +30,7 @@
   },
   "type": "commonjs",
   "dependencies": {
+    "@prisma/client": "^6.1.0",
     "bcryptjs": "^3.0.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -37,6 +50,15 @@
     "uuid": "^8.3.2"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.10",
+    "prisma": "^6.1.0"
+  },
+  "//scripts": {
+    "seed": "LEGACY MongoDB seeder. Still the production path until the Phase 4 cutover; do not repoint it at MySQL.",
+    "db:seed": "MySQL demo seeder. Destructive - requires --i-understand-this-drops-the-database.",
+    "db:migrate": "Always migrate deploy, never migrate dev. Runs the server compatibility guard first.",
+    "db:check-server": "Refuses MySQL < 8.0.16 and MariaDB. See db/require-mysql-version.js.",
+    "migrate / migrate:dev / prisma": "Deliberate dead ends. See db/no-migrate-dev.js and CONTRIBUTING.md.",
+    "test:schema": "Needs a live MySQL at DATABASE_URL with the schema applied."
   }
 }

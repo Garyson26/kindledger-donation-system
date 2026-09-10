@@ -1,4 +1,31 @@
-# Internal documentation kept out of version control.
+# =============================================================================
+# Secrets
+# =============================================================================
+# The root .env configures the docker compose stack and holds the MySQL
+# passwords, the JWT secret and the PayU salt. Never commit it.
+.env
+.env.*
+!.env.example
+
+# TLS material for the Nginx container.
+docker/nginx/certs/*
+!docker/nginx/certs/.gitkeep
+
+# =============================================================================
+# Internal documentation
+# =============================================================================
 # docs/SECURITY-REVIEW.md contains exploit-level detail that should not live in
 # the repository; see the README's security section for the summary instead.
-docs/
+#
+# Note this is `docs/*` and not `docs/` - git cannot re-include a file whose
+# parent directory is itself excluded, and decisions.md must stay tracked.
+docs/*
+
+# Architectural decision records ARE tracked: they explain why the schema and
+# topology look the way they do, and a future contributor needs them.
+!docs/decisions.md
+
+# =============================================================================
+# Node
+# =============================================================================
+node_modules/
