@@ -1056,3 +1056,496 @@ Practical measures for Phase 3, in order of value:
 3. Prefix a leading `=`, `+`, `-` or `@` with `'` in any CSV export.
 4. Never interpolate them into an HTML email without passing through the
    existing `escapeHtml()` helper.
+
+---
+
+## ADR-028 — Deployments are blocked by commit authorship, not by quota
+
+**Status** Accepted — incident record, J1
+
+Every deployment of a commit authored during this engagement is `BLOCKED` and
+never built. The production deployment of `e3640b3` — the merge carrying the
+SEC-01 fix — is among them, so **the fix has never served traffic**.
+
+**The stated reason.** `dpl_2xDAuZ5MRkkWBFUary5EjawNoNWT` carries
+`errorLink: /docs/deployments/troubleshoot-project-collaboration#account-configuration`.
+The operative rules on that page, verbatim:
+
+> The Hobby Plan does not support collaboration for private repositories. If
+> you need collaboration, upgrade to the Pro Plan.
+
+> To deploy commits under a Hobby team, the commit author must be the owner of
+> the Hobby team containing the Vercel project connected to the Git repository.
+> This is verified by comparing the Login Connections Hobby team's owner with
+> the commit author.
+
+> Note: Collaboration is free for public repositories.
+
+**It is not a quota, and not commercial-use enforcement.** The evidence is the
+correlation between commit author and deployment state:
+
+| Commit | Author email | State |
+|---|---|---|
+| `e3640b3`, `058c769`, `4f3b7ec`, `728ee22`, `fdd94fa` | `garyson.pereira@oakbrookfinance.com` | BLOCKED |
+| `b5b43c8`, `938e164` | `125772582+Garyson26@users.noreply.github.com` | READY |
+| `bacd6d9` (private era) | `viraj.470@gmail.com` | BLOCKED |
+| `4ac1fe4` (**public** era) | `viraj.470@gmail.com` | **READY** |
+
+The last row settles it. The *same author email* deployed successfully while
+the repository was public and is blocked now that it is private — exactly what
+"collaboration is free for public repositories" predicts. Renovate and
+Dependabot deploy because their bot commits are separately permitted, which is
+what produced the pattern of "our commits blocked, bot commits READY".
+
+The Vercel team is `wiestell's projects` (Hobby), owner
+`developer@wiestell.com`. `garyson.pereira@oakbrookfinance.com` is not that
+identity, so no commit authored with it can deploy while the repo is private.
+
+**This was caused by the mechanism used to land the work, not by the work.**
+The three approved branches were merged locally and pushed, which made the tip
+commits author-attributed to this engagement's git identity. `b5b43c8` — the
+last deployment that did serve — was a merge commit created by the **GitHub web
+UI**, and therefore authored by the repository owner.
+
+**Remedies, in ascending cost.** Not attempted; this is a plan and identity
+decision for the repository owner:
+
+1. **Merge through the GitHub web UI.** The resulting merge commit is authored
+   by the owner and deploys, which is empirically how `b5b43c8` succeeded. Cheapest,
+   no plan change, no history rewrite. Note the parent commits stay as they are;
+   Vercel evaluates the deployed tip.
+2. **Register the identity.** Add `garyson.pereira@oakbrookfinance.com` as a
+   verified email on both the GitHub account and the Vercel account, then
+   redeploy.
+3. **Upgrade to Pro**, which supports collaboration on private repositories.
+
+**Standing consequence.** Until one of those is done, nothing authored by this
+engagement can reach production, and any commit pushed will produce another
+blocked deployment. Landing future work therefore has to go through the owner's
+identity, not a local merge and push.
+
+---
+
+## ADR-029 — The licence state on main is a three-way contradiction
+
+**Status** Accepted — **DEF-01 blocks publication**
+
+`main` currently asserts three different things:
+
+| Artefact | Says |
+|---|---|
+| `Backend/package.json` | `"license": "ISC"` |
+| `LICENSE` | the full GNU GPL v3 text |
+| `README.md` | licensing is undecided, do not rely on it |
+
+That is worse than any single answer would be. A reader who checks only the
+manifest concludes ISC and a permissive grant; one who checks only `LICENSE`
+concludes GPL-3.0 and copyleft. `LICENSE` is the artefact courts and
+distribution tooling treat as operative, so the effective claim is the one the
+project has least deliberately made.
+
+The README at least records the contradiction openly rather than papering over
+it, which is why it stands as the interim state. But it is interim.
+
+**Requirement.** `LICENSE` must be aligned with whatever DEF-01 resolves to,
+in the same change that sets the manifests. All three artefacts move together
+or none of them do.
+
+**DEF-01 blocks publication.** The repository must not be made public until the
+licence and the attribution question (ADR-020) are decided together. Publishing
+with the current contradiction would grant recipients whatever `LICENSE` says
+while the project believes something else — and a GPL or AGPL grant to a
+recipient cannot be withdrawn.
+
+---
+
+## ADR-030 — Phase 6 history scrub: expanded scope
+
+**Status** Accepted — supersedes the earlier scrub list
+
+The repository **was public**, confirmed by Vercel's per-deployment
+`githubRepoVisibility` at `1e661f8`, `af96148` and `4ac1fe4` — all three
+ancestors of today's `main`. It went private between `89124d6` and `bdbb729`.
+
+The Phase 6 pre-publication scrub previously covered `Frontend/.env` and
+`for_ocean_security_review.md`. Both of those turned out to matter **less** than
+recorded, and something absent from the list matters **more**.
+
+**Add to the scrub list:**
+
+1. **The hardcoded JWT secret fallback in `Backend/config/jwt.js`.** The
+   public-era tree contained:
+
+   ```js
+   const JWT_SECRET = process.env.JWT_SECRET || "smart_donation_secret_key_2025";
+   ```
+
+   This is the most serious thing in the public-era tree and **was never in
+   SEC-17**. If production ran with `JWT_SECRET` unset at any point during the
+   public window, any reader of GitHub could mint a valid admin token.
+
+   Current exposure is almost certainly nil, established without reading the
+   secret: the literal is 30 characters, today's `config/jwt.js` throws unless
+   `JWT_SECRET` is at least 32, and production loads `app.js` successfully — so
+   the configured secret is set, long enough, and therefore not this string.
+
+2. **The `Password@123` seeder value**, public for ~1000 demo accounts. Whether
+   any such account exists in production is directly checkable and is tracked
+   as an incident item, not a scrub item.
+
+**Revised assessment of the original two items:**
+
+- `Frontend/.env` **was** public, but contained only `VITE_API_URL`, a public
+  hostname. No secret was exposed. It remains a scrub item on principle — a
+  committed `.env` invites a future commit that does hold a secret — not
+  because of what it contained.
+- `for_ocean_security_review.md` was **never public**. It entered at `bacd6d9`,
+  a private-era commit. SEC-17's exploit-roadmap concern did not materialise.
+
+Also verified clean across the entire public-era tree: no hardcoded MongoDB
+URI, no PayU merchant key or salt, no email credentials. All were read from the
+environment even then.
+
+**Scrubbing history does not undo public exposure.** Anyone who cloned during
+the window keeps everything they cloned, and GitHub forks and caches may retain
+it. The scrub prevents **re-exposure at publication**; it is not remediation for
+what was already visible. Remediation for the JWT fallback is rotation
+(J4) plus the admin-account enumeration (J3), because what persists from a
+forged token is not the token but whatever it was used to create.
+
+---
+
+## ADR-031 — The Phase 4 rollback window closes at the first real donation into MySQL
+
+**Status** Accepted — **design constraint on Phase 4**, not a note
+
+Once the ETL has run and new donations begin landing in MySQL, reverting to
+the MongoDB deployment **loses every donation written after the freeze**. The
+MongoDB dataset is frozen at cutover and has no knowledge of anything the
+MySQL application accepted afterwards.
+
+So the rollback window does not stay open for a settling-in period. **It closes
+at the first real donation into MySQL.** After that the only path is forward:
+any defect found later has to be fixed in place, on live data, with no
+retreat.
+
+Three consequences that have to be built into the runbook when it is drafted:
+
+1. **All verification that could trigger a rollback must complete INSIDE the
+   freeze**, before donations are accepted. Verification deferred to "after
+   we're live" is verification whose only possible outcome is a forward fix,
+   which makes it something other than verification.
+2. **The freeze length is driven by verification depth, not by ETL runtime.**
+   The instinct is to size the window by how long the data takes to move. That
+   is the wrong variable, and it is usually the smaller one.
+3. **There must be an explicit, named go/no-go decision point** at the end of
+   the freeze, before donations are re-enabled — with a person accountable for
+   the call and a written list of what must be true for it to be "go".
+
+Note also that the Vercel commit-authorship block (ADR-028) stops being
+relevant at cutover rather than being solved by it: the deployment target
+becomes the Docker stack, not Vercel serverless. It must not be treated as
+resolved on those grounds, because the frontend stays on Vercel.
+
+The runbook itself is deliberately not drafted here. This records the
+constraint that shapes it.
+
+---
+
+## ADR-032 — SEC-09 upgraded from inferred to OBSERVED
+
+**Status** Accepted — evidence upgrade, finding unchanged
+
+SEC-09 (donor PII written to application logs) was originally derived from
+reading the code. It is now **observed in production**, with the log line to
+prove it.
+
+While probing the live backend, this appeared in Vercel's runtime logs for the
+production deployment:
+
+```
+Payment Success Callback - Full Request Body: {
+  "status": "failure",
+  "txnid": "PROBE",
+  "amount": "1.00",
+  "hash": "deadbeef",
+  "udf4": "000000000000000000000000"
+}
+```
+
+That was a synthetic probe carrying no real data. The point is the mechanism:
+`Backend/routes/payment.js` logs `JSON.stringify(paymentData, null, 2)` for
+**every** call to `/api/payment/success`. For a real donation the same line
+therefore contains `firstname`, `email` and `phone` alongside the payment
+metadata.
+
+**So it is now confirmed that donor PII reaches Vercel's log retention on
+every real transaction.** Not "would", not "appears to" — it does, and the
+retained log is a second copy of donor personal data outside the database,
+with its own access-control surface and its own retention period, neither of
+which anyone has reviewed.
+
+Two things this changes:
+
+- The severity reasoning no longer depends on reading the code correctly. It
+  is a fact about the running system.
+- It is now a data-protection question with a concrete artefact behind it. The
+  DPDP Act considerations noted in the security review's appendix B become
+  answerable rather than hypothetical: there *is* PII in the logs, the volume
+  is one record per donation, and the retention is whatever Vercel's plan
+  provides.
+
+Unchanged: the fix is to delete the PII log statements and, where a payment
+audit trail is genuinely wanted, log only `txnid`, `mihpayid`, `status` and
+the donation id. The `pino` redaction approach in the original write-up still
+stands.
+
+Also observed in the same logs, and worth recording because it corroborates
+ADR-028 from a different direction: the only error group in seven days was
+this probe's own `Hash verification failed`, and total traffic on the
+production deployment for the window was 18 500s, one 302 and one 204 - all
+of them mine. That is consistent with the planned-maintenance context, and it
+is why the onset of the Atlas credential failure could not be dated from
+Vercel's logs.
+
+---
+
+## ADR-033 — Duplicate index declarations in the Mongoose models
+
+**Status** Accepted — **must not be reintroduced in Phase 3**
+
+Every cold start of the production backend emits three Mongoose warnings:
+
+```
+[MONGOOSE] Warning: Duplicate schema index on {"email":1} found ...
+[MONGOOSE] Warning: Duplicate schema index on {"createdAt":1} found ...
+[MONGOOSE] Warning: Duplicate schema index on {"email":1} found ...
+```
+
+Observed in the production runtime logs. The cause is the same index being
+declared twice in three places:
+
+| Model | Inline declaration | Second declaration |
+|---|---|---|
+| `User` | `email: { unique: true }` (line 5) | `userSchema.index({ email: 1 }, { unique: true })` (line 21) |
+| `PendingSignup` | `email: { unique: true }` (line 5) | `pendingSignupSchema.index({ email: 1 })` (line 15) |
+| `PendingSignup` | `createdAt: { expires: 86400 }` (line 10) | `pendingSignupSchema.index({ createdAt: 1 })` (line 14) |
+
+Mostly this is noise. **One of the three is not.**
+
+`PendingSignup.createdAt` carries `expires: 86400`, which is how Mongoose
+declares MongoDB's **TTL index** — the mechanism that auto-deletes abandoned
+signups after 24 hours. It is then declared again as a plain
+`index({ createdAt: 1 })`. Two declarations of the same key path where one is
+a TTL index and the other is not is precisely the shape that can leave the
+collection with the wrong one, and if the plain index wins, **the 24-hour
+auto-delete silently stops happening** and abandoned signups accumulate
+indefinitely, each holding a name, an email and a bcrypt hash.
+
+Whether that has happened in production is directly checkable and has not
+been checked, because the database is unreachable:
+
+```js
+db.pendingsignups.getIndexes()   // look for expireAfterSeconds: 86400
+db.pendingsignups.countDocuments({ createdAt: { $lt: new Date(Date.now() - 86400000) } })
+```
+
+A non-zero second result means the TTL is not working. Worth folding into the
+J3 database session, since it needs the same access and is read-only.
+
+**This dies at migration regardless.** `db/schema.sql` declares each index
+exactly once, and MySQL has no TTL index at all — `pending_signups.expires_at`
+plus the application cron replaces it (ADR-001, and the note in the DDL). So
+no fix is proposed for the Mongoose models: they have weeks to live.
+
+**Recorded so Phase 3 does not reintroduce the pattern.** When the models are
+rewritten against Prisma, indexes are declared in `db/schema.sql` and mirrored
+in `schema.prisma` — once each, in one place. The failure mode to avoid is
+declaring an index inline on a field *and* again in a block attribute, which
+Prisma permits as readily as Mongoose does. The schema conformance tests
+assert index presence but do **not** currently assert index *uniqueness of
+declaration*, so nothing would catch a reintroduction automatically.
+
+---
+
+## ADR-034 — A correct reset code at /verify must not clear the attempt counter
+
+**Status** Accepted — control clarification, not in the original SEC-02 description
+
+SEC-02 specified that `resetPasswordAttempts` must be incremented on a wrong
+code and the code voided at five attempts. It did not say what happens to the
+counter on a **correct** code at `/forgot-password/verify`, and that gap
+matters.
+
+`/verify` only checks the code; `/reset` still has to accept it afterwards. So
+if a correct guess at `/verify` reset the counter to zero, an attacker who
+happened to hit the right code would be handed a fresh budget of five
+attempts at `/reset` — and, worse, could alternate between the two endpoints
+to keep the budget topped up indefinitely. The 6-digit space would be
+brute-forceable again through a longer path.
+
+The implemented behaviour is correct: the counter is reset **only** on a
+successful password change in `/reset`. `/verify` never clears it. That was
+implicit in the code and is now asserted:
+
+```
+SEC-02 the attempt counter is NOT reset by a correct code at /verify
+```
+
+in `Backend/test/auth-reset.test.js`, which seeds a user at three attempts,
+submits the correct code to `/verify`, expects 200, and asserts the counter is
+still three.
+
+Recorded because it is a genuine addition rather than a transfer of an
+existing requirement, and because the natural "tidy up" instinct during the
+Phase 3 rewrite — clear the counter when the code verifies, it is obviously
+valid — would silently reopen the attack. The test is the guard; this is the
+reason it exists.
+
+---
+
+## ADR-035 — The react-router advisories are unreachable; the v7 major defers to Phase 5
+
+**Status** Accepted — reachability assessed, not deferred on convenience
+
+`npm audit` reports two moderate advisories against `react-router` /
+`react-router-dom`, and unlike vite these ship in the production bundle. They
+were assessed the same way `uuid` became a deletion and vite a shrug: by
+finding the sink, not by reading the severity.
+
+### GHSA-wrjc-x8rr-h8h6 - open redirect via backslash in `<Link>` and `useNavigate`
+
+Exploiting it needs an attacker-influenced value reaching the **start** of a
+navigation target, so a backslash can make the router treat it as external.
+Every navigation target in `Frontend/src` was enumerated:
+
+- **`<Link>` and `<Navigate>`: zero dynamic targets.** There is no `to={...}`
+  anywhere in the codebase. All 16 distinct values are literals:
+  `/`, `/categories`, `/donate`, `/donations`, `/login`, `/signup`,
+  `/profile`, `/my-donations`, `/change-password`, `/forgot-password`,
+  `/privacy`, `/terms`, `/admin/dashboard`, `/admin/users`, `/admin/charts`,
+  `/admin/categories-list`.
+- **`navigate()`: 29 call sites, all safe.** Hardcoded literals, `navigate(-1)`,
+  or a fixed prefix with a server-generated Mongo ObjectId interpolated -
+  `/donations/${d._id}`, `/my-donations/${donation._id}`,
+  `/admin/users/${user._id}/donations`, `/admin/edit-category/${category._id}`.
+  Two things make those safe: an ObjectId is 24 hex characters generated
+  server-side, and the interpolation is never at the *start* of the string,
+  which is what the attack requires.
+- **`useSearchParams` is used in exactly two files**, `PaymentSuccess.jsx` and
+  `PaymentFailure.jsx`, and only to *read and display* `txnid`, `amount`,
+  `status` and `error`. Their own `navigate()` calls are hardcoded
+  (`/my-donations`, `/categories`, `/donate`). No query parameter reaches a
+  navigation target.
+- **`location.state`** is read only to pre-select a category or prefill a form,
+  never as a target.
+- **`window.location.href`** is assigned in 6 places, every one a hardcoded
+  `/login` or `/signup`.
+
+**No reachable sink. UNREACHABLE.**
+
+### GHSA-337j-9hxr-rhxg - constructor injection via `deserializeErrors()` in SSR hydration
+
+Requires server-side rendering and hydration. This is a pure client-side SPA:
+Vite build, `BrowserRouter`, no SSR anywhere. **Structurally inapplicable.**
+
+### Decision
+
+Defer `react-router-dom@7` to Phase 5, where the frontend is being reworked
+anyway. It is a breaking major for a pair of advisories with no reachable sink,
+and taking it now would mean revalidating every route and guard for no security
+gain.
+
+**What would change this.** The open redirect becomes live the moment any
+navigation target starts with a value the user influences. The obvious future
+candidates are a post-login `returnTo` or `next` query parameter, or a
+`from`-style redirect after signup - `DonationForm.jsx` already passes
+`{ state: { from: "/donate" } }`, and the natural next step of honouring a
+`from` **query parameter** instead of state would create exactly the sink this
+advisory needs. If that pattern is introduced before Phase 5, the upgrade stops
+being deferrable.
+
+---
+
+## ADR-036 — The prisma advisory chain has no published fix; leaving it
+
+**Status** Accepted — no action available, monitoring instead
+
+The three Backend highs are one advisory, GHSA-ggr8-5vv4-36mx, counted down a
+chain: `prisma` -> `@prisma/config` -> `deepmerge-ts`. Stack exhaustion when
+merging recursive object graphs.
+
+**`npm audit fix` is a no-op here, and npm's own advice is misleading.** The
+report says "fix available via `npm audit fix`". It was run: prisma stayed at
+6.19.3, the lockfile did not change by a single byte, and the audit still
+reports 3 high. Anyone following the tool's suggestion will conclude the
+tooling is broken.
+
+**There is no fixed version to move to.** The vulnerable range is
+`6.13.0-dev.1 - 8.1.0-dev.4`, so the fix is prisma >= 8.1.0. The latest
+published prisma is **7.10.0**. Every published release from 6.13.0 onwards is
+inside the range, so upgrading to latest would be a major bump that does not
+fix it. The only non-vulnerable published option is a **downgrade** to
+<= 6.12.0.
+
+**Decision: stay on 6.19.3.**
+
+- The vulnerable chain is **devDependency only**. `@prisma/client`, the
+  production dependency, is not in it - confirmed from the audit's own package
+  list.
+- The reachable input is our own `schema.prisma` and Prisma config, parsed by a
+  CLI we invoke ourselves. Exploiting it means handing a developer a malicious
+  Prisma config, which is already a "run untrusted code on your workstation"
+  scenario.
+- Downgrading to 6.12.0 would forfeit seven minor releases and require
+  revalidating the whole Phase 1a toolchain - `migrate deploy`, `generate`, the
+  drift gate, `migrate diff` - against an older CLI, to close a devDependency
+  advisory with no plausible path here.
+
+**Monitoring action:** upgrade when prisma >= 8.1.0 is published, and treat it
+as a toolchain change requiring the schema, guard and drift gates to be re-run,
+not a routine bump. Until then this is the expected steady state, and the three
+highs in the Backend audit are explained rather than outstanding.
+
+---
+
+## ADR-037 — Restating the vite exposure accurately
+
+**Status** Accepted — corrects "build-time only" from the H4 triage
+
+The H4 triage called vite "build-time only, not exploitable in a deployed
+static build". The first half is right and the second understates one of the
+advisories.
+
+`vite` is a devDependency and does not ship in the production bundle, so
+**donors are not exposed by any of it**. That much stands. But the three
+advisories are not all dev-server abstractions:
+
+| Advisory | Severity | What it actually is |
+|---|---|---|
+| GHSA-fx2h-pf6j-xcff | **high** | `server.fs.deny` bypass on Windows alternate paths - dev server serves files it was configured to refuse |
+| GHSA-4w7w-66w2-5vf9 | moderate | Path traversal in optimized-deps `.map` handling |
+| GHSA-v6wh-96g9-6wx3 | moderate | `launch-editor`: **NTLMv2 hash disclosure** via UNC path handling on Windows |
+
+The third is not a sandbox-escape abstraction. It is **credential disclosure
+from a developer workstation**: a captured NTLMv2 hash is offline-crackable and,
+depending on the account, reusable against domain resources.
+
+**The accurate exposure statement:** the risk is to **developers running
+`npm run dev` on Windows**, not to donors. This project is developed on Windows
+- Docker Desktop and the Windows path conventions throughout the tooling make
+that plain - so the platform-specific advisories are the applicable ones rather
+than the theoretical ones. Two of the three are Windows-specific.
+
+Still **low urgency**, for two reasons that are about exposure rather than
+severity: the dev server binds localhost by default, and an attacker needs the
+developer to load a hostile page in a browser while it is running. But
+"developer workstation credential disclosure, low likelihood" is a materially
+different sentence from "build-time only", and the second one would justify
+never fixing it.
+
+**Decision:** fix with the Phase 5 frontend rework, alongside the
+`react-router-dom` major (ADR-035), since both are Frontend majors and
+revalidating the build once is cheaper than twice. Bring it forward if
+`vite dev` starts being run on a machine with domain credentials that matter,
+or if the dev server is ever bound to a non-loopback interface.
