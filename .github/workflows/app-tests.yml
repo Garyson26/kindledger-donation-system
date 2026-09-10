@@ -68,6 +68,17 @@ jobs:
         # package-lock.json lands.
         run: npm install --no-audit --no-fund
 
+      - name: Character-set guard
+        working-directory: Backend
+        # Fails on undeclared non-ASCII in test/ and db/. Cheap, needs no
+        # service, and runs first so a homoglyph is reported in seconds
+        # instead of after the suites have booted.
+        #
+        # It lives here rather than in the Schema workflow because it guards
+        # the test sources this workflow owns, and because keeping it beside
+        # them avoids two branches editing the same package.json scripts block.
+        run: npm run test:charset
+
       - name: PayU callback behaviour (SEC-01 + observability)
         working-directory: Backend
         run: npm run test:payment
