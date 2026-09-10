@@ -1212,3 +1212,40 @@ it. The scrub prevents **re-exposure at publication**; it is not remediation for
 what was already visible. Remediation for the JWT fallback is rotation
 (J4) plus the admin-account enumeration (J3), because what persists from a
 forged token is not the token but whatever it was used to create.
+
+---
+
+## ADR-031 — The Phase 4 rollback window closes at the first real donation into MySQL
+
+**Status** Accepted — **design constraint on Phase 4**, not a note
+
+Once the ETL has run and new donations begin landing in MySQL, reverting to
+the MongoDB deployment **loses every donation written after the freeze**. The
+MongoDB dataset is frozen at cutover and has no knowledge of anything the
+MySQL application accepted afterwards.
+
+So the rollback window does not stay open for a settling-in period. **It closes
+at the first real donation into MySQL.** After that the only path is forward:
+any defect found later has to be fixed in place, on live data, with no
+retreat.
+
+Three consequences that have to be built into the runbook when it is drafted:
+
+1. **All verification that could trigger a rollback must complete INSIDE the
+   freeze**, before donations are accepted. Verification deferred to "after
+   we're live" is verification whose only possible outcome is a forward fix,
+   which makes it something other than verification.
+2. **The freeze length is driven by verification depth, not by ETL runtime.**
+   The instinct is to size the window by how long the data takes to move. That
+   is the wrong variable, and it is usually the smaller one.
+3. **There must be an explicit, named go/no-go decision point** at the end of
+   the freeze, before donations are re-enabled — with a person accountable for
+   the call and a written list of what must be true for it to be "go".
+
+Note also that the Vercel commit-authorship block (ADR-028) stops being
+relevant at cutover rather than being solved by it: the deployment target
+becomes the Docker stack, not Vercel serverless. It must not be treated as
+resolved on those grounds, because the frontend stays on Vercel.
+
+The runbook itself is deliberately not drafted here. This records the
+constraint that shapes it.
