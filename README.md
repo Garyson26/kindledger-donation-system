@@ -16,3 +16,8 @@ a correctly configured `mysql:8.4`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the schema change process, and note
 in particular that `prisma migrate dev` must never be run in this repository.
+
+The server must also run in **strict SQL mode** (`STRICT_TRANS_TABLES`, a MySQL
+8 default). Without it an out-of-set `ENUM` value is stored as the empty string
+with only a warning, and the affected donation then matches no status filter —
+it vanishes from every report while still sitting in the table.

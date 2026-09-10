@@ -507,3 +507,137 @@ Those conflicts are expected and textual; resolve them by taking both sets of
 changes. Note in particular that the licence change to `Backend/package.json`
 (ISC to GPL-3.0-only) belongs to the documentation branch and is deliberately
 absent here — this branch adds only the Prisma dependency and scripts.
+
+---
+
+## ADR-018 — The Phase 4 ETL must count mixed-case status values before insert
+
+**Status** Accepted — recorded for Phase 4, nothing built. **Replaces SPEC-1A
+section 8.2.**
+
+Section 8.2 assumed the `ENUM` would reject mixed-case `status` values, so the
+ETL had to normalise them or the load would fail. ADR-013 removed that claim as
+incorrect. This records the requirement that claim was protecting, because
+removing it leaves a real gap.
+
+**The gap.** MySQL does not reject `'approved'` — it silently canonicalises it
+to `'Approved'` (ADR-013, verified via `HEX(status)`). So BUG-02's corruption
+will **migrate invisibly**. The load will succeed, the row counts will
+reconcile, and every trace of how much data BUG-02 damaged will be gone. The
+database will no longer surface it, because the database will have quietly
+fixed it.
+
+**Requirement.** Before inserting anything, the ETL MUST count the mixed-case
+values in the source collection and report them with counts. Against MongoDB
+that is:
+
+```js
+db.donations.aggregate([
+  { $group: { _id: '$status', count: { $sum: 1 } } },
+  { $sort: { count: -1 } },
+]);
+// and the same for paymentStatus
+```
+
+Anything whose `_id` is not exactly `Pending`, `Approved` or `Rejected` — a
+lowercase variant, a stray value, `null`, a missing field — is a damaged row.
+Report the full distribution, not just a total, and record it in the cutover
+runbook.
+
+**Why this matters beyond tidiness.** That count is the only remaining record
+of BUG-02's blast radius. It tells us how many donations were mis-filed, and by
+implication how long the admin dashboard's "approved" counter has been wrong
+and by how much — which is a reporting-integrity question a donor-facing
+organisation may have to answer. Once the ETL runs, the evidence is
+unrecoverable.
+
+Note also that the same reasoning applies to any value the ENUM would coerce
+rather than reject. Count first, load second, always.
+
+---
+
+## ADR-019 — Strict SQL mode is a hard requirement, checked at startup
+
+**Status** Accepted
+
+`Backend/db/require-mysql-version.js` refuses to proceed unless **both**
+`@@SESSION.sql_mode` and `@@GLOBAL.sql_mode` include `STRICT_TRANS_TABLES` (or
+`STRICT_ALL_TABLES`, or the `TRADITIONAL` composite).
+
+**Why.** Every ENUM guarantee in `db/schema.sql` depends on it. ADR-013
+established that an out-of-set value such as `'banana'` is rejected with error
+1265 — but that rejection is a *strict mode* behaviour, not an ENUM behaviour.
+Verified against mysql:8.4.11 with `sql_mode = ''`:
+
+```
+INSERT ... status='banana', payment_status='nonsense'
+  -> Warning 1265, NOT an error
+  -> stored as '' / '', LENGTH(status) = 0
+  -> SELECT ... WHERE payment_status = 'Paid'  finds nothing
+  -> SELECT ... WHERE payment_status IN (all four valid values)  finds nothing
+```
+
+A donation then exists whose `payment_status` matches no filter. It is invisible
+to the admin donation list, to the charts endpoint, to every report and to
+reconciliation — while sitting in the table. That is BUG-02 and BUG-03
+recreated exactly, by configuration rather than by code.
+
+`STRICT_TRANS_TABLES` is a MySQL 8 default, so this is not a likely
+misconfiguration in the bundled stack. But `sql_mode` is settable per server,
+per session and per connection string, and once this repository is public NGOs
+will run it against managed instances with provider defaults. An assumption
+this load-bearing has to be checked rather than trusted.
+
+**Both scopes are checked deliberately.** `SESSION` governs writes on the
+connection doing the work; `GLOBAL` is what every *new* connection inherits,
+including the application's pool, the Phase 4 ETL, and anyone at a `mysql`
+prompt. A non-strict `GLOBAL` is a loaded gun even when this particular session
+happens to be strict.
+
+**Verified in both directions.** A MySQL 8.4.11 started with `--sql-mode=""` is
+refused with exit 1 and an explanation; the default configuration passes. The
+classifier `hasStrictMode()` is a pure function with unit tests, including that
+it is not fooled by a substring such as `NOT_STRICT_TRANS_TABLES_X`.
+`test/schema.test.js` asserts strict mode is active, and separately
+*demonstrates* the dependency by relaxing `sql_mode` for one transaction,
+retrying the same insert, and observing the empty string — then restoring
+`sql_mode`, since it is a session variable and is not rolled back with the
+transaction.
+
+---
+
+## ADR-020 — The licence decision is withdrawn and DEF-01 remains open
+
+**Status** Accepted — supersedes the licence change previously made on the
+documentation branch
+
+The documentation branch briefly set both `package.json` files to
+`GPL-3.0-only`, on the reasoning that `LICENSE` already contained the GPL v3
+text and the manifests should agree with it. That change has been withdrawn.
+`Backend/package.json` is back to `ISC` and the field added to
+`Frontend/package.json` is removed, so that branch no longer touches licensing
+at all.
+
+**Why consistency was the wrong reason.** Making the manifests agree with
+`LICENSE` looked like a tidy-up, but it had the effect of settling the licence
+by default — and GPL-3.0 is probably the wrong choice for this project:
+
+- **GPL-3.0 copyleft triggers on conveying**, i.e. distributing the code.
+  Hosting a modified web application for network users is generally *not*
+  conveying. A forker could therefore take KindLedger, modify it, run it as
+  their own donation platform, and publish nothing. For software whose entire
+  deployment model is "an NGO hosts it", that is close to no copyleft at all.
+- **AGPL-3.0 section 13** is the clause that closes the gap, extending the
+  source obligation to users who interact with the software over a network.
+- **Neither protects the attribution footer.** "Powered by KindLedger" is a
+  separate question, and a licence term forbidding its removal would not be
+  open source by the OSI definition. That tension has to be resolved
+  deliberately, not inherited.
+
+**Consequences** The repository is currently inconsistent — GPL v3 text in
+`LICENSE`, `ISC` in `Backend/package.json`, nothing in
+`Frontend/package.json` — and that inconsistency is now deliberate and
+documented in the README rather than silently resolved. No licence change is to
+be merged until DEF-01 is decided together with the attribution question.
+Anyone reading the repository in the meantime should treat its licensing as
+unsettled.

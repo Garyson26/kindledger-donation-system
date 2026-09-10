@@ -546,6 +546,84 @@ test('a lowercase donation status is CANONICALISED, not stored as written', asyn
   });
 });
 
+test('C3 the server runs in strict SQL mode', async () => {
+  // The ENUM rejection asserted below DEPENDS on this. Without
+  // STRICT_TRANS_TABLES the same INSERT succeeds and stores the empty string.
+  // STRICT_TRANS_TABLES is a MySQL 8 default, but sql_mode is settable and
+  // managed providers ship their own defaults.
+  const [row] = await prisma.$queryRaw`
+    SELECT @@SESSION.sql_mode AS session_mode, @@GLOBAL.sql_mode AS global_mode
+  `;
+
+  for (const [scope, mode] of [['SESSION', row.session_mode], ['GLOBAL', row.global_mode]]) {
+    assert.match(
+      String(mode),
+      /STRICT_TRANS_TABLES|STRICT_ALL_TABLES|TRADITIONAL/,
+      `${scope} sql_mode is "${mode}" - not strict. An out-of-set ENUM value ` +
+        'would be stored as the empty string with only a warning.'
+    );
+  }
+});
+
+test('C3 without strict mode an out-of-set ENUM becomes the EMPTY STRING', async () => {
+  // Demonstrates the dependency rather than asserting it: strict mode is
+  // relaxed for one transaction, the same INSERT is retried, and the result
+  // is inspected. This is the corruption the server guard exists to prevent -
+  // a donation whose payment_status matches no filter and therefore vanishes
+  // from every report.
+  //
+  // sql_mode is a session variable and is NOT rolled back with the
+  // transaction, so it is restored explicitly.
+  const [{ session_mode: original }] = await prisma.$queryRaw`
+    SELECT @@SESSION.sql_mode AS session_mode
+  `;
+
+  try {
+    await inRollback(async (tx) => {
+      await tx.$executeRawUnsafe(`
+        INSERT INTO categories (uuid, name, short_description, donation_amount_minor)
+        VALUES (UUID(), 'ZZ Lax Mode', 'test', 100)
+      `);
+      const [cat] = await tx.$queryRawUnsafe(`SELECT id FROM categories WHERE name = 'ZZ Lax Mode'`);
+
+      await tx.$executeRawUnsafe(`SET SESSION sql_mode = ''`);
+
+      // The very insert that errors under strict mode.
+      await tx.$executeRawUnsafe(`
+        INSERT INTO donations
+          (uuid, transaction_ref, donor_name, donor_email, category_id,
+           base_amount_minor, amount_minor, status, payment_status, donated_at)
+        VALUES (UUID(), UUID(), 'D', 'lax@example.org', ${cat.id}, 100, 100,
+                'banana', 'nonsense', NOW(3))
+      `);
+
+      const [row] = await tx.$queryRawUnsafe(
+        `SELECT status, payment_status, LENGTH(status) AS len
+           FROM donations WHERE donor_email = 'lax@example.org'`
+      );
+      assert.equal(row.status, '', 'expected the invalid ENUM to be stored as the empty string');
+      assert.equal(num(row.len), 0);
+      assert.equal(row.payment_status, '');
+
+      // And the row is invisible to every status filter - the actual harm.
+      const [{ n }] = await tx.$queryRawUnsafe(
+        `SELECT COUNT(*) AS n FROM donations
+          WHERE donor_email = 'lax@example.org'
+            AND payment_status IN ('Pending','Paid','Failed','Cancelled')`
+      );
+      assert.equal(num(n), 0, 'the corrupted row should match no valid payment_status');
+    });
+  } finally {
+    await prisma.$executeRawUnsafe(`SET SESSION sql_mode = '${String(original).replace(/'/g, "''")}'`);
+  }
+
+  // Confirm the restore worked, so no later test inherits a lax session.
+  const [{ session_mode: after }] = await prisma.$queryRaw`
+    SELECT @@SESSION.sql_mode AS session_mode
+  `;
+  assert.match(String(after), /STRICT_TRANS_TABLES|STRICT_ALL_TABLES|TRADITIONAL/, 'sql_mode was not restored');
+});
+
 test('an out-of-set donation status is rejected outright', async () => {
   // SEC-16: PUT /donations/:id writes req.body.status straight through
   // findByIdAndUpdate, which does not run Mongoose validators. MySQL refuses

@@ -75,3 +75,59 @@ test('parseVersion reads the leading x.y.z and ignores any suffix', () => {
   assert.deepEqual(parseVersion('  8.0.16  '), { major: 8, minor: 0, patch: 16 });
   assert.equal(parseVersion('8.4'), null);
 });
+
+// =============================================================================
+// C3 - strict SQL mode classifier
+// =============================================================================
+const { hasStrictMode, looksLikeConnectionFailure } = require('../db/require-mysql-version');
+
+test('hasStrictMode accepts the MySQL 8 default sql_mode', () => {
+  // Captured from mysql:8.4.11.
+  assert.equal(
+    hasStrictMode(
+      'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'
+    ),
+    true
+  );
+});
+
+test('hasStrictMode accepts STRICT_ALL_TABLES and TRADITIONAL', () => {
+  assert.equal(hasStrictMode('STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION'), true);
+  assert.equal(hasStrictMode('TRADITIONAL'), true);
+  // Order and whitespace must not matter.
+  assert.equal(hasStrictMode(' NO_ENGINE_SUBSTITUTION , strict_trans_tables '), true);
+});
+
+test('hasStrictMode rejects a non-strict sql_mode', () => {
+  // Empty is the case that silently stores an out-of-set ENUM as ''.
+  for (const m of ['', null, undefined, 'NO_ENGINE_SUBSTITUTION', 'ONLY_FULL_GROUP_BY,NO_ZERO_DATE', 'ANSI']) {
+    assert.equal(hasStrictMode(m), false, `${JSON.stringify(m)} should not be considered strict`);
+  }
+});
+
+test('hasStrictMode is not fooled by a substring', () => {
+  // A mode merely containing the text must not count; only a real list member.
+  assert.equal(hasStrictMode('NOT_STRICT_TRANS_TABLES_X'), false);
+});
+
+// =============================================================================
+// C5 - connection-failure classifier
+// =============================================================================
+test('looksLikeConnectionFailure matches the errors a MariaDB host produces', () => {
+  // Both captured from real runs against MariaDB 11.8.9 and an unreachable host.
+  for (const m of [
+    'Authentication failed against database server, the provided database credentials for `root` are not valid.',
+    "Can't reach database server at `127.0.0.1:3306`",
+    'ERROR 1045 (28000): Access denied for user',
+    'connect ECONNREFUSED 127.0.0.1:3306',
+    'Timed out during handshake',
+  ]) {
+    assert.equal(looksLikeConnectionFailure(m), true, `should match: ${m}`);
+  }
+});
+
+test('looksLikeConnectionFailure does not match an ordinary query error', () => {
+  for (const m of ['Unknown column x in field list', 'Table kindledger.foo does not exist', '']) {
+    assert.equal(looksLikeConnectionFailure(m), false, `should not match: ${m}`);
+  }
+});

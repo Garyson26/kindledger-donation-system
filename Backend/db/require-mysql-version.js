@@ -95,7 +95,69 @@ function classifyServer(version, comment) {
   return { kind: 'ok', version: String(version) };
 }
 
-module.exports = { classifyServer, parseVersion, isAtLeastMinimum, MIN_STR, REQUIREMENT };
+/**
+ * Does this sql_mode give strict behaviour for transactional tables?
+ *
+ * WHY THIS IS A HARD REQUIREMENT, not a preference.
+ * Without STRICT_TRANS_TABLES, MySQL does not reject an out-of-set ENUM value.
+ * It inserts the EMPTY STRING and raises a *warning* instead of error 1265.
+ * Verified against mysql:8.4.11 with sql_mode='':
+ *
+ *   INSERT ... status='banana', payment_status='nonsense'
+ *     -> Warning 1265 (not an error)
+ *     -> stored as '' / '', LENGTH(status) = 0
+ *     -> the row is INVISIBLE to `WHERE payment_status = 'Paid'`
+ *
+ * That is BUG-02 / BUG-03 recreated: a donation exists whose status matches no
+ * filter, so it silently vanishes from every report and reconciliation. The
+ * ENUM stops being a constraint and becomes a suggestion.
+ *
+ * STRICT_TRANS_TABLES is a MySQL 8 default, but sql_mode is settable and
+ * managed providers ship their own defaults, so it must be checked rather than
+ * assumed.
+ *
+ * STRICT_ALL_TABLES is stricter and also acceptable. TRADITIONAL is a
+ * composite that includes STRICT_TRANS_TABLES; MySQL normally expands it in
+ * @@sql_mode, but it is accepted here in case a build reports the alias.
+ *
+ * Exported as a pure function so it is unit testable without a server.
+ */
+function hasStrictMode(sqlMode) {
+  const modes = String(sqlMode || '')
+    .split(',')
+    .map((m) => m.trim().toUpperCase())
+    .filter(Boolean);
+  return (
+    modes.includes('STRICT_TRANS_TABLES') ||
+    modes.includes('STRICT_ALL_TABLES') ||
+    modes.includes('TRADITIONAL')
+  );
+}
+
+/**
+ * Is this error consistent with never having reached a MySQL server that would
+ * answer a version query - i.e. a connection or authentication failure?
+ *
+ * C5: on a real MariaDB the connection frequently fails at the handshake,
+ * before any version query runs, so the 'mariadb' verdict is never reached and
+ * the self-hoster sees a bare connection error instead of the message written
+ * for them. This lets that path name MariaDB as a likely cause.
+ */
+function looksLikeConnectionFailure(message) {
+  return /authentication failed|access denied|can't reach|cannot reach|connection refused|econnrefused|handshake|server has gone away|protocol|timed out|etimedout/i.test(
+    String(message || '')
+  );
+}
+
+module.exports = {
+  classifyServer,
+  parseVersion,
+  isAtLeastMinimum,
+  hasStrictMode,
+  looksLikeConnectionFailure,
+  MIN_STR,
+  REQUIREMENT,
+};
 
 async function main() {
   const { PrismaClient } = require('@prisma/client');
@@ -103,22 +165,61 @@ async function main() {
 
   let version;
   let comment;
+  let sessionMode;
+  let globalMode;
   try {
     // version_comment names the distribution; MariaDB reports itself there
     // even when @@version has been made to look like MySQL.
     const rows = await prisma.$queryRawUnsafe(
-      "SELECT VERSION() AS version, @@version_comment AS comment"
+      'SELECT VERSION() AS version, @@version_comment AS comment, ' +
+        '@@SESSION.sql_mode AS session_mode, @@GLOBAL.sql_mode AS global_mode'
     );
     version = rows[0].version;
     comment = rows[0].comment || '';
+    sessionMode = rows[0].session_mode || '';
+    globalMode = rows[0].global_mode || '';
   } catch (err) {
     await prisma.$disconnect().catch(() => {});
+
+    // C5: a MariaDB server usually fails here rather than at the version
+    // check, so this is the branch that has to name it. Otherwise the person
+    // this guard exists for never sees the message written for them.
+    if (looksLikeConnectionFailure(err.message)) {
+      // Prisma error messages begin with blank lines, so take the first
+      // non-empty line rather than line zero.
+      const firstLine =
+        String(err.message || '')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .find((l) => !/^invalid `prisma/i.test(l)) || 'no detail available';
+
+      fail(`no usable connection to the server: ${firstLine}`, [
+        'MARIADB IS A LIKELY CAUSE if you are pointing this at one.',
+        '',
+        'MariaDB is not supported, and the connection typically fails during',
+        'the handshake - before any version query can run - so this guard',
+        'cannot always name it explicitly. If your server is MariaDB, that is',
+        'the problem, and no amount of credential fixing will help.',
+        '',
+        'MariaDB has no utf8mb4_0900_* collations. The email uniqueness',
+        'guarantee in db/schema.sql depends on utf8mb4_0900_as_ci, and a',
+        'silent fallback to another collation would either merge distinct',
+        'donor accounts or permit duplicate ones.',
+        '',
+        'Otherwise, the usual causes are:',
+        '  - DATABASE_URL host, port, user or password is wrong',
+        '  - the database is not running, or not reachable from here',
+        '  - a password containing reserved characters is not percent-encoded',
+        '',
+        'The bundled docker-compose.yml provides a correct mysql:8.4:',
+        '    docker compose up -d db',
+      ]);
+      return;
+    }
+
     fail(`could not query the server version (${err.message})`, [
       'Check DATABASE_URL and that the database is reachable.',
-      '',
-      'If the server is MariaDB, note that the connection itself may fail at',
-      'the handshake before any version query runs - an authentication error',
-      'here does not rule MariaDB out. It is unsupported either way.',
     ]);
     return;
   }
@@ -159,6 +260,41 @@ async function main() {
     ]);
   }
 
+  // C3. Strict SQL mode. Without it an out-of-set ENUM value is inserted as
+  // the EMPTY STRING with a warning rather than error 1265, which silently
+  // recreates the BUG-02 / BUG-03 corruption class.
+  //
+  // Both scopes are checked. SESSION governs writes on this connection;
+  // GLOBAL is what every new connection inherits, including the application's
+  // pool, the Phase 4 ETL and anyone at a mysql prompt. A non-strict GLOBAL is
+  // a loaded gun even if this particular session happens to be strict.
+  for (const [scope, mode] of [['SESSION', sessionMode], ['GLOBAL', globalMode]]) {
+    if (!hasStrictMode(mode)) {
+      fail(`MySQL ${version} with a non-strict ${scope} sql_mode`, [
+        `${scope} sql_mode = "${mode}"`,
+        '',
+        'STRICT_TRANS_TABLES (or STRICT_ALL_TABLES) is required. Without it,',
+        'MySQL does not reject an out-of-set ENUM value - it inserts the EMPTY',
+        'STRING and raises a warning instead of error 1265. Verified:',
+        '',
+        "    INSERT ... status='banana', payment_status='nonsense'",
+        '      -> Warning 1265, not an error',
+        "      -> stored as '' / '', LENGTH(status) = 0",
+        "      -> the row is INVISIBLE to WHERE payment_status = 'Paid'",
+        '',
+        'That is a donation whose status matches no filter, so it vanishes',
+        'from every report and reconciliation without a trace. The ENUM stops',
+        'being a constraint and becomes a suggestion.',
+        '',
+        'Fix it on the server (my.cnf / provider console):',
+        '    sql_mode = STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION',
+        '',
+        'The bundled docker-compose.yml uses the MySQL 8 default, which is',
+        'already strict.',
+      ]);
+    }
+  }
+
   // 3. Positive confirmation that CHECKs are actually enforced, not merely
   //    supported by version number. Cheap, and catches an exotic build.
   const { PrismaClient: PC } = require('@prisma/client');
@@ -192,7 +328,7 @@ async function main() {
     await p2.$disconnect().catch(() => {});
   }
 
-  console.log(`  Database server OK: MySQL ${version} (CHECK constraints enforced)`);
+  console.log(`  Database server OK: MySQL ${version} (CHECK constraints enforced, strict sql_mode)`);
 }
 
 // Only connect and exit when run as a script. Required as a module (by

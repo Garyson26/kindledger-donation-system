@@ -4,9 +4,18 @@
 
 **MySQL 8.0.16 or later. MariaDB is not supported.**
 
-Both are enforced, not merely requested — `npm run db:migrate` and
+The server must also run in **strict SQL mode** (`STRICT_TRANS_TABLES`).
+
+All three are enforced, not merely requested — `npm run db:migrate` and
 `npm run db:seed` run `Backend/db/require-mysql-version.js` first and refuse to
 proceed otherwise.
+
+Strict mode is load-bearing: without it MySQL does not reject an out-of-set
+`ENUM` value, it stores the **empty string** with a warning. A donation whose
+`payment_status` is `''` then matches no filter and vanishes from every report
+while still sitting in the table — BUG-02 and BUG-03 recreated by
+configuration. It is a MySQL 8 default, but `sql_mode` is settable and managed
+providers ship their own defaults.
 
 The floor is 8.0.16 because that is where MySQL began **enforcing** `CHECK`
 constraints. Below it the syntax in `db/schema.sql` parses and is then silently
