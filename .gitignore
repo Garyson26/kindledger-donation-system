@@ -25,6 +25,11 @@ docs/*
 # topology look the way they do, and a future contributor needs them.
 !docs/decisions.md
 
+# The Phase 2 readiness note is input to SPEC-2 and contains no exploit
+# detail, so it is tracked. Same reasoning as decisions.md: internal by
+# default, explicit negation for what the repository needs.
+!docs/phase-2-readiness.md
+
 # =============================================================================
 # Node
 # =============================================================================
