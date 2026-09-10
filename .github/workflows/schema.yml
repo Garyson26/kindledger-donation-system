@@ -13,24 +13,32 @@
 
 name: Schema
 
+# TRIGGERS: every branch, every path. Both filters were removed deliberately.
+#
+# The original config triggered on push to main plus pull_request, with a
+# paths allowlist. Under the local-first development model that combination
+# never fires: nothing merges to main for weeks and no PRs are opened, so the
+# drift gate would be dormant through the period of heaviest schema churn -
+# the exact opposite of why it exists.
+#
+# Why no branch filter: an allowlist of working branches goes stale the first
+# time a branch is named something unanticipated, and it fails SILENTLY - the
+# job simply does not run and nothing says so.
+#
+# Why no paths filter either: it has the identical failure mode. The old
+# allowlist already missed Backend/routes/** and Backend/middleware/**, which
+# is where Phase 3 does all its work, so a route change that broke a schema
+# assumption would have skipped CI. Rather than widen the list and re-inherit
+# the staleness, it is gone. An allowlist fails silent; no filter fails safe.
+#
+# The cost is that a docs-only push runs a full MySQL job. At roughly two
+# minutes per run that is affordable, and it is the right trade against a gate
+# that quietly stops running.
 on:
   push:
-    branches: [main]
-    paths:
-      - 'db/**'
-      - 'Backend/prisma/**'
-      - 'Backend/db/**'
-      - 'Backend/test/**'
-      - 'Backend/package.json'
-      - '.github/workflows/schema.yml'
+    branches: ['**']
   pull_request:
-    paths:
-      - 'db/**'
-      - 'Backend/prisma/**'
-      - 'Backend/db/**'
-      - 'Backend/test/**'
-      - 'Backend/package.json'
-      - '.github/workflows/schema.yml'
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -70,6 +78,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The pull_request step below does a 3-dot diff against
+          # origin/<base>. checkout@v4 defaults to fetch-depth 1, which
+          # cannot resolve that ref, so the step would fail on the first
+          # PR rather than on a real finding.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -80,6 +94,18 @@ jobs:
         # No lockfile is committed yet (SEC-12), so `npm ci` is not usable.
         # Switch this to `npm ci` the moment package-lock.json lands.
         run: npm install --no-audit --no-fund
+
+      - name: Ensure a MySQL client is available
+        # Not assumed: the runner image's bundled MySQL/MariaDB client
+        # has changed across ubuntu images, and this workflow cannot be
+        # verified from the development environment. Installing it
+        # explicitly removes one environmental reason for a red run.
+        run: |
+          if ! command -v mysql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends mysql-client
+          fi
+          mysql --version
 
       - name: Apply db/schema.sql
         # The normative artefact is applied directly, exactly as the MySQL
