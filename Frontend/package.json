@@ -2,7 +2,6 @@
   "name": "for-ocean-foundation",
   "private": true,
   "version": "0.0.0",
-  "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
     "node": ">=20.0.0",

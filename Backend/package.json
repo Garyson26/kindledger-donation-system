@@ -11,7 +11,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "GPL-3.0-only",
+  "license": "ISC",
   "engines": {
     "node": ">=20.0.0",
     "npm": ">=10.0.0"

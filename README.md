@@ -180,9 +180,24 @@ fails with a 401 (BUG-04 in the docs), so the purge is not running.
 
 ## License
 
-Licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE)
-for the full text.
+**Undecided — do not rely on the current state of the repository.**
 
-GPL-3.0 is a strong copyleft licence: you may use, modify, and redistribute this
-code, but any derivative you distribute must also be released under GPL-3.0 with
-its source available. Both `package.json` files declare `GPL-3.0-only` to match.
+[LICENSE](LICENSE) currently contains the **GNU GPL v3** text, while
+`Backend/package.json` declares `ISC` and `Frontend/package.json` declares
+nothing. That inconsistency is known and is deliberately left in place rather
+than resolved in passing, because picking the licence is a real decision with
+consequences that are easy to get wrong:
+
+- **GPL-3.0** copyleft triggers on *conveying* — i.e. distributing the code.
+  Hosting a modified web application for network users is generally **not**
+  conveying, so under GPL-3.0 someone could fork KindLedger, modify it, run it
+  as a donation platform, and publish nothing.
+- **AGPL-3.0** is the licence that closes that gap: its section 13 extends the
+  obligation to users who interact with the software over a network.
+- Neither licence protects the "Powered by KindLedger" attribution footer. That
+  is a separate question, and a licence that forbade removing the attribution
+  would not be open source by the OSI definition.
+
+The licence and the attribution question will be decided together. Until then,
+treat the licensing of this repository as unsettled and do not assume a
+permissive grant.
