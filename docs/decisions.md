@@ -1056,3 +1056,159 @@ Practical measures for Phase 3, in order of value:
 3. Prefix a leading `=`, `+`, `-` or `@` with `'` in any CSV export.
 4. Never interpolate them into an HTML email without passing through the
    existing `escapeHtml()` helper.
+
+---
+
+## ADR-028 — Deployments are blocked by commit authorship, not by quota
+
+**Status** Accepted — incident record, J1
+
+Every deployment of a commit authored during this engagement is `BLOCKED` and
+never built. The production deployment of `e3640b3` — the merge carrying the
+SEC-01 fix — is among them, so **the fix has never served traffic**.
+
+**The stated reason.** `dpl_2xDAuZ5MRkkWBFUary5EjawNoNWT` carries
+`errorLink: /docs/deployments/troubleshoot-project-collaboration#account-configuration`.
+The operative rules on that page, verbatim:
+
+> The Hobby Plan does not support collaboration for private repositories. If
+> you need collaboration, upgrade to the Pro Plan.
+
+> To deploy commits under a Hobby team, the commit author must be the owner of
+> the Hobby team containing the Vercel project connected to the Git repository.
+> This is verified by comparing the Login Connections Hobby team's owner with
+> the commit author.
+
+> Note: Collaboration is free for public repositories.
+
+**It is not a quota, and not commercial-use enforcement.** The evidence is the
+correlation between commit author and deployment state:
+
+| Commit | Author email | State |
+|---|---|---|
+| `e3640b3`, `058c769`, `4f3b7ec`, `728ee22`, `fdd94fa` | `garyson.pereira@oakbrookfinance.com` | BLOCKED |
+| `b5b43c8`, `938e164` | `125772582+Garyson26@users.noreply.github.com` | READY |
+| `bacd6d9` (private era) | `viraj.470@gmail.com` | BLOCKED |
+| `4ac1fe4` (**public** era) | `viraj.470@gmail.com` | **READY** |
+
+The last row settles it. The *same author email* deployed successfully while
+the repository was public and is blocked now that it is private — exactly what
+"collaboration is free for public repositories" predicts. Renovate and
+Dependabot deploy because their bot commits are separately permitted, which is
+what produced the pattern of "our commits blocked, bot commits READY".
+
+The Vercel team is `wiestell's projects` (Hobby), owner
+`developer@wiestell.com`. `garyson.pereira@oakbrookfinance.com` is not that
+identity, so no commit authored with it can deploy while the repo is private.
+
+**This was caused by the mechanism used to land the work, not by the work.**
+The three approved branches were merged locally and pushed, which made the tip
+commits author-attributed to this engagement's git identity. `b5b43c8` — the
+last deployment that did serve — was a merge commit created by the **GitHub web
+UI**, and therefore authored by the repository owner.
+
+**Remedies, in ascending cost.** Not attempted; this is a plan and identity
+decision for the repository owner:
+
+1. **Merge through the GitHub web UI.** The resulting merge commit is authored
+   by the owner and deploys, which is empirically how `b5b43c8` succeeded. Cheapest,
+   no plan change, no history rewrite. Note the parent commits stay as they are;
+   Vercel evaluates the deployed tip.
+2. **Register the identity.** Add `garyson.pereira@oakbrookfinance.com` as a
+   verified email on both the GitHub account and the Vercel account, then
+   redeploy.
+3. **Upgrade to Pro**, which supports collaboration on private repositories.
+
+**Standing consequence.** Until one of those is done, nothing authored by this
+engagement can reach production, and any commit pushed will produce another
+blocked deployment. Landing future work therefore has to go through the owner's
+identity, not a local merge and push.
+
+---
+
+## ADR-029 — The licence state on main is a three-way contradiction
+
+**Status** Accepted — **DEF-01 blocks publication**
+
+`main` currently asserts three different things:
+
+| Artefact | Says |
+|---|---|
+| `Backend/package.json` | `"license": "ISC"` |
+| `LICENSE` | the full GNU GPL v3 text |
+| `README.md` | licensing is undecided, do not rely on it |
+
+That is worse than any single answer would be. A reader who checks only the
+manifest concludes ISC and a permissive grant; one who checks only `LICENSE`
+concludes GPL-3.0 and copyleft. `LICENSE` is the artefact courts and
+distribution tooling treat as operative, so the effective claim is the one the
+project has least deliberately made.
+
+The README at least records the contradiction openly rather than papering over
+it, which is why it stands as the interim state. But it is interim.
+
+**Requirement.** `LICENSE` must be aligned with whatever DEF-01 resolves to,
+in the same change that sets the manifests. All three artefacts move together
+or none of them do.
+
+**DEF-01 blocks publication.** The repository must not be made public until the
+licence and the attribution question (ADR-020) are decided together. Publishing
+with the current contradiction would grant recipients whatever `LICENSE` says
+while the project believes something else — and a GPL or AGPL grant to a
+recipient cannot be withdrawn.
+
+---
+
+## ADR-030 — Phase 6 history scrub: expanded scope
+
+**Status** Accepted — supersedes the earlier scrub list
+
+The repository **was public**, confirmed by Vercel's per-deployment
+`githubRepoVisibility` at `1e661f8`, `af96148` and `4ac1fe4` — all three
+ancestors of today's `main`. It went private between `89124d6` and `bdbb729`.
+
+The Phase 6 pre-publication scrub previously covered `Frontend/.env` and
+`for_ocean_security_review.md`. Both of those turned out to matter **less** than
+recorded, and something absent from the list matters **more**.
+
+**Add to the scrub list:**
+
+1. **The hardcoded JWT secret fallback in `Backend/config/jwt.js`.** The
+   public-era tree contained:
+
+   ```js
+   const JWT_SECRET = process.env.JWT_SECRET || "smart_donation_secret_key_2025";
+   ```
+
+   This is the most serious thing in the public-era tree and **was never in
+   SEC-17**. If production ran with `JWT_SECRET` unset at any point during the
+   public window, any reader of GitHub could mint a valid admin token.
+
+   Current exposure is almost certainly nil, established without reading the
+   secret: the literal is 30 characters, today's `config/jwt.js` throws unless
+   `JWT_SECRET` is at least 32, and production loads `app.js` successfully — so
+   the configured secret is set, long enough, and therefore not this string.
+
+2. **The `Password@123` seeder value**, public for ~1000 demo accounts. Whether
+   any such account exists in production is directly checkable and is tracked
+   as an incident item, not a scrub item.
+
+**Revised assessment of the original two items:**
+
+- `Frontend/.env` **was** public, but contained only `VITE_API_URL`, a public
+  hostname. No secret was exposed. It remains a scrub item on principle — a
+  committed `.env` invites a future commit that does hold a secret — not
+  because of what it contained.
+- `for_ocean_security_review.md` was **never public**. It entered at `bacd6d9`,
+  a private-era commit. SEC-17's exploit-roadmap concern did not materialise.
+
+Also verified clean across the entire public-era tree: no hardcoded MongoDB
+URI, no PayU merchant key or salt, no email credentials. All were read from the
+environment even then.
+
+**Scrubbing history does not undo public exposure.** Anyone who cloned during
+the window keeps everything they cloned, and GitHub forks and caches may retain
+it. The scrub prevents **re-exposure at publication**; it is not remediation for
+what was already visible. Remediation for the JWT fallback is rotation
+(J4) plus the admin-account enumeration (J3), because what persists from a
+forged token is not the token but whatever it was used to create.
