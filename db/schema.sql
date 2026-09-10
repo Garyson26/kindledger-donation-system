@@ -301,14 +301,32 @@ CREATE TABLE IF NOT EXISTS donations (
 -- =============================================================================
 -- The `paymentDetails` subdocument, extracted to a 1:1 table.
 --
--- THE UNIQUE INDEX ON mihpayid IS A SECURITY CONTROL, not a tidiness measure.
--- SEC-01 remediation requires that a replayed PayU callback cannot
--- double-process. InnoDB permits multiple NULLs in a unique index, which is
--- exactly the behaviour wanted: unpaid donations have no mihpayid, and any
--- given PayU payment identifier can be recorded once.
+-- THE UNIQUE INDEX ON mihpayid IS A DATA-INTEGRITY CONTROL AND A SECONDARY
+-- DEFENCE. It is NOT the replay defence.
 --
--- Phase 3 relies on this and MUST treat the resulting duplicate-key error as a
--- successful idempotent no-op rather than a failure.
+-- SPEC-1A section 5.6 originally claimed it was, and that was wrong.
+-- PayU's documented reverse hash covers only: status, udf1-5, email,
+-- firstname, productinfo, amount, txnid and key. mihpayid is NOT in it, and
+-- the callback arrives through the donor's browser, so mihpayid is unsigned
+-- and attacker-mutable. An attacker can therefore:
+--   * vary mihpayid freely to defeat uniqueness, so the index stops no replay;
+--   * or collide it with an existing value to make a legitimate payment fail
+--     to record - turning the index into a denial-of-recording tool.
+--
+-- THE LOAD-BEARING REPLAY CONTROL IS THE DONATION STATE TRANSITION, keyed on
+-- SIGNED fields only: txnid and udf4 identify the donation, and the handler
+-- refuses to re-process one whose paymentStatus is already 'Paid'. The
+-- Package A hotfix implements that. See docs/decisions.md ADR-026.
+--
+-- What this index still earns its place for: it keeps the same gateway payment
+-- identifier from being recorded against two different donations, which is a
+-- genuine integrity property and catches double-processing by our own code or
+-- by a retrying webhook. InnoDB permits multiple NULLs in a unique index,
+-- which is exactly the behaviour wanted: unpaid donations have no mihpayid.
+--
+-- Phase 3 should still treat the resulting duplicate-key error as an
+-- idempotent no-op rather than a failure - but must not rely on it for
+-- security, and must not build any security decision on an unsigned field.
 --
 -- gateway_status holds PayU's raw status string and is deliberately NOT an
 -- ENUM - it is a third party's vocabulary and must be recorded verbatim for
@@ -317,7 +335,7 @@ CREATE TABLE IF NOT EXISTS donations (
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS donation_payment_details (
   donation_id     BIGINT UNSIGNED NOT NULL,
-  mihpayid        VARCHAR(64)     NULL      COMMENT 'SEC-01 replay guard. Unique; NULLs permitted for unpaid donations.',
+  mihpayid        VARCHAR(64)     NULL      COMMENT 'Data-integrity control, NOT the replay defence - unsigned by PayU. See ADR-026.',
   amount_minor    BIGINT UNSIGNED NULL,
   mode            VARCHAR(32)     NULL,
   bank_ref_num    VARCHAR(64)     NULL,

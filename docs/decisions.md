@@ -316,7 +316,11 @@ fix against.
 
 ## ADR-012 — SEC-01 idempotency is a read-then-write and is not atomic
 
-**Status** Accepted — recorded deliberately, **not fixed in Package A**
+**Status** Accepted, but its conclusion is **SUPERSEDED BY ADR-026**. The race
+described below is real and still unfixed. The claim that `UNIQUE (mihpayid)`
+is where the real fix lands is WRONG: `mihpayid` is not covered by PayU's
+response hash, so it is attacker-mutable and cannot be a security boundary.
+Read ADR-026 for the corrected rationale.
 
 The `/api/payment/success` handler added by the Package A hotfix
 (`hotfix/payment-and-reset`) guards against replay by loading the donation and
@@ -918,3 +922,137 @@ What the harness *should* assert instead:
 
 After the E5 observability fix lands, newly written rows will carry the field,
 so this gap is bounded to donations recorded before that change.
+
+---
+
+## ADR-026 — Only hashed PayU fields may carry a security decision
+
+**Status** Accepted — **corrects SPEC-1A section 5.6 and supersedes the
+conclusion of ADR-012**
+
+### What is actually signed
+
+PayU's documented reverse hash covers exactly these fields:
+
+```
+sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+```
+
+So the signed set is: **`status`, `udf1`–`udf5`, `email`, `firstname`,
+`productinfo`, `amount`, `txnid`** (plus the key and salt, which are ours).
+
+**Every other field in the callback is unsigned and attacker-mutable**, because
+the payload arrives as a form POST through the donor's own browser. That
+includes `mihpayid`, `mode`, `bank_ref_num`, `net_amount_debit`, `addedon`,
+`error_Message`, `phone`, `unmappedstatus`, and the `fieldN` values. A donor can
+edit any of them and the hash still verifies.
+
+### The correction
+
+SPEC-1A section 5.6 claimed the `UNIQUE` index on
+`donation_payment_details.mihpayid` was the SEC-01 replay defence. **That was
+wrong.** ADR-012 repeated the error, saying the index was "where the real fix
+lands". Both are corrected here.
+
+`mihpayid` is unsigned, so an attacker can:
+
+- **vary it freely** on each replay, so uniqueness never trips and the index
+  stops nothing; or
+- **collide it deliberately** with a value already recorded, so a *legitimate*
+  payment fails to record — the index becomes a denial-of-recording tool
+  pointed at other donors.
+
+### What actually defends against replay
+
+The **donation state transition**, keyed on signed fields only:
+
+1. `verifyHash()` establishes the payload came from PayU.
+2. The signed `status` must match the endpoint (`success` at `/success`; not
+   `success` at `/failure` and `/cancel`).
+3. The donation is identified by `udf4` — signed — and cross-checked against the
+   signed `amount` in integer minor units.
+4. A donation whose `paymentStatus` is already `'Paid'` is not re-processed.
+
+Every input to that chain is inside the hash. The Package A hotfix implements
+it, and it is the load-bearing control.
+
+Verified for F2: the amount comparison reads `paymentData.amount`, the signed
+field, **not** `net_amount_debit`, which is never referenced anywhere in the
+codebase.
+
+### What the index is still for
+
+Keep it. It is a **data-integrity control and a secondary defence**: it stops
+the same gateway payment identifier being recorded against two different
+donations, which catches double-processing by our own code or by a retrying
+webhook — neither of which is adversarial. That is a real property worth
+having. It is simply not a security boundary.
+
+`Backend/test/schema.test.js` still asserts the index exists, rejects a
+duplicate non-`NULL` value, and permits multiple `NULL`s. Those assertions are
+unchanged and still correct; only the stated rationale was wrong.
+
+### The standing rule
+
+**Phase 3 must not build any security decision on an unsigned field.** When a
+handler needs gateway detail — the Pending classification from
+`unmappedstatus`, say — it may *record* it, but the state transition must key on
+the signed set above.
+
+One incidental property worth knowing: `verifyHash()` reads only the canonical
+lowercase field names, so the alternate-case fallbacks scattered through the
+handlers (`paymentData.AMOUNT`, `.STATUS`, `.TXNID`, `.MIHPAYID`, and
+`udf_4` / `udf[4]`) are unreachable with a valid hash — a payload lacking the
+lowercase form hashes a different string and is rejected before those
+fallbacks are consulted. They are dead code rather than a hole. But that
+safety is incidental, not designed: adding an uppercase variant to
+`verifyHash()` would make them live. Phase 3 should delete them.
+
+---
+
+## ADR-027 — Unsigned PayU fields are persisted and rendered: treat as untrusted at every sink
+
+**Status** Accepted — standing constraint
+
+`error_Message`, `mode` and `bank_ref_num` are **attacker-controlled text**
+(ADR-026) that the callbacks persist verbatim to the database and that then
+appears in admin views and donation receipt PDFs. `failureReason`, taken from
+the equally unsigned `fieldN` values, is in the same category.
+
+The path is: donor edits the field in the callback their browser posts → hash
+still verifies because the field is not covered → stored verbatim → rendered.
+
+**Not exploitable today**, and that is worth stating precisely rather than
+implying a live hole: React escapes interpolated text by default, and the
+security review found no XSS sinks anywhere in the frontend — no
+`dangerouslySetInnerHTML`, no `innerHTML`, no `eval` — and the frontend CSP
+sets `script-src 'self'` with `object-src 'none'`.
+
+**The risk is that none of those protections are properties of the data.** They
+are properties of one particular render path. The moment the same text reaches
+a sink that does not escape, it becomes live:
+
+- **jsPDF is not React.** `Backend`-generated and client-generated receipt PDFs
+  draw these strings directly. PDF is a scripting-capable format.
+- **A CSV export is not React.** A value beginning `=`, `+`, `-` or `@` is a
+  formula-injection vector in Excel and Sheets, which is the obvious next
+  request for an admin donation report.
+- **An email template is not React.** The OTP and receipt emails build HTML by
+  string interpolation. `config/email.js` escapes the fields it knows about;
+  a template that later interpolates `errorMessage` would not be covered
+  unless the author remembered.
+
+**The constraint.** Treat every non-hashed PayU field as untrusted input **at
+each render site**, not once at ingest. Escaping at ingest is the wrong layer:
+the correct escaping differs per sink — HTML entities for email, formula
+prefixing for CSV, plain-text coercion and length capping for PDF — and a
+single ingest-time transform would be wrong for at least two of them.
+
+Practical measures for Phase 3, in order of value:
+
+1. Length-cap these fields on write. The schema already bounds them
+   (`VARCHAR(500)` / `VARCHAR(1000)`), which limits the blast radius.
+2. Escape or neutralise per sink, at the sink.
+3. Prefix a leading `=`, `+`, `-` or `@` with `'` in any CSV export.
+4. Never interpolate them into an HTML email without passing through the
+   existing `escapeHtml()` helper.

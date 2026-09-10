@@ -30,6 +30,30 @@
 --
 -- This file is idempotent: it may be applied repeatedly to the same database.
 -- Table order below satisfies foreign key resolution; do not reorder.
+--
+-- CHECK CONSTRAINTS REQUIRE MySQL >= 8.0.16. Below that the syntax parses and
+-- is then SILENTLY IGNORED - the money and singleton guarantees in this file
+-- would evaporate without a single error being raised.
+-- Backend/db/require-mysql-version.js refuses to initialise on an unsupported
+-- server for exactly that reason.
+--
+-- CONSTRAINT INTERACTION TO KNOW ABOUT BEFORE THE NEXT SCHEMA CHANGE:
+-- MySQL prohibits a CHECK constraint on a column used in a foreign key's
+-- referential action, and equally prohibits such an action on a column that
+-- carries a CHECK. Concretely, adding a CHECK to a column whose FK is
+-- declared ON DELETE SET NULL or ON UPDATE CASCADE is rejected, because the
+-- action would have to write a value the CHECK might refuse.
+--
+-- No column in this file carries both. Verified: the CHECK columns are
+-- categories.donation_amount_minor, donations.quantity, donations.amount_minor
+-- and branding_settings.{id, primary_colour, secondary_colour}; the foreign
+-- key columns are category_descriptions.category_id,
+-- donations.{user_id, category_id}, donation_payment_details.donation_id and
+-- branding_settings.updated_by. The two sets are disjoint.
+--
+-- A later change that puts a CHECK on a foreign key column, or a referential
+-- action on a checked column, will be rejected at DDL time. This note exists
+-- so that failure reads as a known constraint rather than a baffling one.
 -- =============================================================================
 
 SET NAMES utf8mb4;
@@ -196,9 +220,25 @@ CREATE TABLE IF NOT EXISTS category_descriptions (
 -- casing), BUG-03 (dashboard counter always zero) and SEC-16 (PUT
 -- /donations/:id writes arbitrary strings) all exist because Mongoose's enum
 -- was not enforced on findByIdAndUpdate. MySQL enforces it unconditionally.
--- The ETL must normalise existing mixed-case values before insert or the load
--- fails - which is the correct outcome, since it surfaces the corruption
--- rather than carrying it forward.
+--
+-- HOW IT ENFORCES, PRECISELY - verified against mysql:8.4.11:
+--   * An out-of-set value ('banana') is REJECTED: ERROR 1265, data truncated.
+--   * A case variant ('approved') is ACCEPTED and CANONICALISED to
+--     'Approved'. ENUM assignment is subject to the column's collation, and
+--     utf8mb4_0900_ai_ci is case-insensitive. HEX(status) confirms the stored
+--     bytes are the canonical member.
+--
+-- Canonicalisation is the better outcome: a legacy caller sending lowercase
+-- still succeeds, and the stored value is always the canonical form, so
+-- BUG-03's `status = 'Approved'` count can no longer miss rows. Were this
+-- column ever given a _bin or _cs collation, those writes would start failing
+-- instead.
+--
+-- CONSEQUENCE FOR THE PHASE 4 ETL, which corrects SPEC-1A section 8.2: the
+-- ENUM will NOT fail the load on mixed-case status values, it will silently
+-- normalise them. The corruption is therefore repaired rather than surfaced.
+-- If its scale is to be on record, the ETL must COUNT mixed-case values
+-- before insert and report them explicitly - nothing downstream will.
 --
 -- transaction_ref replaces `TXN${Date.now()}${Math.floor(Math.random()*1000)}`,
 -- a millisecond timestamp plus three digits that is guessable within a narrow
@@ -271,14 +311,32 @@ CREATE TABLE IF NOT EXISTS donations (
 -- =============================================================================
 -- The `paymentDetails` subdocument, extracted to a 1:1 table.
 --
--- THE UNIQUE INDEX ON mihpayid IS A SECURITY CONTROL, not a tidiness measure.
--- SEC-01 remediation requires that a replayed PayU callback cannot
--- double-process. InnoDB permits multiple NULLs in a unique index, which is
--- exactly the behaviour wanted: unpaid donations have no mihpayid, and any
--- given PayU payment identifier can be recorded once.
+-- THE UNIQUE INDEX ON mihpayid IS A DATA-INTEGRITY CONTROL AND A SECONDARY
+-- DEFENCE. It is NOT the replay defence.
 --
--- Phase 3 relies on this and MUST treat the resulting duplicate-key error as a
--- successful idempotent no-op rather than a failure.
+-- SPEC-1A section 5.6 originally claimed it was, and that was wrong.
+-- PayU's documented reverse hash covers only: status, udf1-5, email,
+-- firstname, productinfo, amount, txnid and key. mihpayid is NOT in it, and
+-- the callback arrives through the donor's browser, so mihpayid is unsigned
+-- and attacker-mutable. An attacker can therefore:
+--   * vary mihpayid freely to defeat uniqueness, so the index stops no replay;
+--   * or collide it with an existing value to make a legitimate payment fail
+--     to record - turning the index into a denial-of-recording tool.
+--
+-- THE LOAD-BEARING REPLAY CONTROL IS THE DONATION STATE TRANSITION, keyed on
+-- SIGNED fields only: txnid and udf4 identify the donation, and the handler
+-- refuses to re-process one whose paymentStatus is already 'Paid'. The
+-- Package A hotfix implements that. See docs/decisions.md ADR-026.
+--
+-- What this index still earns its place for: it keeps the same gateway payment
+-- identifier from being recorded against two different donations, which is a
+-- genuine integrity property and catches double-processing by our own code or
+-- by a retrying webhook. InnoDB permits multiple NULLs in a unique index,
+-- which is exactly the behaviour wanted: unpaid donations have no mihpayid.
+--
+-- Phase 3 should still treat the resulting duplicate-key error as an
+-- idempotent no-op rather than a failure - but must not rely on it for
+-- security, and must not build any security decision on an unsigned field.
 --
 -- gateway_status holds PayU's raw status string and is deliberately NOT an
 -- ENUM - it is a third party's vocabulary and must be recorded verbatim for
@@ -287,7 +345,7 @@ CREATE TABLE IF NOT EXISTS donations (
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS donation_payment_details (
   donation_id     BIGINT UNSIGNED NOT NULL,
-  mihpayid        VARCHAR(64)     NULL      COMMENT 'SEC-01 replay guard. Unique; NULLs permitted for unpaid donations.',
+  mihpayid        VARCHAR(64)     NULL      COMMENT 'Data-integrity control, NOT the replay defence - unsigned by PayU. See ADR-026.',
   amount_minor    BIGINT UNSIGNED NULL,
   mode            VARCHAR(32)     NULL,
   bank_ref_num    VARCHAR(64)     NULL,

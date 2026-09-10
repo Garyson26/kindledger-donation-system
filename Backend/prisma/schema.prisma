@@ -250,12 +250,17 @@ model Donation {
 // -----------------------------------------------------------------------------
 // donation_payment_details
 // -----------------------------------------------------------------------------
-// The unique index on mihpayid is a SECURITY CONTROL (SEC-01 replay guard),
-// not tidiness. Phase 3 must treat the duplicate-key error it raises as a
-// successful idempotent no-op, never as a failure.
+// The unique index on mihpayid is a DATA-INTEGRITY control, NOT the replay
+// defence. mihpayid is not covered by PayU's response hash, so it is unsigned
+// and attacker-mutable: it can be varied to defeat uniqueness, or collided to
+// deny recording of a legitimate payment. The load-bearing replay control is
+// the donation state transition on signed fields (txnid, udf4). See ADR-026.
+//
+// Phase 3 should still treat the duplicate-key error as an idempotent no-op,
+// but must not rely on it for security.
 model DonationPaymentDetail {
   donationId    BigInt    @id @map("donation_id") @db.UnsignedBigInt
-  /// SEC-01 replay guard. Unique; NULLs permitted for unpaid donations.
+  /// Data-integrity control, not the replay defence - unsigned by PayU (ADR-026).
   mihpayid      String?   @unique(map: "uq_donation_payment_details_mihpayid") @db.VarChar(64)
   amountMinor   BigInt?   @map("amount_minor") @db.UnsignedBigInt
   mode          String?   @db.VarChar(32)

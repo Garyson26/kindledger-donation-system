@@ -339,7 +339,10 @@ test('accent-variant emails do NOT collide', async () => {
 });
 
 // =============================================================================
-// SEC-01 - the mihpayid replay guard
+// mihpayid uniqueness - a data-integrity control (ADR-026), not the replay
+// defence. mihpayid is unsigned by PayU; the replay defence is the state
+// transition on signed fields. These assertions still matter: the index keeps
+// one gateway payment id from being recorded against two donations.
 // =============================================================================
 test('donation_payment_details.mihpayid carries a UNIQUE index', async () => {
   const rows = await prisma.$queryRaw`
@@ -350,10 +353,10 @@ test('donation_payment_details.mihpayid carries a UNIQUE index', async () => {
       AND COLUMN_NAME = 'mihpayid'
   `;
 
-  assert.ok(rows.length > 0, 'no index on donation_payment_details.mihpayid at all (SEC-01 replay guard missing)');
+  assert.ok(rows.length > 0, 'no index on donation_payment_details.mihpayid at all (ADR-026 integrity control missing)');
   assert.ok(
     rows.some((r) => num(r.NON_UNIQUE) === 0),
-    'the index on mihpayid exists but is not UNIQUE; a replayed PayU callback could double-process'
+    'the index on mihpayid exists but is not UNIQUE; one gateway payment id could be recorded against two donations'
   );
 });
 
