@@ -22,6 +22,38 @@ function verifyHash(data) {
   return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(received, 'hex'));
 }
 
+// SEC-01: the signed `status` field must match the endpoint being called.
+// PayU signs failure and cancellation responses with the same formula as a
+// success, so a valid hash proves only that PayU sent the payload - not that
+// the payment succeeded. The donor can read their own failed payload straight
+// out of the browser network tab, because PayU delivers these as a form POST
+// through the browser.
+function isSuccessStatus(status) {
+  return String(status || '').trim().toLowerCase() === 'success';
+}
+
+// SEC-01: convert a currency value to integer minor units (paise) for exact
+// comparison. Amounts must never be compared as floats - `1500.00 !== 1500.00`
+// is not a hypothetical once values arrive as strings from a gateway and as
+// binary doubles from the database.
+//
+// PayU sends a decimal string, which is parsed digit-wise and never passed
+// through a float. The stored amount is currently a Mongoose Number, so it is
+// rounded; that rounding disappears in Phase 1a, where the column becomes
+// integer paise.
+//
+// Returns null for anything malformed, which callers must treat as a mismatch.
+function toMinorUnits(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? Math.round(value * 100) : null;
+  }
+  const m = /^(\d{1,15})(?:\.(\d{1,2}))?$/.exec(String(value == null ? '' : value).trim());
+  if (!m) return null;
+  const major = Number.parseInt(m[1], 10);
+  const minor = m[2] ? Number.parseInt(m[2].padEnd(2, '0'), 10) : 0;
+  return major * 100 + minor;
+}
+
 // Initiate Payment
 router.post('/initiate', async (req, res) => {
   try {
@@ -141,37 +173,77 @@ router.post('/success', async (req, res) => {
 
     console.log('✓ Hash verified successfully');
 
+    // SEC-01 (1/4): a valid hash is not a successful payment. Refuse anything
+    // whose SIGNED status is not a success - notably a genuine, correctly
+    // signed failure or cancellation payload replayed at this endpoint.
+    if (!isSuccessStatus(paymentData.status)) {
+      console.warn('Success callback: refusing payload with signed status', paymentData.status);
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=payment_not_successful`);
+    }
+
     // Extract donation ID - try multiple possible field names
     const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
 
-    // Update donation status if donationId exists
-    if (donationId) {
-      console.log('Updating donation:', donationId);
-
-      const updatedDonation = await Donation.findByIdAndUpdate(
-        donationId,
-        {
-          status: 'Approved',
-          paymentStatus: 'Paid',
-          transactionId: paymentData.txnid || paymentData.TXNID,
-          paymentDetails: {
-            mihpayid: paymentData.mihpayid || paymentData.MIHPAYID,
-            amount: paymentData.amount || paymentData.AMOUNT,
-            mode: paymentData.mode || paymentData.MODE,
-            bank_ref_num: paymentData.bank_ref_num || paymentData.BANK_REF_NUM,
-            paymentDate: new Date()
-          }
-        },
-        { new: true, runValidators: false }
-      );
-
-      if (updatedDonation) {
-        console.log('✓ Donation successfully marked as paid:', donationId);
-      } else {
-        console.error('✗ Donation NOT FOUND in database:', donationId);
-      }
-    } else {
+    if (!donationId) {
       console.error('✗ No donation ID found in payment data');
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
+    }
+
+    // SEC-01 (2/4): load the donation before mutating it, so the signed
+    // amount can be checked against what we priced server-side.
+    const donation = await Donation.findById(donationId);
+    if (!donation) {
+      console.error('✗ Donation NOT FOUND in database:', donationId);
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
+    }
+
+    // SEC-01 (3/4): idempotency. A donation already marked Paid is not
+    // rewritten - a replayed genuine success must not overwrite the original
+    // payment metadata or move paymentDate forward.
+    if (donation.paymentStatus === 'Paid') {
+      console.log('Success callback: donation already Paid, no-op:', donationId);
+      return res.redirect(
+        `${payuConfig.FRONTEND_SUCCESS_URL}?txnid=${encodeURIComponent(paymentData.txnid || '')}&amount=${encodeURIComponent(paymentData.amount || '')}&status=success`
+      );
+    }
+
+    // SEC-01 (4/4): the signed amount must equal the server-priced amount,
+    // compared as integer minor units.
+    const signedMinor = toMinorUnits(paymentData.amount || paymentData.AMOUNT);
+    const expectedMinor = toMinorUnits(donation.amount);
+    if (signedMinor === null || expectedMinor === null || signedMinor !== expectedMinor) {
+      console.error('✗ Amount mismatch', {
+        txnid: paymentData.txnid,
+        donationId,
+        signedMinor,
+        expectedMinor
+      });
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=amount_mismatch`);
+    }
+
+    console.log('Updating donation:', donationId);
+
+    const updatedDonation = await Donation.findByIdAndUpdate(
+      donationId,
+      {
+        status: 'Approved',
+        paymentStatus: 'Paid',
+        transactionId: paymentData.txnid || paymentData.TXNID,
+        paymentDetails: {
+          mihpayid: paymentData.mihpayid || paymentData.MIHPAYID,
+          amount: paymentData.amount || paymentData.AMOUNT,
+          mode: paymentData.mode || paymentData.MODE,
+          bank_ref_num: paymentData.bank_ref_num || paymentData.BANK_REF_NUM,
+          paymentDate: new Date()
+        }
+      },
+      { new: true, runValidators: false }
+    );
+
+    if (updatedDonation) {
+      console.log('✓ Donation successfully marked as paid:', donationId);
+    } else {
+      console.error('✗ Donation disappeared mid-request:', donationId);
     }
 
     // Redirect to frontend success page
@@ -193,6 +265,14 @@ router.post('/failure', async (req, res) => {
     if (!verifyHash(paymentData)) {
       console.warn('Failure callback: hash mismatch from', req.ip);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
+    }
+
+    // SEC-01: refuse a signed SUCCESS payload here. The status must match the
+    // endpoint in both directions, otherwise a genuine success replayed at
+    // this URL would mark a paid donation as Rejected/Failed.
+    if (isSuccessStatus(paymentData.status)) {
+      console.warn('Failure callback: refusing a signed success payload', paymentData.txnid);
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=status_mismatch`);
     }
 
     // Extract donation ID - try multiple possible field names
@@ -262,6 +342,13 @@ router.post('/cancel', async (req, res) => {
     if (!verifyHash(paymentData)) {
       console.warn('Cancel callback: hash mismatch from', req.ip);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
+    }
+
+    // SEC-01: refuse a signed SUCCESS payload here, for the same reason as
+    // /failure - a paid donation must not be walked back to Cancelled.
+    if (isSuccessStatus(paymentData.status)) {
+      console.warn('Cancel callback: refusing a signed success payload', paymentData.txnid);
+      return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=status_mismatch`);
     }
 
     // Extract donation ID - try multiple possible field names

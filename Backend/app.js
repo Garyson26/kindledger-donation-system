@@ -18,6 +18,16 @@ const paymentRoutes = require("./routes/payment");
 
 const app = express();
 
+// SEC-04: trust exactly one proxy hop. Without this, `req.ip` behind Vercel
+// (or any reverse proxy) is the proxy's own address, so express-rate-limit
+// keys every client into a single shared bucket - which both fails to isolate
+// an attacker and lets one noisy client lock everyone else out.
+//
+// The hop count must match the number of proxies actually in front of the app.
+// One is correct for Vercel and for a single Nginx. If a CDN is added in
+// front, raise this to match, or X-Forwarded-For becomes client-spoofable.
+app.set('trust proxy', 1);
+
 // Security headers (BE-HIGH-05)
 app.use(helmet({
   contentSecurityPolicy: false, // CSP is handled via Vercel headers on the frontend

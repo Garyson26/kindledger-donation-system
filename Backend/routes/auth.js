@@ -405,7 +405,9 @@ router.post("/forgot-password/request", authLimiter, async (req, res) => {
 });
 
 // Verify Code
-router.post("/forgot-password/verify", async (req, res) => {
+// SEC-02: rate limited, and every wrong code is counted. Without both, the
+// 6-digit code is brute-forceable inside its 15-minute window.
+router.post("/forgot-password/verify", authLimiter, async (req, res) => {
   const { email, code } = req.body;
 
   try {
@@ -423,15 +425,31 @@ router.post("/forgot-password/verify", async (req, res) => {
       return res.status(400).json({ error: "No verification code found. Please request a new one." });
     }
 
+    // SEC-02: enforce the attempt cap, mirroring loginOTPAttempts above.
+    // resetPasswordAttempts already existed in the schema and was written but
+    // never read, so the control was designed and left unwired.
+    if ((user.resetPasswordAttempts || 0) >= 5) {
+      user.resetPasswordCode = undefined;
+      user.resetPasswordExpires = undefined;
+      user.resetPasswordAttempts = 0;
+      await user.save();
+      return res.status(429).json({ error: "Too many attempts. Please request a new code." });
+    }
+
     if (new Date() > user.resetPasswordExpires) {
       return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
     }
 
     if (user.resetPasswordCode !== code) {
+      user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
+      await user.save();
       return res.status(400).json({ error: "Invalid verification code" });
     }
 
-    // Code is valid
+    // Code is valid. The attempt counter is deliberately NOT reset here: this
+    // endpoint only checks the code, and /forgot-password/reset still has to
+    // accept it. Clearing the count on a correct guess would hand an attacker
+    // a fresh budget of 5 for every lucky hit.
     res.json({
       message: "Verification successful",
       verified: true
@@ -443,7 +461,10 @@ router.post("/forgot-password/verify", async (req, res) => {
 });
 
 // Reset Password (after verification)
-router.post("/forgot-password/reset", async (req, res) => {
+// SEC-02: this is the endpoint that actually changes the password, so it needs
+// the limiter and the attempt cap more than /verify does - an attacker can
+// skip /verify entirely and brute-force here.
+router.post("/forgot-password/reset", authLimiter, async (req, res) => {
   const { email, code, newPassword } = req.body;
 
   try {
@@ -460,8 +481,20 @@ router.post("/forgot-password/reset", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // SEC-02: enforce the attempt cap before checking the code, and void the
+    // code once it is exhausted so a fresh request is required.
+    if ((user.resetPasswordAttempts || 0) >= 5) {
+      user.resetPasswordCode = undefined;
+      user.resetPasswordExpires = undefined;
+      user.resetPasswordAttempts = 0;
+      await user.save();
+      return res.status(429).json({ error: "Too many attempts. Please request a new code." });
+    }
+
     // Verify code one more time
     if (!user.resetPasswordCode || user.resetPasswordCode !== code) {
+      user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
+      await user.save();
       return res.status(400).json({ error: "Invalid verification code" });
     }
 
@@ -472,10 +505,12 @@ router.post("/forgot-password/reset", async (req, res) => {
     // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // Update password and clear reset fields
+    // Update password and clear reset fields. The attempt counter is reset
+    // only here, on a successful password change.
     user.password = hashedPassword;
     user.resetPasswordCode = undefined;
     user.resetPasswordExpires = undefined;
+    user.resetPasswordAttempts = 0;
     await user.save();
 
     res.json({ message: "Password reset successful" });
