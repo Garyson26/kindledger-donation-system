@@ -185,6 +185,30 @@ the full schema applied, but no API container runs. Phase 3 must remove the
 TCP connect probe against port 5000 — with a real `/api/health` request once
 that endpoint exists.
 
+**Amended by SPEC-2 section 0.2 (Phase 2). The gating is removed.** Both
+`profiles: ["app"]` keys are gone from `docker-compose.yml` and the api
+healthcheck is now a real request:
+`curl --fail --silent http://127.0.0.1:5000/api/health`.
+
+The three reasons the gate existed have each been answered, and it is worth
+being precise about which, because two of them were answered and one was
+side-stepped:
+
+| Reason for the gate | What changed |
+|---|---|
+| `config/db.js` exits on an unreachable database | **Answered.** `config/prisma.js` reports failure through a return value instead (ADR-039). `config/db.js` is untouched and still exits — see the consequence below. |
+| `/api/health` does not exist | **Answered.** `Backend/routes/health.js` (ADR-038). |
+| Section 1 forbids touching routes or middleware | **Side-stepped, deliberately and narrowly.** SPEC-2 keeps the fence and names one exception: a new route file that imports no Mongoose. Nothing under `Backend/middleware/` was touched at all. |
+
+**Consequence, and it is the one to carry into Phase 3.** `MONGODB_URI` is still
+passed to the api container, because the additive model leaves Mongoose serving
+every existing route. So the container starts on its own merits *only while that
+variable is present and valid*: `config/db.js:process.exit(1)` is still there,
+still reachable, and still the reason a bad Mongo credential produces an exited
+container rather than an unhealthy one. Acceptance criterion 1 is now met for
+real, but by supplying Mongo rather than by no longer needing it. Phase 3 closes
+this properly when it deletes `config/db.js`.
+
 ---
 
 ## ADR-007 — Where the Phase 1a artefacts live
@@ -1056,3 +1080,410 @@ Practical measures for Phase 3, in order of value:
 3. Prefix a leading `=`, `+`, `-` or `@` with `'` in any CSV export.
 4. Never interpolate them into an HTML email without passing through the
    existing `escapeHtml()` helper.
+
+---
+
+# Phase 2 (SPEC-2) — additive MySQL data layer
+
+Everything below was decided while executing SPEC-2. ADR-028 to ADR-037 are on
+the `docs/incident-j1-j6` branch and are not yet merged, so this file currently
+reads 027 then 038. **That gap is a merge-order dependency, not a numbering
+error** — see ADR-046.
+
+---
+
+## ADR-038 — `routes/health.js` is the named exception to the routes fence, and it uses a shared secret rather than `adminAuth`
+
+**Status** Accepted
+
+SPEC-2 section 1 forbids modifying files under `Backend/routes/`. Section 2
+names one exception: a new file, `Backend/routes/health.js`. It is added.
+
+**Why the exception is not a hole in the fence.** The fence exists to stop
+Phase 2 editing the six route files that consume Mongoose, because an additive
+phase that quietly rewires a live route stops being additive. A *new* file that
+imports only the new data layer creates none of that coupling. The property the
+fence protects is "no existing route changed behaviour", and this file cannot
+change any existing route's behaviour because nothing routes to it yet except
+the compose healthcheck.
+
+**Why a shared secret and not `adminAuth`.** SPEC-2 section 5 permits either.
+`adminAuth` does `User.findById(...)` on a Mongoose model. Importing it into
+`routes/health.js` would pull the old data layer into the one file whose purpose
+is to demonstrate the new one works — and would mean a Mongo outage made the
+MySQL health check unauthenticatable. The secret is compared with
+`crypto.timingSafeEqual` and refused outright if it is shorter than 16
+characters, so an unset or placeholder `HEALTH_DIAGNOSTIC_SECRET` fails closed
+to the unauthenticated form rather than opening the diagnostics.
+
+**The unauthenticated response carries a status string and nothing else.** Not
+the error, not the latency, not whether Redis is configured, not the pool size.
+An open endpoint that reports connection state tells an attacker exactly when
+the database is down, which is when everything else is most likely to fail open.
+`200`/`503` is all a load balancer needs.
+
+**Consequences** Phase 3 may replace the secret with `adminAuth` once
+`adminAuth` no longer touches Mongoose. Until then, whoever operates the stack
+has one more secret to manage. The diagnostic form also reports `req.ip` and the
+`X-Forwarded-For` it received, which is what makes the trust-proxy test in
+ADR-043 observable end to end; that pair is behind the secret because together
+they disclose the deployment's proxy-hop count.
+
+---
+
+## ADR-039 — Infrastructure failure is reported through a return value; the data layer never calls `process.exit`
+
+**Status** Accepted
+
+`Backend/config/prisma.js` has no `process.exit` anywhere in it, and says so in
+a comment so the omission does not read as an oversight. `checkDatabase()`
+returns `{ok, error, latencyMs}`. An unreachable database produces a `503` from
+`/api/health` and an unhealthy container.
+
+**Why.** `Backend/config/db.js` calls `process.exit(1)` when Mongo is
+unreachable. On Vercel that is the direct cause of the
+`FUNCTION_INVOCATION_FAILED` shape production has been in: the process dies
+before it can answer, so every route returns a platform error with no
+application log line, and the failure is indistinguishable from a code fault. In
+a container it is worse, because `restart: unless-stopped` turns it into a
+crash loop that buries the original error in restart noise.
+
+A process that stays up and reports "the database is unreachable" is
+diagnosable. A process that exited is a guess.
+
+**This is a deliberate asymmetry, not consistency for its own sake.** The two
+files now behave differently on the same class of failure, and that is the
+intended state for the duration of the additive phase. `config/db.js` was not
+touched: SPEC-2 section 1 fences it, and changing Mongo's startup behaviour
+mid-migration would alter live production semantics for no Phase 2 benefit.
+
+**Consequences** Anything added to this layer later inherits the rule. The tests
+enforce it rather than trusting it: `data-layer.test.js` runs `checkDatabase()`
+against a dead port **in a child process** and asserts the child exits `0`
+having printed a verdict. If someone reintroduces the exit, that test fails
+rather than the runner dying silently. The same reasoning drives the Redis
+`'error'` handler in ADR-042 — an unhandled `'error'` event is `process.exit`
+by another name.
+
+---
+
+## ADR-040 — Money and identifiers cross the repository boundary as plain JavaScript values, and the conversion refuses rather than rounds
+
+**Status** Accepted
+
+Every value a repository returns is a plain JS value. `BIGINT` columns come back
+as `Number` via `fromBigInt()`; the external identifier is the `CHAR(36)` uuid,
+exposed as `id`. The internal `BIGINT` primary key is never returned, and
+`toMinorUnits()` is the only place a decimal string becomes minor units.
+
+**Why not just return what Prisma returns.** Prisma maps `BIGINT` to `BigInt`,
+which `JSON.stringify` throws on. Every route would need its own conversion, and
+the first one that forgot would produce a `500` on a page that renders an amount
+— discovered in production, on the receipt.
+
+**Why `fromBigInt` throws instead of clamping.** Beyond
+`Number.MAX_SAFE_INTEGER` a silent conversion loses the low digits of an amount.
+A `RangeError` on a value that large is the correct outcome: it cannot be a real
+donation, so it is either corruption or an attack, and both deserve a stack
+trace rather than a plausible-looking number.
+
+**Why `toMinorUnits` returns `null` for malformed input rather than `0`.** It
+parses digit-wise from the string rather than multiplying a float, because
+`1500.07 * 100` is `150006.99999999999`. Inputs it will not accept — more than
+two decimal places, exponent notation, negatives, empty — return `null`. A
+caller that treats `null` as `0` accepts a payment of nothing, which is at least
+loud; returning `0` directly would make that silent. Phase 3 route code must
+check.
+
+**Why the internal key stays hidden.** Exposing a sequential `BIGINT` in an API
+is an enumeration primitive: donation `#4102` implies `#4101` exists. The uuid
+carries no such information, and `legacy_id` keeps the old ObjectIds resolvable
+for receipts issued before the migration.
+
+**Consequences** This is the seam. Phase 3 imports `Backend/repositories/` and
+not `@prisma/client`, so a later ORM change stays behind this boundary. Calling
+`getPrisma()` from a route defeats the point; it is exported for the health check
+and the scheduler only, and labelled as such.
+
+---
+
+## ADR-041 — `distinct()` keeps DATA semantics, not enum semantics
+
+**Status** Accepted
+
+`donations.listPaymentStatusesInUse()` and `listStatusesInUse()` issue a
+`distinct` query against the table. They do **not** return the ENUM's member
+list.
+
+**Why this needs writing down.** Returning the enum members is the obvious
+implementation once the column is an ENUM: it is a compile-time constant, needs
+no query, and produces a superset of the right answer. It is wrong. Mongoose's
+`Donation.distinct('paymentStatus')` answered "which statuses exist in your
+data". The enum answers "which statuses are theoretically possible". The values
+feeding the admin filter dropdown would change from the first to the second, and
+the filter would stop being able to show that, for instance, nothing has been
+Cancelled all year — every option would always be present, and every option
+would be selectable into an empty result.
+
+That is a visible behaviour change in the admin UI, produced by a data-layer
+refactor, with no line of route code altered. Exactly the class of regression an
+additive phase is supposed to make impossible.
+
+**Consequences** Two queries where a constant would do, on an indexed column.
+Accepted. The test asserts the data semantics by construction: the fixtures
+create only `Pending` and `Paid` rows, so a result containing all four members
+would mean the enum was being read.
+
+---
+
+## ADR-042 — The Redis rate-limit store is built but not wired, so SEC-04 is NOT closed by this phase
+
+**Status** Open — SEC-04 remains open
+
+`Backend/config/rateLimiters.js` provides a Redis-backed limiter factory with
+`authLimiter` at the same 5-per-minute budget as the live one. **Nothing imports
+it.** The limiters actually in force are still the ones declared in
+`Backend/routes/auth.js`, which SPEC-2 section 1 fences off.
+
+**So SEC-04 is not closed.** The store existing and the store being used are
+different claims, and only the second one closes the finding. Recorded
+explicitly because "Redis rate limiting added" is how this would otherwise be
+summarised in a changelog, and the next person to read that summary would
+reasonably believe the finding was fixed. It closes when Phase 3 swaps the
+import in `routes/auth.js`.
+
+**Why parity on the numbers matters.** The new `authLimiter` is 5 per minute
+because the old one is. A phase that silently tightened the limit would be
+indistinguishable, from the outside, from a phase that broke something.
+
+**Why the memory fallback is deliberate.** With `REDIS_URL` unset the limiters
+use `express-rate-limit`'s memory store and announce
+`[rateLimiters] store=memory (single replica only)` at boot. A self-hosting NGO
+running one container should not be required to operate Redis, and one
+long-lived process with a memory store already fixes most of what was broken on
+Vercel — where each concurrent function instance had its own counter and a
+cold start reset it, so an attacker with concurrency got five attempts *per
+instance*. The memory store is correct for one replica and wrong the moment
+there are two, which is why it warns rather than staying quiet.
+
+**The `'error'` handler is load-bearing.** `node-redis` emits `'error'` on a
+failed connection; unhandled, that is an uncaught exception and the process
+dies, reintroducing precisely the behaviour ADR-039 exists to remove. The
+handler logs, and the limiter degrades instead.
+
+---
+
+## ADR-043 — Nginx overwrites `X-Forwarded-For` with `$remote_addr`, and the `set_real_ip_from` block is removed
+
+**Status** Accepted — **fixes a spoofing hole found during this phase**
+
+Two changes in `docker/nginx/`:
+
+1. `kindledger-proxy.conf` now sets
+   `proxy_set_header X-Forwarded-For $remote_addr;` — previously
+   `$proxy_add_x_forwarded_for`.
+2. The `set_real_ip_from` / `real_ip_header` / `real_ip_recursive` block in
+   `nginx.conf` is deleted, left commented for a future CDN deployment.
+
+**The hole.** The removed block trusted `172.16.0.0/12`. The Docker bridge
+gateway address sits inside that range. `real_ip_header X-Forwarded-For` with a
+trusted source means Nginx *replaces* `$remote_addr` with the client-supplied
+header value — so any request whose source address fell in the bridge range
+could name its own client IP, and Nginx would believe it and pass it upstream as
+authoritative. That covers host-local and inter-container traffic, and on a host
+whose Docker network is reachable it is a straightforward rate-limit and
+audit-log bypass: pick a fresh `X-Forwarded-For` per request and the `limit_req`
+zone, keyed on `$binary_remote_addr`, never sees the same client twice.
+
+**Why overwrite rather than append.** `$proxy_add_x_forwarded_for` appends to
+whatever the client sent, so a request carrying `X-Forwarded-For: 1.2.3.4`
+reaches Express as `1.2.3.4, <real>`. With `trust proxy: 1` Express takes the
+last entry, which *is* correct — but correct by arithmetic. It stops being
+correct the moment the hop count and the header disagree, and the hop count is a
+deployment property that changes the day someone puts a CDN in front.
+`$remote_addr` discards the client value outright, so `trust proxy: 1` is right
+for a structural reason instead of a numerical one.
+
+**How it is proved, and why the previous proof was not one.** Package A's test
+set `X-Forwarded-For` directly on a request to Express with no proxy in front.
+That shows Express *reads* the header; it cannot show Express reads it *safely*,
+because the test passes identically whether the deployment discards a
+client-supplied value or trusts it. `Backend/test/trust-proxy.test.js` therefore
+issues its requests from throwaway containers on the compose network, through
+the real Nginx, and asserts both halves: the spoofed value is absent from what
+the app resolves *and* from the header it received, and two concurrently running
+containers resolve to two distinct addresses. The second assertion is what makes
+the first meaningful — if every client collapsed to the proxy's own address
+the spoof would also be discarded, and five bad logins from anywhere would lock
+out the world.
+
+**Consequences** If a CDN or a second proxy is ever placed in front of Nginx,
+both the commented block and `app.set('trust proxy', 1)` must be revisited
+together. Uncommenting one without the other silently restores this hole.
+
+---
+
+## ADR-044 — The scheduler is double-guarded, and is deliberately not pointed at MongoDB
+
+**Status** Accepted
+
+`Backend/services/scheduler.js` registers two jobs — the ten-year retention
+purge (BUG-04) and the hourly pending-signup expiry sweep, which replaces
+MongoDB's TTL index. Registration requires `SCHEDULER_ENABLED=true`, and the
+default is off.
+
+**Why they are not pointed at MongoDB.** They are inert until Phase 4 loads
+data, and that is correct rather than a limitation. Live data is still in Mongo,
+so these jobs run against empty MySQL tables and delete nothing. Writing Mongo
+versions would produce code thrown away at cutover, and would put a
+*destructive* scheduled job against live production data into a phase whose
+entire premise is that it does not touch live production data.
+
+**Why the flag.** Without it, a Phase 3 deployment that shipped before the Phase
+4 migration would begin deleting rows from a partially populated database on its
+first 02:00 tick. An operator turns it on once, deliberately, after cutover.
+
+**Why the purge takes `dryRun`.** BUG-04 means the retention purge has *never
+executed*: it was declared as a Vercel cron against
+`POST /api/admin/cleanup/trigger`, which sits behind `adminAuth`, so the cron
+received a `401` every day. The first real run will therefore delete a decade of
+accumulated rows in a single pass, and nobody currently knows how many that is.
+The first post-migration run must be `dryRun: true`.
+
+**Why the sweep is hourly and the purge daily.** The TTL index being replaced
+was continuous. A daily sweep would let a pending signup — a row holding a
+name, an email and a bcrypt hash — outlive its stated 24-hour lifetime by up
+to a further day, which is a retention problem rather than a tidiness one.
+
+**Consequences** Both jobs wrap their body in `try`/`catch`: a failed scheduled
+job logs and the process survives, per ADR-039. Timezone is `Asia/Kolkata`,
+matching the original `dataCleanupService.js` declaration.
+
+---
+
+## ADR-045 — `Backend/controllers/authController.js` is deleted — recorded as a finding, not as housekeeping
+
+**Status** Accepted
+
+The file is removed. A grep for `authController` across the repository returns no
+importers; the result is stated in the Phase 2 report.
+
+**Why this is a finding rather than a tidy-up.** It was not an unused stub. It
+held a parallel implementation of signup and login — its own bcrypt hashing,
+its own token issuance — sitting beside the live one in
+`Backend/routes/auth.js`, unreferenced and unmaintained. And the copy was not
+merely stale, it was **vulnerable**:
+
+1. **Privilege escalation by mass assignment.** Its signup handler read
+   `const { name, email, password, role } = req.body` and passed `role`
+   straight into `new User(...)`. Any client could have registered itself as
+   `admin` by adding one field to the request body. This is the substantive
+   finding; the rest follows from it.
+2. **No verification gate and a weaker hash.** It issued a usable account with
+   no OTP step — bypassing the `PendingSignup` flow entirely — and hashed
+   at bcrypt cost 10 against the live path's 12.
+3. **It is a plausible target for a future wiring mistake.** A file named
+   `authController.js` in a `controllers/` directory looks like the canonical
+   place auth lives. Someone adding a route reasonably reaches for it, and gets
+   that posture rather than the live one. None of the Package A hardening
+   (SEC-01, SEC-02, SEC-04) was ever applied to it.
+4. **It cost the security review real effort.** Every audit of the auth surface
+   had to establish, again, that this copy was unreachable before it could
+   discount the escalation path.
+
+**It was not exploitable as it stood.** Nothing routed to it, so the escalation
+required someone to wire it up first. That is what made it a latent defect
+rather than an incident, and it is also exactly why deleting it is the fix:
+leaving it with a warning comment relies on the next reader trusting the comment
+more than the code.
+
+`for_ocean_security_review.md` had already called for its deletion. Phase 2 is
+simply the first work package with a legitimate reason to touch the file.
+
+**Consequences** None at runtime — nothing imported it, and the
+`Backend/controllers/` directory is now empty and removed with it. Recorded here
+so the deletion is not mistaken for scope creep in the Phase 2 diff, and so the
+reason survives beyond the commit message.
+
+---
+
+## ADR-046 — Phase 2 is branched from `chore/dependency-cleanup`, not from `main`, and the ADR numbering records a merge-order dependency
+
+**Status** Accepted — **deviation from SPEC-2's stated baseline**
+
+SPEC-2 states the baseline is `main`. The `phase-2-data-layer` branch is based
+on `chore/dependency-cleanup` (`74d6c33`), which is itself based on `main`
+(`58bdadf`).
+
+**Why.** This phase must add `rate-limit-redis`, which means committing a
+regenerated lockfile. Generating one on `main` would bake in the five unused
+packages that `chore/dependency-cleanup` deletes, and the next merge of that
+branch would then conflict on the lockfile in the least tractable way. Basing
+Phase 2 on the cleanup produces one coherent lockfile instead of two competing
+ones.
+
+**Consequence: merging Phase 2 carries the dependency cleanup with it.** That is
+not hidden, but it does mean the Phase 2 pull request is larger than its title
+suggests, and the cleanup gets whatever review Phase 2 gets.
+
+**Second consequence: this file has a ten-ADR gap.** ADR-028 to ADR-037 exist
+only on `docs/incident-j1-j6`, which is unmerged. Phase 2 code cites two of them
+— `repositories/pendingSignups.js` cites ADR-033 (duplicate index
+declarations) and `repositories/users.js` cites ADR-034 (a correct reset code
+must not clear the attempt counter). Those citations are dangling on this branch.
+
+**So the merge order is: `docs/incident-j1-j6` first, then
+`phase-2-data-layer`.** Reversed, `docs/decisions.md` ships reading 027 then
+038, with two citations pointing at records that do not exist yet. Numbering
+Phase 2 from 028 instead would have been worse: it would produce ten genuine
+duplicate ADR numbers the moment both branches landed.
+
+---
+
+## ADR-047 — MongoDB is still required to boot, and it is supplied by a named override rather than by the deployment topology
+
+**Status** Accepted — **transitional; delete at the Phase 3 cutover**
+
+`docker-compose.legacy-mongo.yml` adds a throwaway `mongo:7` service and points
+the api container at it. It is layered explicitly:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml up
+```
+
+**Why it is needed at all.** ADR-006's amendment removed the profile gating on
+the strength of three things being fixed. Two were fixed properly. The third was
+not: `Backend/config/db.js` still calls `process.exit(1)` when it cannot reach
+Mongo, and SPEC-2 section 1 fences that file. Because the migration is additive,
+Mongoose still serves every existing route, so `connectDB()` still runs at boot.
+
+The consequence is precise and worth stating plainly: **an absent or invalid
+`MONGODB_URI` produces an EXITED api container, not an unhealthy one.** The
+healthcheck never gets a chance to answer, so the failure looks like the
+`FUNCTION_INVOCATION_FAILED` shape rather than like a database being down. That
+is the exact behaviour ADR-039 removes from the new layer, still present in the
+old one, and not fixable inside this phase's fence.
+
+So SPEC-2's acceptance criterion — four services up, healthcheck passing —
+is satisfiable only with a reachable MongoDB. Requiring production Atlas
+credentials to watch the stack come up would be wrong on its own terms, and
+those credentials are in any case currently rejected (`bad auth`).
+
+**Why it is not in `docker-compose.yml`.** That file is the deployment topology,
+and MongoDB is the thing this migration exists to remove. A `mongo` service in
+it would put the source database permanently into the architecture diagram, and
+the next reader would reasonably conclude the target system runs both. An
+override that has to be named on the command line cannot be mistaken for the
+target state.
+
+**The container is deliberately austere.** No credentials, no volume, no
+persistence. Each of those would imply the data is worth keeping, and under the
+additive model nothing in Phase 2 writes to Mongo at all — it exists so that
+`connectDB()` returns.
+
+**Consequences** Anyone running the plain `docker compose up` without a
+`MONGODB_URI` gets an exited api container, which is why `.env.example` now
+carries the warning at the top rather than buried in a variable comment. Delete
+this file at the Phase 3 cutover alongside `config/db.js`, the Mongoose models
+and the variable itself. If it still exists after Phase 3, something did not get
+switched over.

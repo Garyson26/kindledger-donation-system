@@ -1,0 +1,70 @@
+# =============================================================================
+# TRANSITIONAL OVERRIDE - a throwaway MongoDB for local work (Phase 2 only)
+# =============================================================================
+#   docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml up
+#
+# WHY THIS FILE EXISTS.
+#
+# Phase 2 is ADDITIVE: MySQL carries the new data layer, and Mongoose still
+# serves every existing route until Phase 3 switches them over. So
+# Backend/config/db.js still runs at boot, and it still calls process.exit(1)
+# when it cannot connect. An absent or invalid MONGODB_URI therefore produces an
+# EXITED api container rather than an unhealthy one - which is the whole
+# behaviour ADR-039 exists to remove from the new layer, and which SPEC-2
+# section 1 fences us out of fixing.
+#
+# The consequence is that `docker compose up` can only satisfy SPEC-2's
+# acceptance criterion - all four services up, healthcheck passing - if a
+# reachable MongoDB exists. Nobody working on the data layer should need
+# production Atlas credentials to see the stack come up, and the production
+# credentials are in any case currently rejected.
+#
+# WHY IT IS NOT IN docker-compose.yml.
+#
+# docker-compose.yml is the deployment topology, and MongoDB is the thing this
+# migration exists to remove. Putting a mongo service in it would make the
+# database we are migrating away from a permanent part of the architecture
+# diagram, and the next person to read that file would reasonably conclude the
+# target system runs both. An override that must be named explicitly on the
+# command line cannot be mistaken for the target state.
+#
+# DELETE THIS FILE AT THE PHASE 3 CUTOVER, together with Backend/config/db.js,
+# the Mongoose models, and the MONGODB_URI variable. If it is still here after
+# Phase 3, something did not get switched over.
+#
+# NOT FOR ANY DEPLOYED HOST. No authentication, no persistence, no backups.
+# =============================================================================
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    # No credentials: the container is not published to the host and exists
+    # only so that connectDB() succeeds. Adding auth here would imply this data
+    # is worth protecting, and it is not - it starts empty every time.
+    #
+    # No volume, deliberately. State that survives a restart would start
+    # looking like a development database people rely on, and the point of the
+    # additive model is that nothing in Phase 2 writes here.
+    command: ["mongod", "--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - internal
+
+  api:
+    environment:
+      # Overrides whatever is in .env. `kindledger_legacy` names it as the old
+      # datastore rather than as the application database.
+      MONGODB_URI: mongodb://mongo:27017/kindledger_legacy
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy

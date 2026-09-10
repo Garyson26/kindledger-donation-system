@@ -19,7 +19,9 @@
     "migrate:dev": "node db/no-migrate-dev.js",
     "prisma:migrate:dev": "node db/no-migrate-dev.js",
     "db:check-drift": "node db/check-drift.js",
-    "test:guard": "node --test test/server-guard.test.js"
+    "test:guard": "node --test test/server-guard.test.js",
+    "test:data-layer": "node --test test/data-layer.test.js",
+    "test:trust-proxy": "node --test test/trust-proxy.test.js"
   },
   "keywords": [],
   "author": "",
@@ -42,7 +44,9 @@
     "mongoose": "^8.18.1",
     "morgan": "^1.10.1",
     "node-cron": "^4.2.1",
-    "nodemailer": "^10.0.3"
+    "nodemailer": "^10.0.3",
+    "rate-limit-redis": "^6.0.1",
+    "redis": "^6.2.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10",
@@ -54,6 +58,8 @@
     "db:migrate": "Always migrate deploy, never migrate dev. Runs the server compatibility guard first.",
     "db:check-server": "Refuses MySQL < 8.0.16 and MariaDB. See db/require-mysql-version.js.",
     "migrate / migrate:dev / prisma": "Deliberate dead ends. See db/no-migrate-dev.js and CONTRIBUTING.md.",
-    "test:schema": "Needs a live MySQL at DATABASE_URL with the schema applied."
+    "test:schema": "Needs a live MySQL at DATABASE_URL with the schema applied.",
+    "test:data-layer": "Needs a live MySQL at DATABASE_URL with the schema applied. Set TEST_REDIS_URL to include the Redis store assertion.",
+    "test:trust-proxy": "Needs the whole compose stack up plus docker on PATH. Run with TEST_STACK=1 and HEALTH_DIAGNOSTIC_SECRET matching the api container."
   }
 }

@@ -1,18 +1,16 @@
 # =============================================================================
 # KindLedger Donation System - container topology (SPEC-1A section 3)
 # =============================================================================
-#   docker compose up                     -> db + redis. Schema auto-applied.
-#   docker compose --profile app up        -> adds api + nginx. See the warning
-#                                             on the api service before using.
+#   docker compose up      -> all four services. Schema auto-applied on a
+#                             fresh volume; the api container serves and
+#                             answers its own healthcheck.
 #
-# WHY api AND nginx ARE PROFILE-GATED
-# Phase 1a is forbidden from touching Backend/ route handlers and middleware,
-# but Backend/config/db.js calls process.exit(1) when it cannot reach
-# MONGODB_URI - which deliverable 7 removes. The api container would therefore
-# exit(1) on every start, and /api/health (SPEC-1A section 3.3) does not exist
-# yet either. Both are Phase 3 work. Gating them keeps the default stack green
-# and honest instead of shipping a restart loop.
-# See docs/decisions.md ADR-006.
+# THE profiles: GATING IS GONE (ADR-006, amended by SPEC-2 section 0.2).
+# Phase 1a gated api and nginx because the container could not start: there was
+# no /api/health, and config/db.js called process.exit(1) without MONGODB_URI.
+# Phase 2 supplies a working MySQL data layer, a health endpoint, and a
+# connection layer that reports failure through health instead of exiting
+# (ADR-039), so the container now boots on its own merits.
 # =============================================================================
 
 name: kindledger
@@ -100,7 +98,6 @@ services:
   # WARNING: cannot start until Phase 3. See the header of this file.
   # ---------------------------------------------------------------------------
   api:
-    profiles: ["app"]
     build:
       context: ./Backend
       dockerfile: ../docker/api.Dockerfile
@@ -129,6 +126,14 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE:-false}
       UPLOADS_DIR: /var/lib/kindledger/uploads
+      # Phase 2 runtime. SCHEDULER_ENABLED defaults to off so a deployment
+      # cannot start deleting rows before the Phase 4 migration has run.
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
+      PRISMA_CONNECTION_LIMIT: ${PRISMA_CONNECTION_LIMIT:-10}
+      HEALTH_DIAGNOSTIC_SECRET: ${HEALTH_DIAGNOSTIC_SECRET:-}
+      # MONGODB_URI is still passed: the additive model keeps Mongoose
+      # serving every existing route until Phase 3 switches them over.
+      MONGODB_URI: ${MONGODB_URI:-}
     volumes:
       - uploads:/var/lib/kindledger/uploads
     depends_on:
@@ -137,15 +142,11 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # Phase 3 must replace this with a real /api/health probe once that
-      # endpoint exists. Until then this only proves the process is listening.
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "require('node:net').connect(5000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
-        ]
+      # The real probe. Uses the UNAUTHENTICATED form, which returns only a
+      # status string (SPEC-2 section 5) - curl --fail turns the 503 for an
+      # unreachable database into an unhealthy container rather than a
+      # crash-looping one.
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:5000/api/health"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -160,7 +161,6 @@ services:
   # exactly as browser traffic is. No separate ingress (SPEC-1A section 3.1).
   # ---------------------------------------------------------------------------
   nginx:
-    profiles: ["app"]
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
