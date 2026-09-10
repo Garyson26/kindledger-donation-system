@@ -78,6 +78,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The pull_request step below does a 3-dot diff against
+          # origin/<base>. checkout@v4 defaults to fetch-depth 1, which
+          # cannot resolve that ref, so the step would fail on the first
+          # PR rather than on a real finding.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -88,6 +94,18 @@ jobs:
         # No lockfile is committed yet (SEC-12), so `npm ci` is not usable.
         # Switch this to `npm ci` the moment package-lock.json lands.
         run: npm install --no-audit --no-fund
+
+      - name: Ensure a MySQL client is available
+        # Not assumed: the runner image's bundled MySQL/MariaDB client
+        # has changed across ubuntu images, and this workflow cannot be
+        # verified from the development environment. Installing it
+        # explicitly removes one environmental reason for a red run.
+        run: |
+          if ! command -v mysql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends mysql-client
+          fi
+          mysql --version
 
       - name: Apply db/schema.sql
         # The normative artefact is applied directly, exactly as the MySQL
