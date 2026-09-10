@@ -1249,3 +1249,155 @@ resolved on those grounds, because the frontend stays on Vercel.
 
 The runbook itself is deliberately not drafted here. This records the
 constraint that shapes it.
+
+---
+
+## ADR-032 — SEC-09 upgraded from inferred to OBSERVED
+
+**Status** Accepted — evidence upgrade, finding unchanged
+
+SEC-09 (donor PII written to application logs) was originally derived from
+reading the code. It is now **observed in production**, with the log line to
+prove it.
+
+While probing the live backend, this appeared in Vercel's runtime logs for the
+production deployment:
+
+```
+Payment Success Callback - Full Request Body: {
+  "status": "failure",
+  "txnid": "PROBE",
+  "amount": "1.00",
+  "hash": "deadbeef",
+  "udf4": "000000000000000000000000"
+}
+```
+
+That was a synthetic probe carrying no real data. The point is the mechanism:
+`Backend/routes/payment.js` logs `JSON.stringify(paymentData, null, 2)` for
+**every** call to `/api/payment/success`. For a real donation the same line
+therefore contains `firstname`, `email` and `phone` alongside the payment
+metadata.
+
+**So it is now confirmed that donor PII reaches Vercel's log retention on
+every real transaction.** Not "would", not "appears to" — it does, and the
+retained log is a second copy of donor personal data outside the database,
+with its own access-control surface and its own retention period, neither of
+which anyone has reviewed.
+
+Two things this changes:
+
+- The severity reasoning no longer depends on reading the code correctly. It
+  is a fact about the running system.
+- It is now a data-protection question with a concrete artefact behind it. The
+  DPDP Act considerations noted in the security review's appendix B become
+  answerable rather than hypothetical: there *is* PII in the logs, the volume
+  is one record per donation, and the retention is whatever Vercel's plan
+  provides.
+
+Unchanged: the fix is to delete the PII log statements and, where a payment
+audit trail is genuinely wanted, log only `txnid`, `mihpayid`, `status` and
+the donation id. The `pino` redaction approach in the original write-up still
+stands.
+
+Also observed in the same logs, and worth recording because it corroborates
+ADR-028 from a different direction: the only error group in seven days was
+this probe's own `Hash verification failed`, and total traffic on the
+production deployment for the window was 18 500s, one 302 and one 204 - all
+of them mine. That is consistent with the planned-maintenance context, and it
+is why the onset of the Atlas credential failure could not be dated from
+Vercel's logs.
+
+---
+
+## ADR-033 — Duplicate index declarations in the Mongoose models
+
+**Status** Accepted — **must not be reintroduced in Phase 3**
+
+Every cold start of the production backend emits three Mongoose warnings:
+
+```
+[MONGOOSE] Warning: Duplicate schema index on {"email":1} found ...
+[MONGOOSE] Warning: Duplicate schema index on {"createdAt":1} found ...
+[MONGOOSE] Warning: Duplicate schema index on {"email":1} found ...
+```
+
+Observed in the production runtime logs. The cause is the same index being
+declared twice in three places:
+
+| Model | Inline declaration | Second declaration |
+|---|---|---|
+| `User` | `email: { unique: true }` (line 5) | `userSchema.index({ email: 1 }, { unique: true })` (line 21) |
+| `PendingSignup` | `email: { unique: true }` (line 5) | `pendingSignupSchema.index({ email: 1 })` (line 15) |
+| `PendingSignup` | `createdAt: { expires: 86400 }` (line 10) | `pendingSignupSchema.index({ createdAt: 1 })` (line 14) |
+
+Mostly this is noise. **One of the three is not.**
+
+`PendingSignup.createdAt` carries `expires: 86400`, which is how Mongoose
+declares MongoDB's **TTL index** — the mechanism that auto-deletes abandoned
+signups after 24 hours. It is then declared again as a plain
+`index({ createdAt: 1 })`. Two declarations of the same key path where one is
+a TTL index and the other is not is precisely the shape that can leave the
+collection with the wrong one, and if the plain index wins, **the 24-hour
+auto-delete silently stops happening** and abandoned signups accumulate
+indefinitely, each holding a name, an email and a bcrypt hash.
+
+Whether that has happened in production is directly checkable and has not
+been checked, because the database is unreachable:
+
+```js
+db.pendingsignups.getIndexes()   // look for expireAfterSeconds: 86400
+db.pendingsignups.countDocuments({ createdAt: { $lt: new Date(Date.now() - 86400000) } })
+```
+
+A non-zero second result means the TTL is not working. Worth folding into the
+J3 database session, since it needs the same access and is read-only.
+
+**This dies at migration regardless.** `db/schema.sql` declares each index
+exactly once, and MySQL has no TTL index at all — `pending_signups.expires_at`
+plus the application cron replaces it (ADR-001, and the note in the DDL). So
+no fix is proposed for the Mongoose models: they have weeks to live.
+
+**Recorded so Phase 3 does not reintroduce the pattern.** When the models are
+rewritten against Prisma, indexes are declared in `db/schema.sql` and mirrored
+in `schema.prisma` — once each, in one place. The failure mode to avoid is
+declaring an index inline on a field *and* again in a block attribute, which
+Prisma permits as readily as Mongoose does. The schema conformance tests
+assert index presence but do **not** currently assert index *uniqueness of
+declaration*, so nothing would catch a reintroduction automatically.
+
+---
+
+## ADR-034 — A correct reset code at /verify must not clear the attempt counter
+
+**Status** Accepted — control clarification, not in the original SEC-02 description
+
+SEC-02 specified that `resetPasswordAttempts` must be incremented on a wrong
+code and the code voided at five attempts. It did not say what happens to the
+counter on a **correct** code at `/forgot-password/verify`, and that gap
+matters.
+
+`/verify` only checks the code; `/reset` still has to accept it afterwards. So
+if a correct guess at `/verify` reset the counter to zero, an attacker who
+happened to hit the right code would be handed a fresh budget of five
+attempts at `/reset` — and, worse, could alternate between the two endpoints
+to keep the budget topped up indefinitely. The 6-digit space would be
+brute-forceable again through a longer path.
+
+The implemented behaviour is correct: the counter is reset **only** on a
+successful password change in `/reset`. `/verify` never clears it. That was
+implicit in the code and is now asserted:
+
+```
+SEC-02 the attempt counter is NOT reset by a correct code at /verify
+```
+
+in `Backend/test/auth-reset.test.js`, which seeds a user at three attempts,
+submits the correct code to `/verify`, expects 200, and asserts the counter is
+still three.
+
+Recorded because it is a genuine addition rather than a transfer of an
+existing requirement, and because the natural "tidy up" instinct during the
+Phase 3 rewrite — clear the counter when the code verifies, it is obviously
+valid — would silently reopen the attack. The test is the guard; this is the
+reason it exists.
