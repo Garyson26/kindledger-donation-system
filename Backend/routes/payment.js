@@ -13,6 +13,36 @@ function generateHash(data) {
 }
 
 // Helper function to verify response hash (timing-safe comparison)
+//
+// ============================================================================
+// THIS FUNCTION MUST READ CANONICAL LOWERCASE FIELD NAMES ONLY.
+// DO NOT MAKE IT CASE-TOLERANT OR ADD ALTERNATE-NAME FALLBACKS.
+// ============================================================================
+//
+// The handlers below read several fields with alternate-case and alternate-name
+// fallbacks: `paymentData.AMOUNT`, `.STATUS`, `.TXNID`, `.MIHPAYID`, and
+// `udf_4` / `udf[4]`. This function does not. That disagreement is a parser
+// differential, and it is currently safe only by accident of direction: a
+// payload lacking the lowercase form hashes a different string and is rejected
+// here, before any handler fallback is ever consulted. The fallbacks are
+// therefore dead code rather than a hole.
+//
+// THE DISAGREEMENT IS THE BUG, NOT THE DIRECTION OF IT.
+//
+// Making this function case-tolerant looks like a robustness improvement -
+// someone reads SEC-14, sees brittle input handling, and hardens it. At that
+// moment a payload can VERIFY against one field and be PROCESSED from another:
+// the hash would cover `status` while the SEC-01 gate reads `STATUS`. That is a
+// hash-verified authentication bypass, assembled from two individually
+// reasonable changes neither of whose authors did anything obviously wrong.
+//
+// If you want to remove the brittleness, delete the fallbacks in the handlers.
+// Never widen what this function accepts. See docs/decisions.md ADR-026.
+//
+// PayU's documented formula, which this implements verbatim:
+//   sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+// Only those fields are signed. Everything else in the callback is unsigned and
+// attacker-mutable, because the payload arrives via the donor's browser.
 function verifyHash(data) {
   // Response formula: sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
   const hashString = `${payuConfig.MERCHANT_SALT}|${data.status}||||||${data.udf5 || ''}|${data.udf4 || ''}|${data.udf3 || ''}|${data.udf2 || ''}|${data.udf1 || ''}|${data.email}|${data.firstname}|${data.productinfo}|${data.amount}|${data.txnid}|${payuConfig.MERCHANT_KEY}`;
@@ -223,18 +253,31 @@ router.post('/success', async (req, res) => {
 
     console.log('Updating donation:', donationId);
 
+    // Field-level $set, NOT a whole-subdocument assignment (ADR-024 item 2).
+    //
+    // Assigning `paymentDetails: {...}` makes Mongoose REPLACE the entire
+    // subdocument. Since /webhook also writes paymentDetails - including
+    // `status` and `error_Message` - and the two callbacks race with no
+    // ordering guarantee (ADR-012), a /success arriving second used to wipe
+    // whatever the webhook had recorded. Dotted paths merge instead.
+    //
+    // `status` is now written verbatim from the payload rather than omitted, so
+    // the system can be asked what PayU actually sends. It is UNSIGNED data
+    // (ADR-026) recorded for observability only - never read it for a state
+    // decision.
     const updatedDonation = await Donation.findByIdAndUpdate(
       donationId,
       {
-        status: 'Approved',
-        paymentStatus: 'Paid',
-        transactionId: paymentData.txnid || paymentData.TXNID,
-        paymentDetails: {
-          mihpayid: paymentData.mihpayid || paymentData.MIHPAYID,
-          amount: paymentData.amount || paymentData.AMOUNT,
-          mode: paymentData.mode || paymentData.MODE,
-          bank_ref_num: paymentData.bank_ref_num || paymentData.BANK_REF_NUM,
-          paymentDate: new Date()
+        $set: {
+          status: 'Approved',
+          paymentStatus: 'Paid',
+          transactionId: paymentData.txnid || paymentData.TXNID,
+          'paymentDetails.mihpayid': paymentData.mihpayid || paymentData.MIHPAYID,
+          'paymentDetails.amount': paymentData.amount || paymentData.AMOUNT,
+          'paymentDetails.mode': paymentData.mode || paymentData.MODE,
+          'paymentDetails.bank_ref_num': paymentData.bank_ref_num || paymentData.BANK_REF_NUM,
+          'paymentDetails.status': paymentData.status,
+          'paymentDetails.paymentDate': new Date()
         }
       },
       { new: true, runValidators: false }
@@ -278,34 +321,40 @@ router.post('/failure', async (req, res) => {
     // Extract donation ID - try multiple possible field names
     const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
 
-    // Store exact error message from PayU as-is
+    // Store exactly what PayU sent, or nothing. The previous `|| 'Payment
+    // failed'` fallback wrote OUR string into a field meant to hold PayU's,
+    // making the two indistinguishable in the data - so the stored value could
+    // never answer "what did PayU actually say?" (ADR-021).
     const errorMessage = paymentData.error_Message ||
                         paymentData.error ||
                         paymentData.Error_Message ||
                         paymentData.ERROR_MESSAGE ||
-                        'Payment failed';
+                        null;
 
     const failureReason = paymentData.field9 ||
                          paymentData.field_9 ||
                          paymentData['field[9]'] ||
-                         '';
+                         null;
 
     // Update donation status if donationId exists
     if (donationId) {
+      // Field-level $set so a concurrent /webhook write is merged rather than
+      // clobbered (ADR-024 item 2).
       const updateData = {
-        status: 'Rejected',
-        paymentStatus: 'Failed',
-        transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
-        failureReason: failureReason || errorMessage,
-        errorMessage: errorMessage,
-        paymentDetails: {
-          mihpayid: paymentData.mihpayid || paymentData.MIHPAYID || null,
-          amount: paymentData.amount || paymentData.AMOUNT || 0,
-          mode: paymentData.mode || paymentData.MODE || null,
-          bank_ref_num: paymentData.bank_ref_num || paymentData.BANK_REF_NUM || null,
-          paymentDate: new Date(),
-          status: paymentData.status || paymentData.STATUS || 'failure',
-          error_Message: errorMessage
+        $set: {
+          status: 'Rejected',
+          paymentStatus: 'Failed',
+          transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
+          failureReason: failureReason || errorMessage,
+          errorMessage: errorMessage,
+          'paymentDetails.mihpayid': paymentData.mihpayid || paymentData.MIHPAYID || null,
+          'paymentDetails.amount': paymentData.amount || paymentData.AMOUNT || 0,
+          'paymentDetails.mode': paymentData.mode || paymentData.MODE || null,
+          'paymentDetails.bank_ref_num': paymentData.bank_ref_num || paymentData.BANK_REF_NUM || null,
+          'paymentDetails.paymentDate': new Date(),
+          // Verbatim, no 'failure' fallback. This is PayU's vocabulary.
+          'paymentDetails.status': paymentData.status,
+          'paymentDetails.error_Message': errorMessage
         }
       };
 
@@ -325,7 +374,10 @@ router.post('/failure', async (req, res) => {
     }
 
     // Redirect to frontend failure page
-    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&error=${encodeURIComponent(errorMessage)}`);
+    // The friendly fallback belongs HERE, at the display boundary - not in the
+    // stored value. Storing it would contaminate PayU's vocabulary; omitting it
+    // here would show the donor the string "null".
+    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&error=${encodeURIComponent(errorMessage || 'Payment failed')}`);
 
   } catch (error) {
     console.error('Payment failure handler error:', error);
@@ -356,34 +408,41 @@ router.post('/cancel', async (req, res) => {
 
     // Update donation status if donationId exists
     if (donationId) {
+      // Store exactly what PayU sent, or nothing. The previous
+      // `|| 'Payment cancelled by user'` fallback wrote our own string into a
+      // field meant to hold PayU's (ADR-021).
       const errorMessage = paymentData.error_Message ||
                           paymentData.error ||
                           paymentData.Error_Message ||
                           paymentData.ERROR_MESSAGE ||
-                          'Payment cancelled by user';
+                          null;
 
       const failureReason = paymentData.field9 ||
                            paymentData.field_9 ||
                            paymentData['field[9]'] ||
-                           '';
+                           null;
 
       try {
+        // Field-level $set so a concurrent /webhook write is merged rather
+        // than clobbered (ADR-024 item 2).
         const updatedDonation = await Donation.findByIdAndUpdate(
           donationId,
           {
-            status: 'Pending',
-            paymentStatus: 'Cancelled',
-            transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
-            failureReason: failureReason || errorMessage,
-            errorMessage: errorMessage,
-            paymentDetails: {
-              mihpayid: paymentData.mihpayid || paymentData.MIHPAYID || null,
-              amount: paymentData.amount || paymentData.AMOUNT || 0,
-              mode: paymentData.mode || paymentData.MODE || null,
-              bank_ref_num: paymentData.bank_ref_num || paymentData.BANK_REF_NUM || null,
-              paymentDate: new Date(),
-              status: paymentData.status || paymentData.STATUS || 'cancelled',
-              error_Message: errorMessage
+            $set: {
+              status: 'Pending',
+              paymentStatus: 'Cancelled',
+              transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
+              failureReason: failureReason || errorMessage,
+              errorMessage: errorMessage,
+              'paymentDetails.mihpayid': paymentData.mihpayid || paymentData.MIHPAYID || null,
+              'paymentDetails.amount': paymentData.amount || paymentData.AMOUNT || 0,
+              'paymentDetails.mode': paymentData.mode || paymentData.MODE || null,
+              'paymentDetails.bank_ref_num': paymentData.bank_ref_num || paymentData.BANK_REF_NUM || null,
+              'paymentDetails.paymentDate': new Date(),
+              // Verbatim, no 'cancelled' fallback. This is PayU's vocabulary,
+              // and per ADR-021 a real cancellation arrives as status=failure.
+              'paymentDetails.status': paymentData.status,
+              'paymentDetails.error_Message': errorMessage
             }
           },
           { new: true }
@@ -458,18 +517,22 @@ router.post('/webhook', async (req, res) => {
     }
 
     // Prepare update data
+    // Field-level $set here too. Fixing only /success would leave the reverse
+    // ordering lossy: a webhook arriving second would replace the subdocument
+    // and drop whatever /success had written. Both writers must merge for the
+    // race to be harmless (ADR-024 item 2).
     const updateData = {
-      paymentStatus,
-      status: donationStatus,
-      transactionId: paymentData.txnid,
-      paymentDetails: {
-        mihpayid: paymentData.mihpayid,
-        amount: paymentData.amount,
-        mode: paymentData.mode,
-        bank_ref_num: paymentData.bank_ref_num,
-        paymentDate: new Date(),
-        status: paymentData.status,
-        error_Message: paymentData.error_Message || paymentData.error || null
+      $set: {
+        paymentStatus,
+        status: donationStatus,
+        transactionId: paymentData.txnid,
+        'paymentDetails.mihpayid': paymentData.mihpayid,
+        'paymentDetails.amount': paymentData.amount,
+        'paymentDetails.mode': paymentData.mode,
+        'paymentDetails.bank_ref_num': paymentData.bank_ref_num,
+        'paymentDetails.paymentDate': new Date(),
+        'paymentDetails.status': paymentData.status,
+        'paymentDetails.error_Message': paymentData.error_Message || paymentData.error || null
       }
     };
 
@@ -486,8 +549,10 @@ router.post('/webhook', async (req, res) => {
                            paymentData['field[9]'] ||
                            '';
 
-      updateData.failureReason = failureReason || errorMessage; // Use failureReason from field9, fallback to errorMessage
-      updateData.errorMessage = errorMessage; // Store the exact error message from PayU
+      // Must target $set: an update document may not mix operator and
+      // non-operator keys - MongoDB rejects the whole update.
+      updateData.$set.failureReason = failureReason || errorMessage;
+      updateData.$set.errorMessage = errorMessage;
       console.log('Payment failed. Error:', errorMessage, 'Reason:', failureReason);
     } else if (paymentStatus === 'Cancelled') {
       const cancelReason = paymentData.error_Message ||
@@ -496,8 +561,8 @@ router.post('/webhook', async (req, res) => {
                           paymentData.ERROR_MESSAGE ||
                           'Payment cancelled by user';
 
-      updateData.failureReason = cancelReason;
-      updateData.errorMessage = cancelReason;
+      updateData.$set.failureReason = cancelReason;
+      updateData.$set.errorMessage = cancelReason;
       console.log('Payment cancelled. Reason:', cancelReason);
     }
 
