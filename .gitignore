@@ -1,0 +1,4 @@
+# Internal documentation kept out of version control.
+# docs/SECURITY-REVIEW.md contains exploit-level detail that should not live in
+# the repository; see the README's security section for the summary instead.
+docs/
