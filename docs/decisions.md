@@ -809,3 +809,112 @@ donation from the signed status as now, then reconcile against
 `verify_payment` out of band and alert on any disagreement. That keeps the
 donor's redirect fast while making the money trail authoritative. It also gives
 the reconciliation job the security review asked for.
+
+---
+
+## ADR-024 — Open questions in the payment callback design, for Phase 3
+
+**Status** Accepted — recorded for Phase 3, nothing built
+
+Three findings that fall out of ADR-021's documented vocabulary. None is fixed
+in the hotfix; all three need deciding in Phase 3.
+
+### 1. It is unclear how a donation legitimately reaches `Cancelled`
+
+`paymentStatus` carries a `Cancelled` member, and `/cancel` is the only handler
+that writes it. But PayU's `status` vocabulary is `success` or `failure` only
+(ADR-021) — there is no cancel value. A user cancellation arrives as
+`status=failure` with `unmappedstatus=usercancelled`.
+
+So `Cancelled` is only reachable if PayU actually posts to the configured
+`curl`. Verified by test that the handler *accepts* such a payload — a
+realistic cancellation (`status=failure`, `unmappedstatus=usercancelled`) sent
+to `/cancel` is accepted and marked `Cancelled`, and the same payload sent to
+`/failure` is accepted and marked `Failed`. Both paths work. What is *not*
+established is which one PayU uses.
+
+**Phase 3 must establish whether PayU posts to `curl` at all.** If it does not,
+`/cancel` is dead code, every cancellation lands at `/failure` as `Failed`, and
+`paymentStatus.Cancelled` is a state nothing writes. An enum member that no code
+path can produce is worse than absent: it shows up in filter dropdowns, invites
+reports that always return zero, and implies a distinction the data does not
+make. Either confirm `curl` fires and keep the state, or drop it and migrate the
+existing rows.
+
+Note the schema in `db/schema.sql` retains `Cancelled` deliberately: whatever
+the answer, historic MongoDB rows already carry it and the ETL must be able to
+load them.
+
+### 2. `/success` destroys `paymentDetails` written by the webhook
+
+A genuine data-loss bug, independent of the observability gap in ADR-021.
+
+`/success` assigns a whole new object to `paymentDetails`:
+
+```js
+paymentDetails: { mihpayid, amount, mode, bank_ref_num, paymentDate }
+```
+
+Mongoose replaces the entire subdocument. If `/webhook` ran first — it writes
+`status`, `error_Message` and a real `paymentDate` — then `/success` arriving
+afterwards **wipes those fields**. The two callbacks race (ADR-012), so which
+one lands last is not under our control.
+
+The fix is a field-level update (`$set` on individual paths) rather than
+replacing the subdocument, so the two writers merge instead of clobbering. Not
+done in the hotfix: it changes write semantics on the payment path, and the
+hotfix's job was to stop the exploit.
+
+### 3. `unmappedstatus` is not covered by the response hash
+
+Worth recording as a security fact, because it settles the field choice
+permanently. PayU's documented reverse-hash formula is:
+
+```
+sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+```
+
+`unmappedstatus` does not appear in it. It is therefore **unsigned and
+attacker-mutable** — a donor can edit it in the payload their own browser
+posts, and the hash still verifies.
+
+So gating on `unmappedstatus` would not merely have been wrong about the
+vocabulary (rejecting `captured` and `auth`, which PayU classifies as Success).
+It would have moved the security decision onto an unauthenticated field. Any
+Phase 3 work that reads `unmappedstatus` — for the Pending classification, say
+— must treat it as untrusted detail, never as the authority for a state
+transition. `status` is the signed field and must remain the gate.
+
+---
+
+## ADR-025 — `gateway_status` will be NULL for the entire paid population at cutover
+
+**Status** Accepted — recorded for the Phase 4 verification harness
+
+`donation_payment_details.gateway_status` holds PayU's raw status string.
+Because `/success` never writes `paymentDetails.status` (ADR-021), that column
+will be **NULL for every migrated donation whose last writer was `/success`** —
+which is essentially the entire successfully-paid population.
+
+`db/schema.sql` section 5.6 already declares the column nullable, so the schema
+holds and the load will not fail. The requirement is on the **verification
+harness**: it must not treat NULL `gateway_status` as a load failure or as
+evidence of a dropped field. For the paid population, NULL is the expected and
+correct outcome, and a harness that flags it will generate noise proportional to
+the entire donation history.
+
+What the harness *should* assert instead:
+
+- **`mihpayid` is populated** for paid donations. `/success` does write it, so
+  the SEC-01 replay guard has data to work with and the unique index is
+  meaningful from day one. A paid donation with a NULL `mihpayid` is a genuine
+  anomaly worth flagging.
+- **`gateway_status` is populated where it was present in the source**, i.e.
+  for rows the webhook wrote last. Those are the only rows that carry it.
+- The **count** of paid donations with NULL `gateway_status` should be reported
+  as an expected figure, not an error — it quantifies how much of the paid
+  history has no gateway record, which is useful context for any future
+  reconciliation against PayU's dashboard.
+
+After the E5 observability fix lands, newly written rows will carry the field,
+so this gap is bounded to donations recorded before that change.
