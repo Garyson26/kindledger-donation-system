@@ -1401,3 +1401,151 @@ existing requirement, and because the natural "tidy up" instinct during the
 Phase 3 rewrite — clear the counter when the code verifies, it is obviously
 valid — would silently reopen the attack. The test is the guard; this is the
 reason it exists.
+
+---
+
+## ADR-035 — The react-router advisories are unreachable; the v7 major defers to Phase 5
+
+**Status** Accepted — reachability assessed, not deferred on convenience
+
+`npm audit` reports two moderate advisories against `react-router` /
+`react-router-dom`, and unlike vite these ship in the production bundle. They
+were assessed the same way `uuid` became a deletion and vite a shrug: by
+finding the sink, not by reading the severity.
+
+### GHSA-wrjc-x8rr-h8h6 - open redirect via backslash in `<Link>` and `useNavigate`
+
+Exploiting it needs an attacker-influenced value reaching the **start** of a
+navigation target, so a backslash can make the router treat it as external.
+Every navigation target in `Frontend/src` was enumerated:
+
+- **`<Link>` and `<Navigate>`: zero dynamic targets.** There is no `to={...}`
+  anywhere in the codebase. All 16 distinct values are literals:
+  `/`, `/categories`, `/donate`, `/donations`, `/login`, `/signup`,
+  `/profile`, `/my-donations`, `/change-password`, `/forgot-password`,
+  `/privacy`, `/terms`, `/admin/dashboard`, `/admin/users`, `/admin/charts`,
+  `/admin/categories-list`.
+- **`navigate()`: 29 call sites, all safe.** Hardcoded literals, `navigate(-1)`,
+  or a fixed prefix with a server-generated Mongo ObjectId interpolated -
+  `/donations/${d._id}`, `/my-donations/${donation._id}`,
+  `/admin/users/${user._id}/donations`, `/admin/edit-category/${category._id}`.
+  Two things make those safe: an ObjectId is 24 hex characters generated
+  server-side, and the interpolation is never at the *start* of the string,
+  which is what the attack requires.
+- **`useSearchParams` is used in exactly two files**, `PaymentSuccess.jsx` and
+  `PaymentFailure.jsx`, and only to *read and display* `txnid`, `amount`,
+  `status` and `error`. Their own `navigate()` calls are hardcoded
+  (`/my-donations`, `/categories`, `/donate`). No query parameter reaches a
+  navigation target.
+- **`location.state`** is read only to pre-select a category or prefill a form,
+  never as a target.
+- **`window.location.href`** is assigned in 6 places, every one a hardcoded
+  `/login` or `/signup`.
+
+**No reachable sink. UNREACHABLE.**
+
+### GHSA-337j-9hxr-rhxg - constructor injection via `deserializeErrors()` in SSR hydration
+
+Requires server-side rendering and hydration. This is a pure client-side SPA:
+Vite build, `BrowserRouter`, no SSR anywhere. **Structurally inapplicable.**
+
+### Decision
+
+Defer `react-router-dom@7` to Phase 5, where the frontend is being reworked
+anyway. It is a breaking major for a pair of advisories with no reachable sink,
+and taking it now would mean revalidating every route and guard for no security
+gain.
+
+**What would change this.** The open redirect becomes live the moment any
+navigation target starts with a value the user influences. The obvious future
+candidates are a post-login `returnTo` or `next` query parameter, or a
+`from`-style redirect after signup - `DonationForm.jsx` already passes
+`{ state: { from: "/donate" } }`, and the natural next step of honouring a
+`from` **query parameter** instead of state would create exactly the sink this
+advisory needs. If that pattern is introduced before Phase 5, the upgrade stops
+being deferrable.
+
+---
+
+## ADR-036 — The prisma advisory chain has no published fix; leaving it
+
+**Status** Accepted — no action available, monitoring instead
+
+The three Backend highs are one advisory, GHSA-ggr8-5vv4-36mx, counted down a
+chain: `prisma` -> `@prisma/config` -> `deepmerge-ts`. Stack exhaustion when
+merging recursive object graphs.
+
+**`npm audit fix` is a no-op here, and npm's own advice is misleading.** The
+report says "fix available via `npm audit fix`". It was run: prisma stayed at
+6.19.3, the lockfile did not change by a single byte, and the audit still
+reports 3 high. Anyone following the tool's suggestion will conclude the
+tooling is broken.
+
+**There is no fixed version to move to.** The vulnerable range is
+`6.13.0-dev.1 - 8.1.0-dev.4`, so the fix is prisma >= 8.1.0. The latest
+published prisma is **7.10.0**. Every published release from 6.13.0 onwards is
+inside the range, so upgrading to latest would be a major bump that does not
+fix it. The only non-vulnerable published option is a **downgrade** to
+<= 6.12.0.
+
+**Decision: stay on 6.19.3.**
+
+- The vulnerable chain is **devDependency only**. `@prisma/client`, the
+  production dependency, is not in it - confirmed from the audit's own package
+  list.
+- The reachable input is our own `schema.prisma` and Prisma config, parsed by a
+  CLI we invoke ourselves. Exploiting it means handing a developer a malicious
+  Prisma config, which is already a "run untrusted code on your workstation"
+  scenario.
+- Downgrading to 6.12.0 would forfeit seven minor releases and require
+  revalidating the whole Phase 1a toolchain - `migrate deploy`, `generate`, the
+  drift gate, `migrate diff` - against an older CLI, to close a devDependency
+  advisory with no plausible path here.
+
+**Monitoring action:** upgrade when prisma >= 8.1.0 is published, and treat it
+as a toolchain change requiring the schema, guard and drift gates to be re-run,
+not a routine bump. Until then this is the expected steady state, and the three
+highs in the Backend audit are explained rather than outstanding.
+
+---
+
+## ADR-037 — Restating the vite exposure accurately
+
+**Status** Accepted — corrects "build-time only" from the H4 triage
+
+The H4 triage called vite "build-time only, not exploitable in a deployed
+static build". The first half is right and the second understates one of the
+advisories.
+
+`vite` is a devDependency and does not ship in the production bundle, so
+**donors are not exposed by any of it**. That much stands. But the three
+advisories are not all dev-server abstractions:
+
+| Advisory | Severity | What it actually is |
+|---|---|---|
+| GHSA-fx2h-pf6j-xcff | **high** | `server.fs.deny` bypass on Windows alternate paths - dev server serves files it was configured to refuse |
+| GHSA-4w7w-66w2-5vf9 | moderate | Path traversal in optimized-deps `.map` handling |
+| GHSA-v6wh-96g9-6wx3 | moderate | `launch-editor`: **NTLMv2 hash disclosure** via UNC path handling on Windows |
+
+The third is not a sandbox-escape abstraction. It is **credential disclosure
+from a developer workstation**: a captured NTLMv2 hash is offline-crackable and,
+depending on the account, reusable against domain resources.
+
+**The accurate exposure statement:** the risk is to **developers running
+`npm run dev` on Windows**, not to donors. This project is developed on Windows
+- Docker Desktop and the Windows path conventions throughout the tooling make
+that plain - so the platform-specific advisories are the applicable ones rather
+than the theoretical ones. Two of the three are Windows-specific.
+
+Still **low urgency**, for two reasons that are about exposure rather than
+severity: the dev server binds localhost by default, and an attacker needs the
+developer to load a hostile page in a browser while it is running. But
+"developer workstation credential disclosure, low likelihood" is a materially
+different sentence from "build-time only", and the second one would justify
+never fixing it.
+
+**Decision:** fix with the Phase 5 frontend rework, alongside the
+`react-router-dom` major (ADR-035), since both are Frontend majors and
+revalidating the build once is cheaper than twice. Bring it forward if
+`vite dev` starts being run on a machine with domain credentials that matter,
+or if the dev server is ever bound to a non-loopback interface.
