@@ -641,3 +641,171 @@ documented in the README rather than silently resolved. No licence change is to
 be merged until DEF-01 is decided together with the attribution question.
 Anyone reading the repository in the meantime should treat its licensing as
 unsettled.
+
+---
+
+## ADR-021 — PayU's `status` vocabulary, and why the production query is corroboration only
+
+**Status** Accepted — closes A1
+
+### The documented vocabulary (primary evidence)
+
+From PayU's own documentation, fetched via the `llms.txt` index:
+
+- **`status`** takes **`"success"` or `"failure"`**. Nothing else appears in the
+  sample payloads for either the redirect callbacks or the webhooks. For refund
+  webhooks it is likewise `"success"` or `"failure"`.
+  Source: <https://docs.payu.in/docs/webhook-events-and-sample-payloads.md>
+- **`unmappedstatus`** carries the gateway detail and has the wide vocabulary:
+  `dropped, bounced, captured, auth, failed, usercancelled, pending`, plus
+  `initiated`, `in progress` and `autoRefund` in the classification table. PayU
+  maps those to Success / Failure / Pending itself.
+
+So the mapped field the hotfix gates on has a two-value vocabulary, and every
+messy value lives in the field the hotfix does **not** read. That is the right
+way round: gating on `unmappedstatus` would have rejected `captured` and `auth`,
+both of which PayU classifies as Success.
+
+### The response hash formula matches the published spec exactly
+
+Worth recording because it disposes of the original circularity objection from
+a second, independent direction. PayU documents the reverse hash as:
+
+```
+sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+```
+
+Source: <https://docs.payu.in/docs/hashing-request-and-response.md>
+
+`verifyHash()` in `Backend/routes/payment.js` builds precisely that string,
+field for field and delimiter for delimiter, and it uses `status` — not
+`unmappedstatus`. The harness was self-consistent by construction, but the
+formula it was consistent *with* is the documented one.
+
+### Two documented variations the code does not support
+
+PayU alters the formula in two cases:
+
+- **`additional_charges`** is prepended: `additional_charges|SALT|status|...`
+- **split transactions** insert `splitInfo` after `status`.
+
+`verifyHash()` implements neither, so such a response would fail verification
+and the donation would be redirected to the failure page with
+`error=invalid_hash`. This is **pre-existing** and unchanged by the hotfix —
+the same response failed verification before it. Neither feature is used by
+`/initiate` today, so the practical risk is nil until someone enables one.
+Phase 3 should either implement the variants or assert they are disabled on the
+merchant account.
+
+### Why the production aggregation is corroboration and not proof
+
+`paymentDetails.status` is **not a clean record of what PayU sent**. Verified
+against the hotfix branch:
+
+| Handler | What it writes to `paymentDetails.status` |
+|---|---|
+| `/success` | **nothing — the field is never written** |
+| `/failure` | `paymentData.status \|\| paymentData.STATUS \|\| 'failure'` |
+| `/cancel` | `paymentData.status \|\| paymentData.STATUS \|\| 'cancelled'` |
+| `/webhook` | `paymentData.status` — verbatim, no fallback |
+
+Three consequences:
+
+1. **The successful population is invisible.** `/success` writes a
+   `paymentDetails` object containing only `mihpayid`, `amount`, `mode`,
+   `bank_ref_num` and `paymentDate`. Every donation whose last writer was
+   `/success` has no `paymentDetails.status` at all. That is precisely the
+   population whose vocabulary mattered most.
+2. **`'failure'` and `'cancelled'` are contaminated.** Those exact strings are
+   our own hardcoded fallbacks, indistinguishable in the data from PayU having
+   sent them.
+3. **Only `/webhook` rows are authoritative** — and only where the webhook ran
+   last, since `/success` overwrites the whole subdocument and drops the field.
+
+So the query is partly circular and blind exactly where it counts. It can still
+*corroborate* — an unexpected value appearing there would be real evidence of a
+value outside `{success, failure}` — but it cannot establish the vocabulary,
+and its silence proves nothing. The documented set is the primary evidence.
+
+### Follow-up for Phase 3
+
+`/success` should write `paymentDetails.status` verbatim from the payload, and
+the hardcoded `'failure'` / `'cancelled'` fallbacks in `/failure` and `/cancel`
+should be dropped in favour of storing exactly what arrived, or nothing.
+Without that, the system cannot ever be asked what PayU actually sends.
+Deliberately not done in the hotfix: it changes stored data shape and is not
+needed for the security fix.
+
+### Also noted, pre-existing and out of scope
+
+`/webhook` switches on `paymentData.status?.toLowerCase()` with cases for
+`'pending'`, `'in progress'`, `'cancelled'` and `'cancel'`. Per the
+documentation those values belong to `unmappedstatus`, not `status`, so those
+branches are most likely unreachable and the webhook can never record a Pending
+state from a `status` value alone. Phase 3 should read `unmappedstatus` for that
+purpose. Unchanged by the hotfix.
+
+---
+
+## ADR-022 — The Phase 4 ETL must re-check strict SQL mode in its own preflight
+
+**Status** Accepted — recorded for Phase 4, nothing built
+
+The C3 guard (`Backend/db/require-mysql-version.js`, ADR-019) checks
+`sql_mode` at **boot**, in both `SESSION` and `GLOBAL` scope. That leaves a
+residual gap: `sql_mode` is settable at runtime.
+
+A managed provider — or an administrator — changing `GLOBAL sql_mode` after the
+API has started is **undetected until the next restart**. A long-running API
+process would keep its own strict `SESSION` mode, so its own writes stay safe,
+while every *new* connection quietly inherits the relaxed global. The ETL is
+exactly such a new connection.
+
+**Requirement.** The ETL must re-check strict mode in its own preflight,
+immediately before it begins loading, rather than relying on the API's boot
+check. It must check the mode on **its own connection**, because that is what
+governs its own inserts.
+
+The stakes are higher for the ETL than for the API: it performs the single
+largest write in the project's life, and under a relaxed mode every out-of-set
+`status` value in ten years of legacy data would be silently stored as the
+empty string (ADR-019) instead of failing the load. That is the one moment where
+this misconfiguration would do maximum, irreversible damage.
+
+Reuse the exported `hasStrictMode()` helper rather than reimplementing the
+parse.
+
+---
+
+## ADR-023 — PayU's verify_payment API is the strongest SEC-01 fix, for Phase 3
+
+**Status** Accepted — recorded as a Phase 3 candidate, deliberately not in the
+hotfix
+
+The hotfix trusts the callback's **signed** `status`, having verified the hash.
+That is a large improvement on trusting the callback's mere arrival, but it is
+still trust in a payload delivered through the donor's browser.
+
+PayU exposes a **`verify_payment`** API for authoritative transaction status.
+The strongest form of the SEC-01 fix does not trust the callback's status at
+all: on receiving a callback it calls PayU server-to-server with the `txnid` and
+marks the donation according to PayU's own answer. The callback becomes a
+notification that something happened, not evidence of what happened.
+
+**Why this is strictly better.** It removes the browser from the trust path
+entirely. Even granting a signed payload, the current design depends on the
+salt staying secret and on the hash formula being implemented correctly — and
+ADR-021 notes two documented formula variants the code does not implement. A
+server-to-server confirmation is immune to all of that.
+
+**Why not now.** It adds an outbound HTTP dependency inside the callback path,
+which needs timeout handling, retry policy, and a decision about what to do
+when PayU is unreachable mid-callback. Getting that wrong turns a payment-
+recording bug into a payment-recording outage. That is not a change to make in
+a hotfix whose purpose is to stop a live exploit.
+
+**Phase 3 shape.** Verify asynchronously — record the callback, mark the
+donation from the signed status as now, then reconcile against
+`verify_payment` out of band and alert on any disagreement. That keeps the
+donor's redirect fast while making the money trail authoritative. It also gives
+the reconciliation job the security review asked for.
