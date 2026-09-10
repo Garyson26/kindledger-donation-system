@@ -18,6 +18,31 @@ const paymentRoutes = require("./routes/payment");
 
 const app = express();
 
+// SEC-04: trust exactly one proxy hop. Without this, `req.ip` behind Vercel
+// (or any reverse proxy) is the proxy's own address, so express-rate-limit
+// keys every client into a single shared bucket - which both fails to isolate
+// an attacker and lets one noisy client lock everyone else out.
+//
+// THIS VALUE IS AN ASSUMPTION ABOUT THE DEPLOYMENT, NOT A CONSTANT.
+// `1` is correct only because exactly one proxy that we control sits in front
+// of this app and overwrites X-Forwarded-For: Vercel's edge. The number must
+// equal the count of trusted proxies in the chain.
+//
+//   - Too low, and req.ip is a proxy address: one shared rate limit bucket.
+//   - Too high, and the app reads a hop the client can write: an attacker
+//     spoofs X-Forwarded-For and gets a fresh bucket per request, which
+//     silently disables every per-IP limit.
+//
+// Nothing here validates that assumption at runtime. If this app is ever run
+// with no proxy in front, or reached directly on its port, X-Forwarded-For is
+// wholly client-supplied and `1` is wrong and unsafe.
+//
+// REVISIT IN PHASE 2, when the backend moves behind Nginx. If Nginx is the
+// only hop, `1` stays correct - but it must also be configured with
+// set_real_ip_from for the Docker network so it overwrites rather than
+// appends. If a CDN is added in front of Nginx, this becomes 2.
+app.set('trust proxy', 1);
+
 // Security headers (BE-HIGH-05)
 app.use(helmet({
   contentSecurityPolicy: false, // CSP is handled via Vercel headers on the frontend
