@@ -1,0 +1,149 @@
+# =============================================================================
+# Schema CI (SPEC-1A B2) - the drift gate
+# =============================================================================
+# ADR-002 documents that Prisma cannot express CHECK constraints, per-column
+# collation, the table default collation or ON UPDATE CURRENT_TIMESTAMP. A
+# documented hazard is not a control. This workflow is the control.
+#
+# Without it, one `prisma migrate dev` from a contributor working by habit
+# silently drops the six money and singleton CHECK constraints and reverts
+# users.email to an accent-INSENSITIVE collation, which MERGES distinct donor
+# accounts. None of that raises an error when applied.
+# =============================================================================
+
+name: Schema
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'db/**'
+      - 'Backend/prisma/**'
+      - 'Backend/db/**'
+      - 'Backend/test/**'
+      - 'Backend/package.json'
+      - '.github/workflows/schema.yml'
+  pull_request:
+    paths:
+      - 'db/**'
+      - 'Backend/prisma/**'
+      - 'Backend/db/**'
+      - 'Backend/test/**'
+      - 'Backend/package.json'
+      - '.github/workflows/schema.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: schema-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  schema:
+    name: Schema conformance and drift
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        # Must match the version in docker-compose.yml. CHECK constraints are
+        # only enforced from 8.0.16; testing against anything older would pass
+        # while proving nothing.
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: kindledger
+          MYSQL_USER: kindledger
+          MYSQL_PASSWORD: ci-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-root-password --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+          --health-start-period=40s
+          --character-set-server=utf8mb4
+          --collation-server=utf8mb4_0900_ai_ci
+          --default-time-zone=+00:00
+
+    env:
+      DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: Backend
+        # No lockfile is committed yet (SEC-12), so `npm ci` is not usable.
+        # Switch this to `npm ci` the moment package-lock.json lands.
+        run: npm install --no-audit --no-fund
+
+      - name: Apply db/schema.sql
+        # The normative artefact is applied directly, exactly as the MySQL
+        # container's docker-entrypoint-initdb.d does locally. The Prisma
+        # migration is NOT used here on purpose: the drift gate then compares
+        # the hand-written DDL against the Prisma model, which is the
+        # comparison that has to hold.
+        run: mysql -h 127.0.0.1 -P 3306 -u kindledger -pci-password kindledger < db/schema.sql
+
+      - name: Generate Prisma client
+        working-directory: Backend
+        run: npx prisma generate
+
+      - name: Server compatibility guard
+        working-directory: Backend
+        run: npm run db:check-server
+
+      - name: Server guard unit tests
+        working-directory: Backend
+        run: npm run test:guard
+
+      - name: Schema conformance tests
+        working-directory: Backend
+        run: npm run test:schema
+
+      - name: Drift gate
+        working-directory: Backend
+        # THE MERGE GATE. Fails the build on any structural drift between the
+        # applied schema and prisma/schema.prisma, AND on the loss of any
+        # invariant Prisma cannot see.
+        run: npm run db:check-drift
+
+      - name: Confirm the migration reproduces the same schema
+        working-directory: Backend
+        # Applies the hand-written Prisma migration to a SEPARATE database and
+        # re-runs the gate against it. This is what catches
+        # prisma/migrations/*/migration.sql drifting away from db/schema.sql -
+        # the two are duplicated by necessity, so nothing else would notice.
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -pci-root-password \
+            -e "CREATE DATABASE kindledger_from_migration; \
+                GRANT ALL ON kindledger_from_migration.* TO 'kindledger'@'%';"
+          DATABASE_URL=mysql://kindledger:ci-password@127.0.0.1:3306/kindledger_from_migration \
+            npx prisma migrate deploy
+          DATABASE_URL=mysql://kindledger:ci-password@127.0.0.1:3306/kindledger_from_migration \
+            npm run db:check-drift
+
+      - name: Reject any `prisma migrate dev` migration in the diff
+        if: github.event_name == 'pull_request'
+        # A migration authored by `migrate dev` is recognisable: it carries
+        # Prisma's own index naming (`*_key`) or its default collation. Both
+        # are fingerprints that the hand-written process was bypassed.
+        run: |
+          added=$(git diff --name-only --diff-filter=A \
+            "origin/${{ github.base_ref }}...HEAD" -- 'Backend/prisma/migrations/**' || true)
+          if [ -z "$added" ]; then echo "No new migrations."; exit 0; fi
+          echo "New migrations:"; echo "$added"
+          bad=0
+          for f in $added; do
+            if grep -qE 'utf8mb4_unicode_ci|_key\`\(' "$f"; then
+              echo "::error file=$f::Looks like a 'prisma migrate dev' migration \
+          (utf8mb4_unicode_ci or Prisma *_key index naming). Author it by hand \
+          against db/schema.sql - see CONTRIBUTING.md."
+              bad=1
+            fi
+          done
+          exit $bad

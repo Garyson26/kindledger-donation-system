@@ -1,0 +1,307 @@
+// =============================================================================
+// KindLedger Donation System - Prisma schema
+// =============================================================================
+// GENERATED TO MATCH db/schema.sql. That file is the source of truth.
+// If this schema and the DDL disagree, the DDL wins and this file is corrected.
+//
+// FIVE THINGS PRISMA CANNOT EXPRESS. Read before running any migrate command.
+// Every item below was confirmed by diffing this schema against db/schema.sql
+// with `prisma migrate diff --from-empty --to-schema-datamodel`.
+//
+//   1. CHECK constraints. Prisma has no CHECK support at all. The six
+//      constraints in db/schema.sql (ck_categories_amount_positive,
+//      ck_donations_quantity_min, ck_donations_amount_positive,
+//      ck_branding_settings_singleton and the two colour-format checks) exist
+//      only in the DDL and in the migration SQL. They are absent from
+//      Prisma's derived DDL entirely.
+//
+//   2. Per-column collation. The email columns on `users` and
+//      `pending_signups` are COLLATE utf8mb4_0900_as_ci - accent-sensitive,
+//      case-insensitive - which is what makes the unique index prevent
+//      case-variant duplicate accounts. Prisma cannot express this.
+//
+//   3. Table default collation. Prisma emits utf8mb4_unicode_ci; the DDL
+//      specifies utf8mb4_0900_ai_ci. Prisma's default is the older UCA 5.2.0
+//      collation and there is no way to override it from this file.
+//
+//   4. ON UPDATE CURRENT_TIMESTAMP(3). The DDL maintains updated_at in the
+//      database. Prisma's @updatedAt is a client-side concern, so its derived
+//      DDL omits the ON UPDATE clause. Keeping it in the database is
+//      deliberate: a raw SQL UPDATE, an ETL correction or a psql-style manual
+//      fix still bumps the timestamp. Do not "fix" this drift by removing it.
+//
+//   5. Column COMMENTs. All the rationale in db/schema.sql is lost here.
+//
+// NOT drift, verified identical: every column type, nullability and default;
+// every ENUM value set; every index and its column order; every foreign key
+// and its referential actions; and all unique index names (which is why each
+// @unique below carries an explicit map:).
+//
+// CONSEQUENCE: `prisma migrate dev` diffs the database against THIS file and
+// will generate a migration that DROPS the checks and RESETS the collations,
+// because from Prisma's point of view they are drift. Never let it autogenerate
+// against a live schema. The supported workflow is:
+//
+//   - Schema changes are written into db/schema.sql first.
+//   - A migration is hand-authored under prisma/migrations to match.
+//   - `prisma migrate deploy` applies it. `migrate dev` is not used.
+//   - `test/schema.test.js` asserts the checks and collations still exist.
+//
+// This is the tradeoff accepted when D-01 chose Prisma for its self-hoster
+// upgrade path. See docs/decisions.md ADR-002.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+// Shared by users.role and pending_signups.role.
+enum Role {
+  user
+  admin
+}
+
+// donations.status
+enum DonationStatus {
+  Pending
+  Approved
+  Rejected
+}
+
+// donations.payment_status
+enum PaymentStatus {
+  Pending
+  Paid
+  Failed
+  Cancelled
+}
+
+// -----------------------------------------------------------------------------
+// users
+// -----------------------------------------------------------------------------
+model User {
+  id                 BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  uuid               String    @unique(map: "uq_users_uuid") @db.Char(36)
+  /// Original MongoDB ObjectId hex. NULL on fresh installs and post-cutover rows.
+  legacyId           String?   @unique(map: "uq_users_legacy_id") @map("legacy_id") @db.Char(24)
+  name               String    @db.VarChar(120)
+  /// COLLATE utf8mb4_0900_as_ci in the DDL - Prisma cannot express this.
+  email              String    @unique(map: "uq_users_email") @db.VarChar(255)
+  passwordHash       String    @map("password_hash") @db.VarChar(255)
+  role               Role      @default(user)
+  phone              String?   @db.VarChar(32)
+  address            String?   @db.VarChar(512)
+  /// SEC-05. Enforced in Phase 3, not by the schema.
+  isActive           Boolean   @default(true) @map("is_active")
+  isVerified         Boolean   @default(false) @map("is_verified")
+  /// SEC-05 revocation. Increment on password change, reset and disable.
+  tokenVersion       Int       @default(0) @map("token_version") @db.UnsignedInt
+  /// SHA-256 hex. SEC-13 - never store the plaintext OTP.
+  loginOtpHash       String?   @map("login_otp_hash") @db.Char(64)
+  loginOtpExpiresAt  DateTime? @map("login_otp_expires_at") @db.DateTime(3)
+  loginOtpAttempts   Int       @default(0) @map("login_otp_attempts") @db.UnsignedTinyInt
+  /// SHA-256 hex. SEC-13.
+  resetCodeHash      String?   @map("reset_code_hash") @db.Char(64)
+  resetCodeExpiresAt DateTime? @map("reset_code_expires_at") @db.DateTime(3)
+  /// SEC-02. Phase 3 must actually read and increment this.
+  resetCodeAttempts  Int       @default(0) @map("reset_code_attempts") @db.UnsignedTinyInt
+  createdAt          DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(3)
+
+  donations        Donation[]
+  brandingSettings BrandingSettings[]
+
+  @@index([createdAt, role], map: "ix_users_created_at_role")
+  @@map("users")
+}
+
+// -----------------------------------------------------------------------------
+// pending_signups
+// -----------------------------------------------------------------------------
+// expires_at replaces MongoDB's TTL index; MySQL has no equivalent. The sweep
+// runs in the application cron, not the MySQL event scheduler.
+model PendingSignup {
+  id                 BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  uuid               String   @unique(map: "uq_pending_signups_uuid") @db.Char(36)
+  name               String   @db.VarChar(120)
+  /// COLLATE utf8mb4_0900_as_ci in the DDL - Prisma cannot express this.
+  email              String   @unique(map: "uq_pending_signups_email") @db.VarChar(255)
+  passwordHash       String   @map("password_hash") @db.VarChar(255)
+  role               Role     @default(user)
+  /// SHA-256 hex. SEC-13.
+  signupOtpHash      String   @map("signup_otp_hash") @db.Char(64)
+  signupOtpExpiresAt DateTime @map("signup_otp_expires_at") @db.DateTime(3)
+  /// New column. Parity with the login OTP cap.
+  signupOtpAttempts  Int      @default(0) @map("signup_otp_attempts") @db.UnsignedTinyInt
+  /// Replaces the MongoDB TTL index. Swept by the application cron.
+  expiresAt          DateTime @map("expires_at") @db.DateTime(3)
+  createdAt          DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([expiresAt], map: "ix_pending_signups_expires_at")
+  @@map("pending_signups")
+}
+
+// -----------------------------------------------------------------------------
+// categories
+// -----------------------------------------------------------------------------
+// deletedAt is a soft delete and a behaviour change from the current hard
+// DELETE. Every read path must filter deletedAt: null. See ADR-004.
+model Category {
+  id                  BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  uuid                String    @unique(map: "uq_categories_uuid") @db.Char(36)
+  legacyId            String?   @unique(map: "uq_categories_legacy_id") @map("legacy_id") @db.Char(24)
+  name                String    @unique(map: "uq_categories_name") @db.VarChar(160)
+  /// Source field is Mongoose `sortDescription` - verified to be a typo for "short".
+  shortDescription    String    @map("short_description") @db.VarChar(500)
+  /// The authoritative price, in minor units. CHECK (> 0) lives in the DDL.
+  donationAmountMinor BigInt    @map("donation_amount_minor") @db.UnsignedBigInt
+  displayOrder        Int       @default(0) @map("display_order")
+  /// Soft delete. Read paths must filter deletedAt: null.
+  deletedAt           DateTime? @map("deleted_at") @db.DateTime(3)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(3)
+
+  descriptions CategoryDescription[]
+  donations    Donation[]
+
+  @@index([deletedAt, displayOrder], map: "ix_categories_deleted_display")
+  @@map("categories")
+}
+
+// -----------------------------------------------------------------------------
+// category_descriptions
+// -----------------------------------------------------------------------------
+// A child table rather than a JSON column: descriptions are individually
+// addressed in the admin form (add / remove / edit by index), verified against
+// source. See ADR-005.
+model CategoryDescription {
+  id         BigInt @id @default(autoincrement()) @db.UnsignedBigInt
+  categoryId BigInt @map("category_id") @db.UnsignedBigInt
+  position   Int    @db.UnsignedInt
+  text       String @db.VarChar(1000)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "fk_category_descriptions_category")
+
+  @@unique([categoryId, position], map: "uq_category_descriptions_position")
+  @@map("category_descriptions")
+}
+
+// -----------------------------------------------------------------------------
+// donations
+// -----------------------------------------------------------------------------
+// The DonationStatus / PaymentStatus enums are what close BUG-02, BUG-03 and
+// SEC-16: MySQL enforces the value set on every write path, which Mongoose did
+// not do on findByIdAndUpdate.
+//
+// No relation-level assertion that amountMinor = baseAmountMinor +
+// extraAmountMinor. Historic migrated rows may violate it; enforce in the
+// pricing code and reconcile in the ETL harness.
+model Donation {
+  id               BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
+  uuid             String        @unique(map: "uq_donations_uuid") @db.Char(36)
+  legacyId         String?       @unique(map: "uq_donations_legacy_id") @map("legacy_id") @db.Char(24)
+  /// crypto.randomUUID(). Replaces the guessable TXN<epoch><rand> scheme (SEC-06).
+  transactionRef   String        @unique(map: "uq_donations_transaction_ref") @map("transaction_ref") @db.Char(36)
+  donorName        String        @map("donor_name") @db.VarChar(120)
+  /// Not unique - guests recur.
+  donorEmail       String        @map("donor_email") @db.VarChar(255)
+  donorPhone       String?       @map("donor_phone") @db.VarChar(32)
+  /// NULL for guest donations, and after the donor's account is deleted.
+  userId           BigInt?       @map("user_id") @db.UnsignedBigInt
+  categoryId       BigInt        @map("category_id") @db.UnsignedBigInt
+  item             String?       @db.VarChar(200)
+  quantity         Int           @default(1) @db.UnsignedInt
+  baseAmountMinor  BigInt        @map("base_amount_minor") @db.UnsignedBigInt
+  extraAmountMinor BigInt        @default(0) @map("extra_amount_minor") @db.UnsignedBigInt
+  amountMinor      BigInt        @map("amount_minor") @db.UnsignedBigInt
+  /// Recorded, not supported. Single currency per installation this phase.
+  currency         String        @default("INR") @db.Char(3)
+  status           DonationStatus @default(Pending)
+  paymentStatus    PaymentStatus  @default(Pending) @map("payment_status")
+  /// Verbatim PayU text.
+  failureReason    String?       @map("failure_reason") @db.VarChar(500)
+  /// Verbatim PayU text.
+  errorMessage     String?       @map("error_message") @db.VarChar(1000)
+  /// Mongo `date`. The field all reports filter on.
+  donatedAt        DateTime      @default(now()) @map("donated_at") @db.DateTime(3)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt        DateTime      @default(now()) @updatedAt @map("updated_at") @db.DateTime(3)
+
+  user           User?                   @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Restrict, map: "fk_donations_user")
+  category       Category                @relation(fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "fk_donations_category")
+  paymentDetails DonationPaymentDetail?
+
+  @@index([donatedAt], map: "ix_donations_donated_at")
+  @@index([userId], map: "ix_donations_user_id")
+  @@index([categoryId], map: "ix_donations_category_id")
+  @@index([paymentStatus, donatedAt], map: "ix_donations_paystatus_donated_at")
+  @@index([createdAt], map: "ix_donations_created_at")
+  @@map("donations")
+}
+
+// -----------------------------------------------------------------------------
+// donation_payment_details
+// -----------------------------------------------------------------------------
+// The unique index on mihpayid is a SECURITY CONTROL (SEC-01 replay guard),
+// not tidiness. Phase 3 must treat the duplicate-key error it raises as a
+// successful idempotent no-op, never as a failure.
+model DonationPaymentDetail {
+  donationId    BigInt    @id @map("donation_id") @db.UnsignedBigInt
+  /// SEC-01 replay guard. Unique; NULLs permitted for unpaid donations.
+  mihpayid      String?   @unique(map: "uq_donation_payment_details_mihpayid") @db.VarChar(64)
+  amountMinor   BigInt?   @map("amount_minor") @db.UnsignedBigInt
+  mode          String?   @db.VarChar(32)
+  bankRefNum    String?   @map("bank_ref_num") @db.VarChar(64)
+  /// PayU raw status. Verbatim, deliberately not an enum.
+  gatewayStatus String?   @map("gateway_status") @db.VarChar(64)
+  errorMessage  String?   @map("error_message") @db.VarChar(1000)
+  paidAt        DateTime? @map("paid_at") @db.DateTime(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(3)
+
+  donation Donation @relation(fields: [donationId], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "fk_donation_payment_details_donation")
+
+  @@map("donation_payment_details")
+}
+
+// -----------------------------------------------------------------------------
+// branding_settings
+// -----------------------------------------------------------------------------
+// Singleton: id is always 1, enforced by CHECK (id = 1) in the DDL. Note the
+// id has no @default(autoincrement()) - the row is seeded by db/schema.sql so
+// the application never has to handle a missing settings row.
+//
+// The KindLedger attribution is NOT here and must never be.
+model BrandingSettings {
+  /// Singleton. CHECK (id = 1) in the DDL makes a second row impossible.
+  id               Int      @id @db.UnsignedTinyInt
+  organisationName String   @map("organisation_name") @db.VarChar(160)
+  /// Relative path within the uploads volume.
+  logoPath         String?  @map("logo_path") @db.VarChar(512)
+  /// Raster only - png, jpeg, webp. Enforced by the application, not the schema.
+  logoMime         String?  @map("logo_mime") @db.VarChar(64)
+  faviconPath      String?  @map("favicon_path") @db.VarChar(512)
+  /// CHECK for ^#[0-9A-Fa-f]{6}$ lives in the DDL.
+  primaryColour    String?  @map("primary_colour") @db.Char(7)
+  secondaryColour  String?  @map("secondary_colour") @db.Char(7)
+  supportEmail     String?  @map("support_email") @db.VarChar(255)
+  websiteUrl       String?  @map("website_url") @db.VarChar(512)
+  /// The NGO's own footer line. Not the KindLedger attribution.
+  footerText       String?  @map("footer_text") @db.VarChar(500)
+  defaultCurrency  String   @default("INR") @map("default_currency") @db.Char(3)
+  updatedBy        BigInt?  @map("updated_by") @db.UnsignedBigInt
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(3)
+
+  updatedByUser User? @relation(fields: [updatedBy], references: [id], onDelete: SetNull, onUpdate: Restrict, map: "fk_branding_settings_updated_by")
+
+  @@index([updatedBy], map: "ix_branding_settings_updated_by")
+  @@map("branding_settings")
+}

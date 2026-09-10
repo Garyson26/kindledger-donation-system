@@ -1,0 +1,192 @@
+# =============================================================================
+# KindLedger Donation System - container topology (SPEC-1A section 3)
+# =============================================================================
+#   docker compose up                     -> db + redis. Schema auto-applied.
+#   docker compose --profile app up        -> adds api + nginx. See the warning
+#                                             on the api service before using.
+#
+# WHY api AND nginx ARE PROFILE-GATED
+# Phase 1a is forbidden from touching Backend/ route handlers and middleware,
+# but Backend/config/db.js calls process.exit(1) when it cannot reach
+# MONGODB_URI - which deliverable 7 removes. The api container would therefore
+# exit(1) on every start, and /api/health (SPEC-1A section 3.3) does not exist
+# yet either. Both are Phase 3 work. Gating them keeps the default stack green
+# and honest instead of shipping a restart loop.
+# See docs/decisions.md ADR-006.
+# =============================================================================
+
+name: kindledger
+
+services:
+  # ---------------------------------------------------------------------------
+  # MySQL 8.4 LTS
+  # ---------------------------------------------------------------------------
+  # NOT published to the host by default. A commented mapping is provided for
+  # local debugging only - do not uncomment it on a deployed host.
+  #
+  # db/schema.sql is mounted read-only into docker-entrypoint-initdb.d, so a
+  # fresh volume comes up with the full schema already applied. Note that the
+  # entrypoint only runs those scripts when the data directory is EMPTY; on an
+  # existing volume, apply changes with `prisma migrate deploy` instead.
+  # ---------------------------------------------------------------------------
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      # NOTE: SPEC-1A section 3.3 specified
+      # --default-authentication-plugin=caching_sha2_password. That option was
+      # deprecated in MySQL 8.0.27 and REMOVED in 8.4, where it aborts startup
+      # with "unknown variable" and the container crash-loops. Verified against
+      # mysql:8.4.11. authentication_policy is its replacement; caching_sha2_password
+      # is already the 8.4 default, so this pins the intent rather than changing it.
+      - --authentication-policy=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # All timestamps are written and read as UTC (SPEC-1A section 3.4).
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kindledger}
+      MYSQL_USER: ${MYSQL_USER:-kindledger}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    # ports:
+    #   - "127.0.0.1:3306:3306"   # local debugging only
+    healthcheck:
+      # --silent keeps the password out of the container logs.
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "127.0.0.1",
+          "-u",
+          "root",
+          "-p${MYSQL_ROOT_PASSWORD}",
+          "--silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - internal
+
+  # ---------------------------------------------------------------------------
+  # Redis - rate limit store (SEC-04), sessions later
+  # ---------------------------------------------------------------------------
+  # No persistence required: --save "" disables RDB snapshots. A lost rate
+  # limit counter is not a correctness problem, and not writing them avoids a
+  # volume that would otherwise accumulate client IPs on disk.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
+  # ---------------------------------------------------------------------------
+  # API - Node 20, Express 5
+  # ---------------------------------------------------------------------------
+  # WARNING: cannot start until Phase 3. See the header of this file.
+  # ---------------------------------------------------------------------------
+  api:
+    profiles: ["app"]
+    build:
+      context: ./Backend
+      dockerfile: ../docker/api.Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 5000
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ADMIN_CREATION_KEY: ${ADMIN_CREATION_KEY:?set ADMIN_CREATION_KEY in .env}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      PAYU_MERCHANT_KEY: ${PAYU_MERCHANT_KEY}
+      PAYU_MERCHANT_SALT: ${PAYU_MERCHANT_SALT}
+      PAYU_BASE_URL: ${PAYU_BASE_URL:-https://test.payu.in}
+      SUCCESS_URL: ${SUCCESS_URL}
+      FAILURE_URL: ${FAILURE_URL}
+      CANCEL_URL: ${CANCEL_URL}
+      NOTIFY_URL: ${NOTIFY_URL}
+      FRONTEND_SUCCESS_URL: ${FRONTEND_SUCCESS_URL}
+      FRONTEND_FAILURE_URL: ${FRONTEND_FAILURE_URL}
+      EMAIL_SERVICE: ${EMAIL_SERVICE}
+      EMAIL_USER: ${EMAIL_USER}
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      UPLOADS_DIR: /var/lib/kindledger/uploads
+    volumes:
+      - uploads:/var/lib/kindledger/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Phase 3 must replace this with a real /api/health probe once that
+      # endpoint exists. Until then this only proves the process is listening.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('node:net').connect(5000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - internal
+
+  # ---------------------------------------------------------------------------
+  # Nginx - TLS termination, reverse proxy, rate limit backstop
+  # ---------------------------------------------------------------------------
+  # Also the entry point for PayU callbacks, which are proxied to the API
+  # exactly as browser traffic is. No separate ingress (SPEC-1A section 3.1).
+  # ---------------------------------------------------------------------------
+  nginx:
+    profiles: ["app"]
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Shared location and proxy blocks, included by both server blocks.
+      - ./docker/nginx/kindledger-locations.conf:/etc/nginx/conf.d/kindledger-locations.conf:ro
+      - ./docker/nginx/kindledger-proxy.conf:/etc/nginx/conf.d/kindledger-proxy.conf:ro
+      # Uploaded branding assets are served straight off the volume.
+      - uploads:/var/www/uploads:ro
+      # Drop fullchain.pem and privkey.pem here to enable TLS.
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - internal
+
+volumes:
+  mysql-data:
+    name: kindledger-mysql-data
+  uploads:
+    name: kindledger-uploads
+
+networks:
+  internal:
+    driver: bridge
