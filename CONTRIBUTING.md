@@ -97,6 +97,40 @@ npm run db:check-drift   # fails on any drift, structural or invariant
 Both run in CI on every pull request that touches the schema
 (`.github/workflows/schema.yml`). The drift gate is a merge gate.
 
+### When a migration may still be edited, and when it may not
+
+The rule is **not** "never edit a migration". It is:
+
+> **Never edit a migration once it has been applied to any database that
+> persists.**
+
+For this project that boundary is **the moment the first NGO runs
+`prisma migrate deploy`**. Before that, the migration set is still a draft and
+correcting it is ordinary work. After it, editing silently desynchronises every
+deployed instance from its recorded history: Prisma records the checksum it
+applied, so an edited migration either fails its checksum check or, worse,
+appears applied while the database does not match what the file now says.
+
+Practically:
+
+- **Before first real deployment** — the initial migration may be regenerated
+  from `db/schema.sql` if the two drift. This has already been done once, for a
+  comment-only correction (ADR-026), while every application had been to a local
+  throwaway database.
+- **After first real deployment** — never. Author a new migration, always, even
+  for something that looks cosmetic.
+
+If you are unsure which side of the line you are on, assume the second.
+
+**A gap worth knowing about.** The drift gate does **not** catch comment
+inaccuracy. `prisma migrate diff` compares structure, and comments do not appear
+in a structural diff — so a `COMMENT` in `db/schema.sql` that states something
+false about the schema will pass every automated check in this repository.
+Comment accuracy in the normative artefact is guarded by review alone. That
+matters here more than in most projects, because the comments in
+`db/schema.sql` carry the security rationale: ADR-026 exists because one of
+them asserted a control was a replay defence when it was not.
+
 ### Two constraints to know about before you edit the DDL
 
 - MySQL prohibits a `CHECK` constraint on a column used in a foreign key's
