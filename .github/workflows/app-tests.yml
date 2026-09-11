@@ -100,6 +100,15 @@ jobs:
         working-directory: Backend
         run: npm run test:auth
 
+      - name: Category characterisation (SPEC-3 package 3.1)
+        working-directory: Backend
+        # CHARACTERISATION, not specification: these capture what
+        # routes/categories.js does TODAY against Mongoose, so the migration can
+        # be shown to preserve behaviour. They belong in THIS job, not the
+        # data-layer one, because the behaviour they pin is still Mongoose-backed
+        # - they move across when the route does.
+        run: npm run test:categories
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------

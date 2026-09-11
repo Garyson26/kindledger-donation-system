@@ -1759,3 +1759,105 @@ for Phase 2 — `docker compose up`, api healthy — was obtained from an image
 built this way. The application code was correct and all the suites genuinely
 passed, but the image they passed in was not the image the Dockerfile
 describes. The re-run recorded in AA1 was done on a clean image.
+
+---
+
+# Phase 3 (SPEC-3) — route migration and finding remediation
+
+---
+
+## ADR-050 — `categories.js` cannot be migrated in isolation: it is the most widely READ collection in the system
+
+**Status** Open — **blocks package 3.1's migration half. Characterisation
+tests are done and green; the migration is not started.**
+
+SPEC-3 section 2 sequences `categories.js` first, on the reasoning that it is
+the "smallest surface, simplest queries" and so a cheap place to prove the
+repository pattern. Its **write** surface is indeed the smallest in the project:
+five handlers, no aggregation, no `populate`, no `distinct`.
+
+Its **read** surface is the largest. `Category` is read by three route files
+that SPEC-3 does not migrate until packages 3.2, 3.3 and 3.5:
+
+| Reader | Site | What it does |
+|---|---|---|
+| `routes/payment.js:116` | `Category.findById(category)` | **Prices the donation.** `dbCategory.donationAmount * qty` at :123 is the server-side amount calculation |
+| `routes/donations.js` | `.populate("category")` at :118, :226, :265, :342 | Every donation listing and the receipt |
+| `routes/admin.js:19` | `Category.countDocuments()` | The dashboard tile |
+
+**Two independent failures, either of which is sufficient.**
+
+**1. The data splits.** Migrating the write path means an admin creating a
+category writes it to MySQL and nowhere else. `/api/payment/initiate` then looks
+it up in MongoDB, does not find it, and returns `400 Invalid category`. **No
+donation can be made against any category created after the cutover.** Existing
+categories keep working, so this does not fail at deploy — it fails the first
+time an admin adds a category, which is the kind of delay that makes the cause
+hard to find.
+
+**2. The identifier format changes.** A category created in MySQL has a
+`CHAR(36)` uuid as its external id and no ObjectId at all — `legacy_id` exists
+for migrated rows, not for new ones. `payment.js:116` calls
+`Category.findById(<uuid>)`, which raises a `CastError` before it can reach the
+not-found branch. So the failure is not even the 400 above; it is an
+unhandled 500, which is the SEC-14 shape again.
+
+**Why this was not visible from the spec.** The sequencing reasoning is about
+the size of the file being changed. The risk is in the files NOT being changed.
+`categories.js` is small precisely because it only writes; everything that reads
+categories lives somewhere else.
+
+### Options
+
+**A. Dual-write during 3.1.** `categories.js` writes to both stores, reads from
+MySQL. Preserves every reader.
+*Cost:* Mongoose stays in the migrated file, which directly violates SPEC-3
+section 5's "No Mongoose reference remains in the migrated file". Adds a
+consistency failure mode with no transaction spanning the two stores. Does not
+solve failure 2 — the id handed back to the frontend still has to be one of
+the two formats, and whichever is chosen, one side breaks.
+
+**B. Widen 3.1 to include the four read sites.** Migrate `categories.js` plus
+the `Category` lookups in `payment.js`, `donations.js` and `admin.js`, leaving
+everything else in those files untouched.
+*Cost:* touches three files before their characterisation tests exist, which is
+the rule SPEC-3 section 1 exists to enforce. Mitigated for `payment.js`, which
+has 17 tests covering `/initiate` pricing already; not mitigated for
+`donations.js` or `admin.js`. Also requires the payment suite's category fixture
+to switch stores — a fourth seam function, against SPEC-2 section 4.1's
+expectation of five for the whole phase.
+
+**C. Resequence: do categories LAST, not first.** Migrate the readers first,
+against a `Category` still in MongoDB, then migrate categories once nothing
+reads it from Mongo.
+*Cost:* the readers cannot be migrated while the thing they read is in the other
+store either — `donations.js` populating a Mongo category from a MySQL
+donation has the same split. This option only works if "migrate the readers"
+means migrating donations AND their category lookups together, which is option
+B with a different name and a worse order.
+
+**D. Accept a compatibility shim for the duration of Phase 3.** `categories.js`
+migrates fully; a small read-through helper resolves a category id from MySQL
+first and falls back to Mongo, and the three readers call it instead of
+`Category.findById`. One shared function, deleted in 3.6.
+*Cost:* three one-line edits in unmigrated files, and a shim to remember to
+remove. It does solve failure 2, because the helper can accept either id format.
+
+### Recommendation
+
+**D**, with B as the fallback if a shim is judged worse than widening the
+package. D is the smallest change that keeps the donation flow working, keeps
+Mongoose out of `categories.js`, and does not require characterisation tests for
+two files that are not otherwise being touched. Its real cost is that it creates
+a temporary abstraction, and those survive — which is why it should be added
+to Phase 3's exit criteria (section 7) rather than left to be noticed.
+
+**Not a decision I should take alone.** All four options trade one of SPEC-3's
+own rules against another, and B in particular would breach the coverage rule
+that AC5 and section 1 exist to protect.
+
+**What is already done and is unaffected either way:**
+`Backend/test/categories-characterisation.test.js`, 22 scenarios, green against
+the current Mongoose implementation. It records five quirks that were not in any
+finding list, including one new defect (BUG-09, the `descriptions` wipe) and the
+fact that reorder is not atomic. That work is valid under every option above.

@@ -39,10 +39,10 @@ marked **R**, because reading was sufficient to find it.
 | | Count |
 |---|---|
 | **R** - found by reading | 29 |
-| **X** - found by running | 11 |
+| **X** - found by running | 15 |
 | Status *corrections* forced by running (counted under their original mark) | 3 |
 
-**The 11 X findings**, none of which any amount of reading would have produced:
+**The 15 X findings**, none of which any amount of reading would have produced:
 
 | ID | What running it revealed |
 |---|---|
@@ -57,6 +57,10 @@ marked **R**, because reading was sufficient to find it.
 | ADR-043 | `set_real_ip_from 172.16.0.0/12` covers the Docker bridge gateway - a live spoofing hole |
 | ADR-048 | The limiter keyed IPv6 on the raw address; and `rateLimiters.js` opened Redis on `require`, so any importing process never exited |
 | ADR-049 | The api image was built from the developer's `node_modules` |
+| BUG-09 | `PUT /categories/:id` wipes `descriptions` on a partial update - found while writing the characterisation test |
+| - | `categories.js` reorder is not atomic; a bad id mid-list leaves earlier writes applied |
+| - | A malformed category id 500s where an unknown one 404s |
+| ADR-050 | `categories.js` cannot be migrated in isolation - `Category` is read by three unmigrated route files, and `payment.js` prices every donation from it |
 
 **The 3 corrections** are the sharper argument, because each overturned a status
 that a document already asserted:
@@ -74,10 +78,86 @@ Every entry in both tables above sat in that gap.
 
 ---
 
-## OPEN AND UNASSIGNED
+## The characterisation-test rule (AC1, SPEC-3 section 1 amendment)
 
-**Six findings have no owning phase.** Listed here, separately from the table, so
-they cannot be lost in it. Each needs a decision rather than an implementation.
+**Every refusal path asserted in packages 3.1 through 3.5 must assert the
+MECHANISM as well as the outcome.** Concretely, three things:
+
+1. the **status code**,
+2. the **response shape**, and
+3. that **no unhandled error was raised**.
+
+Asserting only the outcome cannot distinguish *refused correctly* from *crashed
+before deciding*. Both leave the database untouched, and "the database is
+untouched" is what an outcome-only assertion checks.
+
+**This rule is generalised from SEC-14, which is the worked example.**
+`payment-callbacks.test.js:355` posts a malformed hash and asserts the donation
+stays `Pending`. It passes. The donation does stay `Pending` - because
+`verifyHash()` throws a `RangeError` before it can decide anything, the route's
+catch block turns that into a 500, and nothing is written. The test was correct
+about the outcome and blind to the mechanism, and the mechanism was an
+unauthenticated remote crash on a public endpoint. The finding sat behind a
+green test.
+
+The failure mode is specific to security gates and worth naming. For ordinary
+business logic, "the right thing happened" is usually a sufficient assertion.
+For a gate, *crashing* also produces the right visible outcome - fail-closed and
+fail-by-exception are indistinguishable from the outside - so the outcome
+assertion has no power to separate the code working from the code exploding.
+A gate that crashes is still a denial-of-service primitive, and it stops being
+fail-closed the moment someone adds a `catch` that returns 200.
+
+This is the same family as ADR-048's wrong-reason test, inverted: there the
+assertion was vacuous; here it was real but tested the wrong property.
+
+**Retroactive application is deliberately deferred.** `payment-callbacks.test.js:355`
+should assert a 4xx and the absence of a thrown error rather than only the
+donation state. That change belongs in **package 3.5**, alongside the SEC-14
+fix, not now - editing a regression suite before the code it guards is changed
+would break the "suites pass unchanged" property that every package between here
+and there depends on.
+
+---
+
+## Publication gate (AC3)
+
+This map stays tracked - SPEC-3 section 5's "updated in the same commit"
+requirement cannot be enforced on an untracked file. The exposure is handled by
+a checkable condition rather than by a coupling to DEF-01:
+
+> **Publication requires EITHER zero open findings in this map, OR the map
+> redacted of file and line for everything still open.**
+
+**Recorded as a Phase 6 gate.**
+
+The reasoning is worth keeping, because the obvious framing is wrong. A map of
+**closed** findings with file and line is not an exposure at all - it is good
+practice, and it is evidence. It tells a prospective self-hoster what was found,
+where, and that it was fixed, which is more than most projects of this kind
+offer. The exposure exists **only for open items**, where the same row is a
+prioritised worklist for an attacker with the fix time still to run.
+
+So the gate is not "hide the map" and it is not "wait for DEF-01". Coupling it
+to the licence would have been convenient and wrong: the two become true at
+roughly the same time, but for unrelated reasons, and a condition that happens
+to coincide is not a condition.
+
+## The six formerly unassigned findings - NOW ASSIGNED (AC2)
+
+All six had no owning phase when this map was first produced. All six now do.
+They stay in their own section rather than being folded into the table, because
+four of them are decisions or production sessions rather than code, and folding
+them in would make them look like ordinary work items.
+
+| | Finding | Assigned to | Blocks |
+|---|---|---|---|
+| U-1 | Licence (DEF-01) | **Gary.** Recommendation: Apache-2.0 | Phase 6 |
+| U-2 | `verify_payment` reconciliation | **3.5, DESIGN ONLY** - the call itself is a later package | nothing |
+| U-3 | The `Cancelled` state | **Code to 3.2; the data question to the J3 session** | nothing |
+| U-4 | BUG-05 redirect URLs | **Gary, production session** | nothing |
+| U-5 | `for_ocean_security_review.md` at HEAD | **Done in package 3.0** - see below | nothing |
+| U-6 | prisma advisory | **Trigger, not cadence** - start of every phase | nothing |
 
 ### U-1. DEF-01 - the licence is undecided and blocks publication
 **Source** ADR-020, ADR-029 (ADR-029 is on the unmerged `docs/incident-j1-j6`
@@ -86,8 +166,21 @@ branch). **Provenance R.**
 ADR-029 records a three-way contradiction in the licence state on `main`. The
 GPL-3.0-only change was withdrawn and is not approved. Until this is settled the
 repository cannot be published, which makes it a blocker on the stated goal of a
-self-hostable OSS release - not a documentation chore. **Needs an owner
-decision; no phase claims it.**
+self-hostable OSS release - not a documentation chore.
+
+**ASSIGNED TO GARY. Blocks Phase 6.** Standing recommendation on file:
+**Apache-2.0**. Permissive, so NGOs and integrators can deploy it freely; it
+carries an express patent grant; and section 4(d)'s NOTICE clause requires
+attribution notices to be preserved in derivative works, which is the closest a
+mainstream OSI licence comes to enforceable attribution.
+
+Two things it does **not** do, stated so the choice is not made on a
+misunderstanding. It will not compel anyone to keep the footer - nothing short
+of a non-OSI clause would, and adding one would cost the project the OSI status
+that makes it adoptable. AGPL-3.0 would buy network copyleft, at the cost of
+deterring exactly the integrators most likely to deploy this on behalf of NGOs.
+
+Not legal advice; warrants proper review before it is settled.
 
 ### U-2. ADR-023 - `verify_payment` reconciliation was nominated for Phase 3 and SPEC-3 does not mention it
 **Source** ADR-023. **Provenance R.**
@@ -97,12 +190,20 @@ callback's signed `status` at all, but calls PayU server-to-server with the
 `txnid` and marks the donation from PayU's own answer. Its status line reads
 "recorded as a **Phase 3 candidate**". SPEC-3 does not assign it.
 
-This needs an explicit yes or no. The current fix trusts a signed payload
-delivered through the donor's browser, which is a large improvement on trusting
-its mere arrival but is not the same as authoritative. If the answer is no, that
-should be recorded as a decision rather than left as an unclaimed candidate -
-otherwise the next reviewer re-raises it. **Recommend deciding before package
-3.5 plans its work, since 3.5 is where it would be built.**
+**ASSIGNED TO 3.5, DESIGN ONLY. The outbound call is a separate post-Phase-3
+package, gated on sandbox credentials. 3.5 must not block on it.**
+
+What 3.5 owes is that the handler **records enough to reconcile later**:
+`mihpayid`, `txnid`, the signed `amount`, and the raw `status` verbatim. All
+four already have columns (`db/schema.sql`, `donation_payment_details`) and
+`gateway_status` is deliberately stored verbatim rather than as an ENUM, so this
+is a constraint on 3.5's handler rather than new schema.
+
+The distinction matters: designing for reconciliation is cheap now and
+expensive to retrofit, because a donation whose raw gateway status was never
+recorded cannot be reconciled afterwards at all - there is nothing to compare
+against. ADR-025 already notes that `gateway_status` will be NULL for the entire
+pre-cutover paid population for exactly this reason.
 
 ### U-3. ADR-024 item 1 - how a donation legitimately reaches `Cancelled`
 **Source** ADR-024. **Provenance R.**
@@ -113,7 +214,18 @@ and PayU's own vocabulary does not cleanly separate them - a realistic
 cancellation arrives as `status=failure` with `unmappedstatus=usercancelled`
 (ADR-021). Until it is settled, the meaning of the `Cancelled` enum member is
 unclear, which affects the admin filter, the Phase 4 ETL's status mapping, and
-any report that counts cancellations. **A product question, not a code task.**
+any report that counts cancellations.
+
+**SPLIT (AC2). The code goes to 3.2; the data question goes to the J3 session.**
+
+PayU documents only `success` and `failure` as signed statuses. So the question
+to settle from production data is narrow and answerable: **has any donation ever
+actually reached `Cancelled`?** If none has, the enum carries a state nothing
+writes, and the decision is whether to keep it for future use or drop it -
+which is a Phase 4 schema question, not a Phase 3 handler question.
+
+3.2 therefore treats `Cancelled` as a value that may legitimately exist in the
+data and must round-trip, and does not attempt to decide what produces it.
 
 ### U-4. BUG-05 - post-payment redirect URLs may not match any SPA route
 **Source** PROJECT.md BUG-05. **Provenance R.**
@@ -122,28 +234,66 @@ any report that counts cancellations. **A product question, not a code task.**
 `/payment-success` and `/payment-failure`. With the example values a paying
 donor lands on a blank page. This cannot be closed by reading code: it depends
 on **the values actually deployed**, which are in Vercel's environment settings
-and have never been confirmed. Neither Phase 3 (backend) nor Phase 5 (frontend)
-owns a configuration check. **Needs someone to read the deployed values.**
+and have never been confirmed.
+
+**ASSIGNED TO GARY, production session.** Read the deployed
+`FRONTEND_SUCCESS_URL` and `FRONTEND_FAILURE_URL` and compare against the routes
+in `App.jsx`. If they match, this closes as a documentation defect in
+`.env.example` alone. If they do not, every donor who has paid since the values
+were set has landed on a blank page after a successful payment, and the finding
+is considerably larger than it reads here.
 
 ### U-5. SEC-17 (second half) - `for_ocean_security_review.md` is tracked in the repository root
 **Source** SEC-17; ADR-030. **Provenance R.**
 
-It is a 984-line exploit-level vulnerability report, and `git ls-files` confirms
-it is tracked at HEAD today. ADR-030 assigns the **history** scrub to Phase 6.
-Nothing assigns its **removal from HEAD**, which is the part that matters while
-the repository's visibility is in question. The first half of SEC-17
-(`Frontend/.env`, also confirmed tracked) falls to Phase 5 with the rest of the
-frontend. **Recommend removing from HEAD now rather than waiting for Phase 6;
-that is a one-line change and Phase 6 still owns the history.**
+It was a 984-line exploit-level vulnerability report, tracked at HEAD.
+
+**CLOSED IN PACKAGE 3.0 (AC2).** `git rm`'d from HEAD. A copy is preserved at
+`docs/for_ocean_security_review.md`, which `docs/*` already excludes, so the
+content is not lost to the team; and `for_ocean_security_review.md` is now in
+`.gitignore` so a `git add -A` from the repository root cannot quietly restore
+it. **ADR-030 still owns the history scrub in Phase 6** - removing a file from
+HEAD does not remove it from the history, and anyone with a clone still has it.
+
+Three references existed. Two are prose in `decisions.md` and this map and are
+correct as history. The third was in `README.md`, and dealing with it surfaced a
+larger problem in the same file - see the note below.
+
+The first half of SEC-17 (`Frontend/.env`, confirmed tracked) stays with Phase 5.
+
+**The README was publishing what the review was being withheld to protect.**
+Its security section stated that the review is "held outside version control on
+purpose: it contains exploit-level detail that should not be published", and
+then enumerated five findings with their mechanics - including, at the time of
+writing, three that are still open. It also still described SEC-01 and SEC-02 as
+open, which they have not been since `ad31074`. Rewritten in package 3.0 to name
+only the closed findings and to point at this map; the open ones are no longer
+described. The exclusion of `SECURITY-REVIEW.md` from version control had been
+undone in the file most likely to be read first.
 
 ### U-6. ADR-036 - the prisma advisory has no published fix and no review trigger
 **Source** ADR-036. **Provenance X** (found by `npm audit` against the committed
 lockfile). **On the unmerged `docs/incident-j1-j6` branch.**
 
-No published version fixes it; the decision was to monitor. "Monitoring" has no
-owner, no cadence and no trigger condition, which in practice means it will be
-noticed when someone next runs `npm audit` by accident. **Needs either a review
-point (a phase boundary) or an explicit acceptance.**
+No published version fixes it; the decision was to monitor. "Monitoring" had no
+owner, no cadence and no trigger condition, which in practice means it is
+noticed when someone next runs `npm audit` by accident.
+
+**ASSIGNED (AC2): a TRIGGER, not a cadence. Check at the start of every phase.**
+
+A cadence would be wrong here. The thing being waited for is a publication event
+that nobody controls, so a weekly check is mostly wasted and a monthly one is
+mostly late. A phase boundary is when the answer can actually be acted on.
+
+**A published prisma >= 8.1.0 is a TOOLCHAIN CHANGE, not a dependency bump.**
+Prisma generates the client, owns the migration engine and is the subject of
+ADR-002's five documented gaps. Taking it requires the full gate set re-run -
+`test:schema`, `test:data-layer`, the drift gate, and the migration-reproduces-
+the-schema check in `schema.yml` - not just a green `npm audit`. Budget it as a
+package, not as a line in one.
+
+Owner: whoever opens the next phase. Recorded here so the trigger has somewhere
+to live.
 
 ---
 
@@ -223,6 +373,49 @@ precisely the error ADR-042 was written to prevent.
 
 ---
 
+## Package 3.1 status - BLOCKED after the characterisation tests
+
+**Done and green:** `Backend/test/categories-characterisation.test.js`, 22
+scenarios, passing against the current Mongoose implementation. This is the
+first half of the package and SPEC-3 section 1 requires it before any change.
+
+**Not started:** the migration itself. `categories.js` cannot be migrated in
+isolation - `Category` is read by `payment.js` (which prices every donation from
+it), by four `populate("category")` sites in `donations.js`, and by
+`admin.js`'s dashboard tile, none of which move until 3.2, 3.3 and 3.5.
+Migrating only the writes splits the data and changes the id format, so
+`/payment/initiate` would 500 on any category created afterwards. **ADR-050**
+has the evidence and four options with a recommendation. Needs a decision.
+
+**Five quirks recorded by the characterisation tests that were in no finding
+list.** Four are now documented behaviour; one is a new defect:
+
+| | Behaviour | Status |
+|---|---|---|
+| `donationAmount: 0` is refused as "All fields are required" | the check is falsiness, not presence, so a free category is impossible and the reason given is untrue | documented; MySQL's `ck_categories_amount_positive` also refuses 0, so 3.1 must keep an explicit check or the 400 becomes a 500 |
+| `descriptions: []` IS accepted | `[]` is truthy, so the same check that rejects `0` accepts an empty list | documented |
+| reorder is not atomic | `Promise.all` over independent updates; a bad id mid-list 500s and leaves earlier writes applied | to be fixed by `withTransaction` in 3.1 |
+| a malformed id is a 500, a well-formed unknown id is a 404 | the cast throws before the not-found branch | to be fixed in 3.1 |
+| **BUG-09** | **`PUT /categories/:id` WIPES `descriptions` when the key is absent** | **new finding, see below** |
+
+### BUG-09 - `PUT /api/categories/:id` silently wipes descriptions on a partial update
+
+**Severity** Medium (silent data loss). **Provenance X** - found by writing the
+characterisation test, not by reading the route. **Owning package 3.1.**
+
+`routes/categories.js:103-108` builds `updateData` with
+`descriptions: descriptions || []`, unconditionally. Mongoose drops `undefined`
+keys from an update but `[]` is not undefined, so a client sending a partial
+update - `{ donationAmount: 3000 }`, which is what an "edit the price" form
+does - **clears the description list**.
+
+Asserted as current behaviour in
+`categories-characterisation.test.js`. Mechanism: only assign keys the caller
+actually supplied. Verification: the same test, edited to assert the
+descriptions survive - a visible edit, per the characterisation rule.
+
+---
+
 ## Open findings, by owning package
 
 Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
@@ -235,6 +428,10 @@ Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
 | SEC-19 | Low | `error: err.message` returned to clients | Generic message to client, detail to server log | Characterisation test asserts the response body carries no `message` | **R** |
 | BUG-08 | - | `parseInt(limit)` with no cap or NaN guard (`categories.js:48`) | Clamp to a maximum, default on NaN | Test: `?limit=100000` and `?limit=abc` | **R** |
 | ADR-004 | - | Category delete becomes a soft delete - **behaviour change** | `categories.archive()`; `deletedAt` filter | Characterisation test records the current hard-delete behaviour first, then the change is made visibly | **R** |
+| BUG-09 | Med | `PUT /:id` wipes `descriptions` on a partial update (`categories.js:107`) | Assign only the keys the caller supplied | Characterisation test, edited visibly | **X** |
+| - | - | reorder is not atomic: a bad id mid-list leaves earlier writes applied | `withTransaction` | Characterisation test, edited visibly | **X** |
+| - | - | A malformed id 500s where an unknown id 404s | Validate the id before lookup | Characterisation test, edited visibly | **X** |
+| ADR-050 | - | **BLOCKER** - `categories.js` cannot migrate in isolation | Decision required; four options in ADR-050 | n/a | **X** |
 
 ### Package 3.2 - `routes/donations.js`
 
@@ -359,7 +556,7 @@ silently reconciled.
 | State | Count | Rows |
 |---|---|---|
 | Closed | 9 | - |
-| Open, assigned to a Phase 3 package | 38 | 3.1: 3, 3.2: 8, 3.3: 7, 3.4: 11, 3.5: 8, 3.6: 1 |
+| Open, assigned to a Phase 3 package | 42 | 3.1: 7, 3.2: 8, 3.3: 7, 3.4: 11, 3.5: 8, 3.6: 1 |
 | Open, assigned to Phase 4 / 5 / 6 | 14 | P4: 7, P5: 6, P6: 1 |
 | **Open and unassigned** | **6** | U-1 .. U-6 |
 

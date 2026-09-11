@@ -21,6 +21,12 @@ docker/nginx/certs/*
 # parent directory is itself excluded, and decisions.md must stay tracked.
 docs/*
 
+# The superseded exploit-level review, removed from HEAD in package 3.0 (U-5,
+# SEC-17's open half). A copy is kept at docs/for_ocean_security_review.md,
+# which docs/* already excludes. This rule exists so that a future `git add -A`
+# from the repository root cannot quietly put it back.
+for_ocean_security_review.md
+
 # Architectural decision records ARE tracked: they explain why the schema and
 # topology look the way they do, and a future contributor needs them.
 !docs/decisions.md
@@ -29,15 +35,17 @@ docs/*
 # package to update it in the same commit as the work - a gate that cannot be
 # enforced on an untracked file.
 #
-# THIS IS A DELIBERATE TRADE-OFF, NOT AN OVERSIGHT. The map names open
+# THIS IS A DELIBERATE TRADE-OFF, NOT AN OVERSIGHT. The map names OPEN
 # vulnerabilities with file and line (SEC-06 at payment.js:601, SEC-07 at
-# payment.js:99, and so on). It is far less detailed than
-# docs/SECURITY-REVIEW.md, which stays excluded, but it is not nothing: on a
-# public repository it is a prioritised list of what is not yet fixed. That is
-# acceptable only while the repository is private, and DEF-01 (see U-1 in the
-# map) currently blocks publication anyway. REVISIT THIS BEFORE THE REPOSITORY
-# IS MADE PUBLIC - the map should be emptied of open items or moved out by then,
-# which is the same condition as it being safe to publish at all.
+# payment.js:99, and so on), which on a public repository is a prioritised list
+# of what is not yet fixed.
+#
+# PHASE 6 GATE: publication requires EITHER zero open findings in the map, OR
+# the map redacted of file and line for everything still open.
+#
+# Note what the gate is not. A map of CLOSED findings with file and line is
+# fine to publish and is good practice - it is evidence that the findings were
+# fixed. The exposure exists only while items are open.
 !docs/remediation-map.md
 
 # =============================================================================
