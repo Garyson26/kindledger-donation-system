@@ -2155,10 +2155,37 @@ parameterised module in 3.2 rather than copy it twice — one place where the
 CastError guard lives, one `fallbackCount()` covering all three, and one file to
 delete in 3.5.
 
-**If that generalisation turns out not to fit** — if `User` or `Donation`
-needs materially different resolution logic rather than different parameters
-— that is the signal to stop and reconsider the shape of the middle of this
-phase, rather than to write a second and third bespoke bridge.
+**If that generalisation turns out not to fit**, stop rather than adding a flag.
+AF2 sharpened the trigger, because "materially different logic" is a judgement
+call and judgement calls under delivery pressure resolve towards one more
+parameter. The line is now explicit:
+
+**These are PARAMETERS. Add them.**
+
+- different field allowlists per entity
+- different id shapes (ObjectId, uuid, a compound key)
+- different table or collection names
+- different fallback behaviour when the id is absent
+
+**These are a SECOND MECHANISM. Stop and report before implementing.**
+
+- **any entity needing to consult BOTH stores and MERGE the results.** The
+  current bridge is first-match-wins: MySQL answers, or Mongo does. Merging
+  means reconciling two versions of one record, which is a conflict-resolution
+  policy, not a lookup.
+- **any entity needing a WRITE path through the bridge.** A read-through bridge
+  has no consistency problem, because the worst case is a stale read from a
+  store that is about to be deleted. A write-through bridge has to decide what
+  happens when one store accepts and the other refuses, and there is no
+  transaction spanning MySQL and MongoDB to make that decision safe.
+- **any entity needing ordering or consistency guarantees ACROSS the stores.**
+  "Newest wins", "this must be visible before that", or any read-your-writes
+  expectation spanning both. None of those can be provided by a helper that
+  looks in one store and then the other.
+
+Each of those three is a distributed-systems problem wearing the costume of a
+lookup helper. The bridge is acceptable precisely because it has none of them:
+it is a read, first-match-wins, with a store that is going away.
 
 ### A note for 3.2's characterisation tests
 
@@ -2171,3 +2198,47 @@ The lesson stands regardless of the count: **3.2's characterisation tests must
 pin what the endpoint ACTUALLY returned, not what the code appears to ask for.**
 Reading the field list in a `populate()` call is reading an intention; only
 running it shows what the client received.
+
+---
+
+## ADR-053 — "The scheduler does not run" was allowed to stand for "the code does not execute"
+
+**Status** Accepted — AF4. A reasoning failure, recorded because the fix is
+cheap and the pattern is not.
+
+`services/dataCleanupService.js` was treated as dead code for several rounds by
+everyone involved, on the strength of BUG-04.
+
+**BUG-04 says the CRON never fires.** `vercel.json` points a scheduled job at
+`POST /api/admin/cleanup/trigger`, that route sits behind `adminAuth`, and
+Vercel's cron sends no `Authorization` header — so the scheduled invocation
+gets a 401 every day and the retention purge has never run. All true.
+
+**None of it says the code cannot execute.** `routes/admin.js:13` imports
+`triggerManualCleanup`, `cleanupOldDonations` and `cleanupInactiveUsers`, and
+`POST /api/admin/cleanup/trigger` calls the first of them. An authenticated
+admin reaches it through the API today. The function deletes donations and
+users.
+
+**The two claims and why one was read as the other.** "The scheduler does not
+run" is a statement about ONE CALLER. "The code does not execute" is a statement
+about ALL CALLERS. The first was established with evidence and the second was
+inherited from it without anyone noticing the step — including in this
+project's own analysis, repeatedly, across several packages.
+
+What made it durable is that the inference is usually right. A cron-driven
+service whose cron is broken normally IS dead, so the conclusion looked like it
+had been checked. It survived a security review, a phase-2 readiness note and a
+finding map before a read-dependency analysis — which enumerates CALLERS
+rather than reasoning about purpose — turned it up mechanically.
+
+**The generalisable form: a bug that disables one entry point does not
+establish that a module is unreachable.** Establishing that requires
+enumerating importers, which is a grep, not an argument. The same shape would
+hide a live path to any destructive operation behind any unrelated defect.
+
+**Consequences** `dataCleanupService.js` is retired in package 3.2 rather than
+deferred to 3.6: `services/scheduler.js` already reimplements its work against
+MySQL, so the retirement is a repoint of three admin endpoints, and it removes a
+reader of `Donation`, `User` and `PendingSignup` at once. The reachability
+finding it concealed is recorded as BUG-10 in the remediation map.

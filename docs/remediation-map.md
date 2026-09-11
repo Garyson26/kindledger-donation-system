@@ -421,6 +421,80 @@ without them, "the category endpoints still work" would have been an opinion.
 
 ---
 
+## BUG-10 - a single authenticated admin request triggers a bulk delete, with no confirmation (AF4)
+
+**Severity** Medium. **Provenance X** - found by the AD2 read-dependency
+analysis, which enumerates callers rather than reasoning about purpose.
+**Owning package 3.2.**
+
+`POST /api/admin/cleanup/trigger` (`admin.js:281`) calls
+`triggerManualCleanup()`, which deletes donations older than ten years, and
+users older than ten years who have no donations.
+
+**What is NOT wrong, checked rather than assumed:**
+
+- **It is not reachable by a non-admin.** `router.use(adminAuth)` at
+  `admin.js:17` guards every route in the file, including this one. A non-admin
+  gets 403, an unauthenticated caller 401. This was the specific question asked,
+  and the answer is no.
+- **The blast radius today is zero rows.** Both deletes are bounded by a
+  ten-year window and this project has no data that old. The finding is latent,
+  not live, and saying otherwise would overstate it.
+
+**What IS wrong:**
+
+1. **No confirmation step.** One authenticated POST with an empty body starts an
+   irreversible bulk delete. A `GET /cleanup/preview` dry run exists, but
+   nothing requires it to be called first and nothing ties a trigger to a
+   preview anyone actually read.
+2. **It returns 200 immediately and deletes in the background.**
+   `triggerManualCleanup().catch(...)` is not awaited, so the caller is told
+   "started" and never learns the outcome. The response body says to check the
+   server logs.
+3. **Failures are swallowed.** Both functions `return 0` from their catch
+   blocks, so a partial delete and a clean no-op are indistinguishable to every
+   caller - including to the log line that is the only record.
+
+Taken together: the one operation in the system that destroys donor records has
+the weakest feedback of any endpoint in it.
+
+**Mechanism.** Retire `dataCleanupService.js` in package 3.2 and repoint the
+endpoint at `services/scheduler.js`, which already implements the same retention
+rules against MySQL and takes a `dryRun` flag. Make the dry run the default, so
+a real delete requires an explicit parameter. Return the counts rather than
+logging them.
+
+**Verification.** Characterisation test first, pinning current behaviour
+including the immediate 200 and the empty body; then the same test edited
+visibly.
+
+**Why it sat unnoticed** is ADR-053: BUG-04 established that the CRON never
+fires, and that was allowed to stand for "the code does not execute". Those are
+statements about one caller and about all callers.
+
+---
+
+## BUG-11 - a refused request names its reason under three different keys
+
+**Severity** Low. **Provenance X** - found while writing package 3.2's
+characterisation tests; the refusal helper had to be widened to accept a third
+key name. **Owning package 3.3** (it lives in the middleware).
+
+Route handlers answer `{error}`, `adminAuth` answers `{message}`, and
+`authMiddleware` answers `{msg}`. Counted across the middleware and
+`donations.js` alone: 12 `error`, 9 `message`, 4 `msg`.
+
+A client that wants to show the user WHY a request was refused cannot read one
+field. It has to try all three, which in practice means it reads none of them
+and shows a generic failure - so every carefully worded refusal message in the
+codebase is invisible to the person it was written for.
+
+Assigned to 3.3 rather than 3.2 because two of the three names come from the
+middleware, and changing the route file alone would leave the inconsistency
+while looking like it had been fixed.
+
+---
+
 ## Corrected package sequence (AD2) and the Phase 3 exit criteria
 
 **SPEC-3 section 2 sequenced by the size of the file being changed. That was the
