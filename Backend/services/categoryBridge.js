@@ -1,233 +1,77 @@
 /**
  * =============================================================================
- * Category read-through bridge - TEMPORARY, DELETED IN PACKAGE 3.6
+ * Category read-through bridge - TEMPORARY, DELETED IN PACKAGE 3.5
  * =============================================================================
- * ADR-050 / ADR-051. This exists for exactly one reason: `categories.js` is
- * migrated to MySQL in package 3.1, but three route files still READ categories
- * and do not move until 3.2, 3.3 and 3.5:
+ * ADR-050. `categories.js` migrated to MySQL in package 3.1, but three route
+ * files still READ categories and do not move until 3.3, 3.4 and 3.5:
  *
  *   payment.js:116     prices every donation from the category
- *   donations.js  x4   populate("category") on every listing and the receipt
+ *   donations.js  x4   the listings, the receipt and the charts
  *   admin.js:19        the dashboard count
  *
  * Without a bridge, a category created after 3.1 exists only in MySQL, those
  * readers look in MongoDB, and no donation can be made against it.
  *
- * DELETING THIS FILE IS A PHASE 3 EXIT CRITERION (SPEC-3 section 7), and the
- * check is EMPIRICAL rather than a promise: `fallbackCount()` reports how many
- * times the MongoDB path has been taken. Once donations.js, admin.js and
- * payment.js are migrated, a count of zero over a real run is evidence that
- * nothing depends on the fallback any more. A temporary abstraction that
- * reports whether it is still load-bearing is one that can actually be removed.
+ * NOW BUILT ON services/legacyBridge.js (AF2). This was the first instance of
+ * the mechanism; package 3.2 needed a second for `User`, so the shared parts
+ * moved out rather than being copied. The public interface here is deliberately
+ * unchanged, which is why `test/category-bridge.test.js` passes untouched - a
+ * refactor of a component on the pricing path has to be provable, not merely
+ * plausible.
  *
- * THE FALLBACK IS NEVER SILENT (AD1a). Every hit logs a warning naming the id.
- * Silent fallback is precisely how a bridge becomes permanent: nothing ever
- * says it is still carrying traffic, so nobody can argue for deleting it.
+ * THE FALLBACK IS NEVER SILENT (AD1a), and the counter now lives in
+ * legacyBridge and is SHARED across all entities. That is what makes the
+ * package 3.5 exit check (AE3) one number rather than three.
  *
  * THIS BRIDGE RETURNS THE WHOLE RECORD. That is a KNOWN EXCEPTION to the rule
  * in ADR-052 (AE2), which requires a bridge to return only the fields the
  * caller asked for. It is allowed here for two reasons and neither generalises:
  * a Category carries nothing sensitive, and the corrected donations.js
- * behaviour already depends on the superset. The User and Donation bridges in
- * package 3.2 MUST NOT copy this - User holds passwordHash, resetPasswordCode
- * and loginOTP, and Donation holds donor name, email and phone. A bridge
- * returning "the whole record" on those is an information leak wearing the
- * clothes of a compatibility shim.
+ * behaviour already depends on the superset. THE USER BRIDGE DOES NOT COPY IT -
+ * see services/userBridge.js, where the allowlist is the whole point.
  * =============================================================================
  */
 
 'use strict';
 
-const categories = require('../repositories/categories');
+const legacy = require('./legacyBridge');
 
-// -----------------------------------------------------------------------------
-// Identifier shapes (AD1b)
-// -----------------------------------------------------------------------------
-// THE HELPER DECIDES WHICH STORE BY ID SHAPE, AND NEVER LETS A CastError
-// ESCAPE. Passing a uuid to Mongoose's findById raises CastError, which the
-// route turns into a 500 where a 400 is correct - the same shape as SEC-14,
-// where a malformed input crashed the check instead of failing it. An id that
-// matches neither shape is simply not found; it is never a 500.
-const OBJECT_ID = /^[0-9a-f]{24}$/i;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function idShape(id) {
-  if (typeof id !== 'string') return 'invalid';
-  const v = id.trim();
-  if (OBJECT_ID.test(v)) return 'objectid';
-  if (UUID.test(v)) return 'uuid';
-  return 'invalid';
-}
-
-let fallbacks = 0;
-
-/**
- * The shape every caller gets, whichever store answered.
- *
- * Deliberately NOT the Mongoose document and NOT the repository row. Callers
- * during Phase 3 read `_id`, `name` and `donationAmount`, so those are the
- * names used - the point of the bridge is that the readers do not change
- * beyond the call itself.
- */
-function normalise({ externalId, name, sortDescription, donationAmount, descriptions, source }) {
-  return {
-    _id: externalId,
-    id: externalId,
-    name,
-    sortDescription,
-    donationAmount,
-    descriptions: descriptions || [],
-    /** 'mysql' or 'mongo'. Read by the tests and by the 3.6 exit check. */
-    _source: source,
-  };
-}
-
-function fromRepository(row) {
-  if (!row) return null;
-  return normalise({
-    // Phase 3 keeps the ObjectId as the external identifier so that
-    // Donation.category (an ObjectId ref) stays valid - see ADR-051.
-    externalId: row.legacyId || row.id,
+const bridge = legacy.createBridge({
+  name: 'category',
+  repository: () => require('../repositories/categories'),
+  model: () => require('../models/Category'),
+  // Phase 3 keeps the ObjectId as the external identifier so that
+  // Donation.category - a required ObjectId ref - stays valid (ADR-051).
+  fromRepository: (row) => ({
+    _id: row.legacyId || row.id,
+    id: row.legacyId || row.id,
     name: row.name,
     sortDescription: row.shortDescription,
     donationAmount: row.donationAmountMinor / 100,
-    descriptions: row.descriptions,
-    source: 'mysql',
-  });
-}
-
-function fromMongo(doc) {
-  if (!doc) return null;
-  return normalise({
-    externalId: doc._id.toString(),
+    descriptions: row.descriptions || [],
+  }),
+  fromMongo: (doc) => ({
+    _id: doc._id.toString(),
+    id: doc._id.toString(),
     name: doc.name,
     sortDescription: doc.sortDescription,
     donationAmount: doc.donationAmount,
-    descriptions: doc.descriptions,
-    source: 'mongo',
-  });
-}
+    descriptions: doc.descriptions || [],
+  }),
+});
 
-/**
- * Resolve one category by its external id.
- *
- * MySQL first, MongoDB second. Returns null for "no such category" in every
- * case, including a malformed id - the caller's job is to turn that into a 400,
- * not to handle two kinds of absence.
- */
-async function resolveCategory(id) {
-  const shape = idShape(id);
-  if (shape === 'invalid') return null;
-
-  const value = String(id).trim();
-
-  // MySQL is the source of truth from package 3.1 onwards.
-  const row =
-    shape === 'objectid'
-      ? await categories.findByLegacyId(value)
-      : await categories.findById(value);
-  if (row) return fromRepository(row);
-
-  // A uuid can only ever have come from MySQL. There is nothing to fall back
-  // to, and asking Mongo would raise the CastError this helper exists to stop.
-  if (shape === 'uuid') return null;
-
-  const doc = await mongoCategory(value);
-  if (!doc) return null;
-
-  fallbacks += 1;
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[categoryBridge] MongoDB FALLBACK for category ${value}. This bridge is ` +
-      'temporary (ADR-050) and is still carrying traffic; it cannot be deleted ' +
-      `until this stops. Fallbacks so far: ${fallbacks}.`
-  );
-  return fromMongo(doc);
-}
-
-/**
- * The Mongoose lookup, isolated so the CastError guard has one home.
- *
- * `require` is deferred rather than top-level: package 3.6 deletes the models,
- * and a top-level require would make this file fail to load at that point
- * instead of simply never taking this branch.
- */
-async function mongoCategory(value) {
-  try {
-    const Category = require('../models/Category');
-    return await Category.findById(value);
-  } catch (err) {
-    // Should be unreachable - the shape was validated above. Kept because the
-    // whole point of this helper is that a bad id can never become a 500.
-    // eslint-disable-next-line no-console
-    console.warn('[categoryBridge] MongoDB lookup failed for', value, err && err.message);
-    return null;
-  }
-}
-
-/**
- * Resolve many at once, for the listing endpoints that used populate().
- *
- * De-duplicates, so a page of 50 donations across 6 categories issues 6
- * lookups rather than 50. Returns a Map keyed by the id STRING.
- */
-async function resolveMany(ids) {
-  const unique = [...new Set((ids || []).filter(Boolean).map((v) => String(v)))];
-  const out = new Map();
-  await Promise.all(
-    unique.map(async (id) => {
-      const c = await resolveCategory(id);
-      if (c) out.set(id, c);
-    })
-  );
-  return out;
-}
-
-/**
- * Replace what `.populate("category")` used to do, for a list of donations.
- *
- * populate() cannot work any more: a category created after package 3.1 has no
- * MongoDB row, so populate resolves it to NULL and the donation appears to have
- * no category at all. That is the same dangling-reference shape the old hard
- * delete produced, except it would now affect every NEW category.
- *
- * Mongoose documents are converted with toObject() first. Assigning a resolved
- * object onto a typed ObjectId path on a live document would be cast-checked
- * and rejected; a plain object has no such path typing.
- */
-async function attachCategories(docs) {
-  const list = Array.isArray(docs) ? docs : [docs];
-  const plain = list.map((d) => (d && typeof d.toObject === 'function' ? d.toObject() : d));
-
-  const map = await resolveMany(
-    plain.map((d) => (d && d.category ? String(d.category) : null))
-  );
-
-  for (const d of plain) {
-    if (!d) continue;
-    // null when the category genuinely does not resolve - the pre-existing
-    // orphan case from the old hard delete. Same value populate() gave, so
-    // callers that already handled it are unaffected.
-    d.category = d.category ? map.get(String(d.category)) || null : null;
-  }
-
-  return Array.isArray(docs) ? plain : plain[0];
-}
-
-/** Total categories, for admin.js's dashboard tile. Active only, per ADR-004. */
+/** Total ACTIVE categories, for admin.js's dashboard tile (ADR-004). */
 async function countCategories() {
-  return (await categories.list()).length;
+  return (await require('../repositories/categories').list()).length;
 }
 
 module.exports = {
-  resolveCategory,
-  resolveMany,
-  attachCategories,
+  resolveCategory: bridge.resolve,
+  resolveMany: bridge.resolveMany,
+  attachCategories: (docs) => bridge.attach(docs, 'category'),
   countCategories,
-  idShape,
-  /** Read by the tests and by the package 3.6 exit check (SPEC-3 section 7). */
-  fallbackCount: () => fallbacks,
-  resetFallbackCount: () => {
-    fallbacks = 0;
-  },
+  idShape: legacy.idShape,
+  /** Read by the tests and by the package 3.5 exit check (AE3). */
+  fallbackCount: legacy.fallbackCount,
+  resetFallbackCount: legacy.resetFallbackCount,
 };

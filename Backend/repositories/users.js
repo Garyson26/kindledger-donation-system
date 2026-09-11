@@ -97,7 +97,20 @@ async function findByEmail(email, tx) {
   return normalise(await client(tx).user.findUnique({ where: { email: normalised }, select: SELECT }));
 }
 
-/** Compares in the data layer so the hash never leaves it. */
+/**
+ * Compares in the data layer so the hash never leaves it.
+ *
+ * SEC-08, AND THE WAY IT GETS REINTRODUCED. This returns `false` for a wrong
+ * password, and `findByEmail` returns `null` for an address nobody holds. Those
+ * are two different facts, and REPORTING THEM SEPARATELY TO THE CLIENT REOPENS
+ * USER ENUMERATION across the whole login surface.
+ *
+ * It is worth stating here rather than only in a test, because the person about
+ * to make this mistake is reading this file. "No account with that address" and
+ * "Incorrect password" read like better error handling; they are the finding.
+ * `/login` currently answers `400 "Invalid credentials"` to both, byte for byte,
+ * and must continue to.
+ */
 async function verifyPassword(id, candidate, tx) {
   const row = await client(tx).user.findUnique({
     where: { uuid: id },

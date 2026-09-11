@@ -557,6 +557,102 @@ question is open.
 
 ---
 
+## SEC-03 RECLASSIFIED - unauthenticated authentication bypass, and it is LIVE (AI1)
+
+**Was** High - "NoSQL operator injection through JSON request bodies".
+**Is** **CRITICAL - unauthenticated authentication bypass on the login path.**
+**Provenance** R originally; the reclassification is **X**.
+
+`POST /api/auth/login` with
+
+```json
+{"email": {"$ne": null}, "password": "<any password some user has>"}
+```
+
+matches the first user in the collection, passes `bcrypt.compare` against **that
+user's** hash, and proceeds to generate and store a login OTP
+(`auth.js:238-256`). The attacker is **past the credential check**, holding a
+pending OTP for an account whose address they never knew.
+
+### Why the original classification understated it
+
+**"Injection" named the MECHANISM and hid the OUTCOME.** It is an accurate
+description of how the input is mishandled, and it invites the reader to picture
+the usual consequence of query injection - data disclosure, or a malformed query
+- rather than the actual one, which is that authentication does not hold. The
+finding was filed with four others in the same band and read as one more input-
+validation issue.
+
+A severity derived from the mechanism is a guess at the outcome. This one was
+wrong by a whole band, and it stayed wrong through a security review, a
+remediation plan and a finding map, because every reader after the first
+inherited the label rather than re-deriving it.
+
+### IT IS LIVE IN PRODUCTION
+
+The Package A hotfix closed SEC-01, SEC-02 and `trust proxy`. **It did not touch
+SEC-03.** The deployed system carries this bypass today. It is currently
+unreachable **only because MongoDB rejects the application's credentials** - an
+availability failure standing in for an access control.
+
+**Standing instruction for whoever restores Atlas: the deploy-before-restore
+ordering now guards TWO findings, not one.** SEC-03 becomes reachable the
+instant those credentials are fixed. It is not closed until package 3.2 merges
+**and deploys**.
+
+**Do not write a Mongo-side hotfix for it.** Sanitising the query on the old
+stack duplicates work the migration deletes, and parameterised SQL closes the
+class rather than one instance of it. The correct response is to finish and
+deploy 3.2, and until then to leave Atlas down.
+
+---
+
+## SEC-08 is CLOSED on /login, and is easy to reintroduce (AI4)
+
+Both an unknown address and a wrong password return `400 {"error":"Invalid
+credentials"}`, byte for byte (`auth.js:235-239`). I assumed otherwise and the
+test showed it.
+
+**The reintroduction risk is the useful half.** The natural repository
+implementation returns `null` for a missing user and `false` for a bad password.
+Reporting those separately - "no account with that address" and "incorrect
+password" - **reads like better error handling**, and it is the change a
+reviewer would approve without hesitating. It silently reopens user enumeration
+across the whole login surface.
+
+The warning is placed **next to `repositories/users.verifyPassword` and
+`findByEmail`**, not only in the test, because the person about to make this
+mistake is reading the repository and not the suite.
+
+---
+
+## Two method findings (AI3)
+
+Both are evidence for rules already in force, recorded where a reader will meet
+them rather than only in a commit message.
+
+**SEC-03: the SMTP 500 would have read as a refusal.** The injected login
+returns `500 {"error":"Failed to send OTP email"}` in any environment without
+SMTP. An assertion checking only the OUTCOME - "the attacker did not get a
+session" - passes, and the finding stays hidden behind it. It was found because
+AC1 requires the MECHANISM to be asserted, and the mechanism here is that the
+request reached the OTP-generation code at all. **AC1's case, found by AC1's
+rule.**
+
+**SEC-13: a probe aimed at the wrong place passed for the wrong reason.** Driven
+through `/forgot-password`, the plaintext-storage check saw nothing - because
+the email send fails first and the code is never written. It would have read as
+"SEC-13 is already fixed". Driven through `/login`, where the OTP is saved
+BEFORE the send, the plaintext is plainly visible.
+
+Same shape as ADR-048's `:0099:` test: **a probe pointed at the wrong place
+produces a green result that means nothing**, and a green result is the one
+outcome nobody investigates. The difference between the two cases is only that
+one asserted `notEqual` on equal values and this one asserted presence on a
+field that was never written.
+
+---
+
 ## Corrected package sequence (AD2) and the Phase 3 exit criteria
 
 **SPEC-3 section 2 sequenced by the size of the file being changed. That was the
@@ -624,7 +720,7 @@ the control, not a preference.**
 | ID | Item | Owner |
 |---|---|---|
 | AE1-a | NULL every minted `legacy_id` before MongoDB is deleted, by lookup | 3.6, as criterion 1 above |
-| AE1-b | Remove `mintObjectId()` from `categories.js` once `donations.js` has migrated | 3.3 |
+| AE1-b | Remove `mintObjectId()` from `categories.js` once `donations.js` has migrated | **3.3** - the TRIGGER is `donations.js`, not a package number. It was written when donations was 3.2; the ADR-055 swap moved it to 3.3, so **minting must continue through 3.2**. Removing it earlier breaks the donation write path, because `Donation.category` stays an ObjectId ref until donations migrate. |
 
 **SPEC-1A section 4.1 is temporarily false** and is corrected in ADR-051(c):
 its invariant that a non-NULL `legacy_id` means "migrated from MongoDB" does not
