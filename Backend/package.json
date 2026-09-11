@@ -25,6 +25,7 @@
     "test:categories": "node --test test/categories-characterisation.test.js",
     "test:bridge": "node --test test/category-bridge.test.js",
     "test:donations": "node --test test/donations-characterisation.test.js",
+    "test:auth-char": "node --test test/auth-characterisation.test.js",
     "test:payment": "node --test test/payment-callbacks.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
     "test:charset": "node db/check-charset.js"

@@ -189,7 +189,10 @@ const patch = (p, body, token) => call('PATCH', p, { body, token });
  * generic failure. All three are accepted here because pinning CURRENT
  * behaviour is the job; the inconsistency is recorded, not smoothed over.
  */
-function assertRefused(res, expectedStatus, keys = ['error', 'message', 'msg']) {
+// BUG-11 was fixed in package 3.2, so this can now default to `error` ALONE.
+// While three key names were in play it had to accept all of them, which is
+// verifying almost nothing - AG2's point, and the reason the fix came first.
+function assertRefused(res, expectedStatus, keys = ['error']) {
   assert.notEqual(
     Math.floor(res.status / 100),
     5,
@@ -352,14 +355,19 @@ test('QUIRK (BUG-06): optionalAuth 401s a guest who holds an EXPIRED token', asy
   assertRefused(res, 401);
 });
 
-test('QUIRK (BUG-11): a refused request names its reason under THREE different keys', async () => {
-  // `error`, `message` and `msg`, depending on which layer refused. A client
-  // wanting to show the user why cannot read one field; it has to try all
-  // three, which in practice means it shows a generic message and the reason is
-  // lost. Counted across middleware and this route file: 12 `error`,
-  // 9 `message`, 4 `msg`.
+test('BUG-11 is FIXED: every layer names its reason under `error` (CHANGED IN 3.2)', async () => {
+  // WAS: `error`, `message` or `msg` depending on which layer refused - 12, 9
+  // and 4 occurrences. The frontend reads `data.error || data.message`, so
+  // every `msg` refusal reached the user as "Request failed".
   //
-  // Found by writing this test - the helper had to be widened to accept `msg`.
+  // THIS TEST BREAKING IS THE POINT. It was written to pin the broken shape,
+  // and fixing BUG-11 in package 3.2 made it fail - so the change had to be
+  // made here, deliberately and visibly, rather than passing unnoticed. That is
+  // the characterisation discipline doing exactly what it is for.
+  //
+  // NOW: `error` is canonical everywhere and `message` mirrors it for the
+  // frontend's existing fallback. `msg` is gone; nothing read it, which is
+  // precisely why those refusals were invisible.
   const id = await store.createDonation({ tag: 'keys', userId: ownerId });
 
   const noToken = await get(`/api/donations/${id}`);          // authMiddleware
@@ -369,14 +377,20 @@ test('QUIRK (BUG-11): a refused request names its reason under THREE different k
     { status: 'Approved' },
     adminToken
   );
-
-  assert.equal(typeof noToken.body.msg, 'string', 'authMiddleware answers {msg}');
-  assert.equal(typeof nonAdmin.body.message, 'string', 'adminAuth answers {message}');
-  assert.equal(typeof badStatus.body.message, 'string', 'this handler answers {message}');
-
-  // And the route file's own handlers mostly use `error`, so all three are live.
   const malformed = await put('/api/donations/not-an-objectid', { status: 'x' }, adminToken);
-  assert.equal(typeof malformed.body.error, 'string', 'route handlers answer {error}');
+
+  for (const [label, res] of [
+    ['authMiddleware', noToken],
+    ['adminAuth', nonAdmin],
+    ['route handler', badStatus],
+    ['route handler (500)', malformed],
+  ]) {
+    assert.equal(typeof res.body.error, 'string', `${label}: reason under "error"`);
+    assert.equal('msg' in res.body, false, `${label}: "msg" is gone`);
+  }
+
+  // The frontend alias, kept until Phase 5 owns the frontend.
+  assert.equal(noToken.body.message, noToken.body.error);
 });
 
 // =============================================================================

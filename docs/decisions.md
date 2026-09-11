@@ -2245,9 +2245,36 @@ finding it concealed is recorded as BUG-10 in the remediation map.
 
 ---
 
-## ADR-054 — The retention purge keys on `created_at`, and the ETL decides whether it works at all
+## ADR-054 — The retention purge keys on `donated_at`, not `created_at`
 
-**Status** Open — AG1b. Recorded for Phase 4; the guard it needs is built.
+**Status** RESOLVED — AH2. Changed, not carried into Phase 4 unresolved.
+
+**The decision: a ten-year retention policy on donation records means ten years
+from the DONATION.** `purgeOldDonations` now keys on `donated_at`, which is
+also the column every report and admin filter already uses. Stated here as a
+deliberate change rather than left to read as inherited behaviour.
+
+**And it removes a failure mode rather than mitigating one.** This is the
+sharper half. `created_at` is `DEFAULT CURRENT_TIMESTAMP(3)`, so an ETL that
+does not set it explicitly stamps every migrated donation with the import date.
+A purge keyed on `created_at` would then find nothing until 2036 — **silently,
+because "no rows older than ten years" is exactly what a healthy system
+reports.** A control that cannot be observed failing is worse than one that
+fails loudly: there is no symptom to notice, no alert to fire, and the first
+evidence would be a data-retention question nobody could answer. Keying on
+`donated_at` means the ETL cannot produce that state at all, which is a better
+answer than a check that would have caught it.
+
+`repositories/donations.create` keeps its `createdAt` support regardless — the
+ETL still needs to preserve row timestamps and should not reach past the data
+layer to do it.
+
+The original analysis follows, kept because it records what was weighed.
+
+---
+
+**Status of the original entry** Open — AG1b. Superseded by the decision
+above.
 
 The purge deletes rows where **`created_at`** is older than ten years. That
 matches the legacy `dataCleanupService` it replaces and is deliberately

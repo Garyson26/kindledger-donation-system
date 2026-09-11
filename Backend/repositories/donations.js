@@ -283,21 +283,33 @@ async function listStatusesInUse(tx) {
  * implausible date is evidence of a migration defect and deleting the evidence
  * is the worst available response.
  *
- * NOTE THE COLUMN: `createdAt`, not `donatedAt`. That matches the legacy
- * dataCleanupService this replaces, and it is deliberately unchanged here - but
- * see ADR-054, because which column the retention policy should key on is a
- * real question and the ETL's treatment of `created_at` decides whether this
- * job does anything at all after cutover.
+ * THE COLUMN IS `donatedAt`, CHANGED FROM `createdAt` (AH2, ADR-054).
+ *
+ * The legacy dataCleanupService keyed on `createdAt` - when the ROW WAS
+ * WRITTEN - and this inherited that. It is wrong on both counts.
+ *
+ * 1. A ten-year retention policy on donation records means ten years from the
+ *    DONATION, not from the insert. For rows created through the application
+ *    those are minutes apart and the distinction never shows; for migrated
+ *    rows they can differ by years. `donated_at` is also the column every
+ *    report and admin filter already uses.
+ * 2. It removes a failure mode rather than mitigating one. `created_at` is
+ *    `DEFAULT CURRENT_TIMESTAMP(3)`, so an ETL that does not set it explicitly
+ *    stamps every migrated donation with the import date - and the purge then
+ *    finds nothing until 2036. SILENTLY, because "no rows older than ten
+ *    years" is exactly what a healthy system reports. A control that cannot be
+ *    observed failing is worse than one that fails loudly, and keying on
+ *    `donated_at` means the ETL cannot produce that state at all.
  */
 async function countOlderThan(cutoff, floor, tx) {
   return client(tx).donation.count({
-    where: { createdAt: { lt: new Date(cutoff), gte: new Date(floor) } },
+    where: { donatedAt: { lt: new Date(cutoff), gte: new Date(floor) } },
   });
 }
 
 async function deleteOlderThan(cutoff, floor, tx) {
   const res = await client(tx).donation.deleteMany({
-    where: { createdAt: { lt: new Date(cutoff), gte: new Date(floor) } },
+    where: { donatedAt: { lt: new Date(cutoff), gte: new Date(floor) } },
   });
   return res.count;
 }
@@ -306,7 +318,7 @@ async function deleteOlderThan(cutoff, floor, tx) {
 async function countImplausibleDates(floor, now, tx) {
   return client(tx).donation.count({
     where: {
-      OR: [{ createdAt: { lt: new Date(floor) } }, { createdAt: { gt: new Date(now) } }],
+      OR: [{ donatedAt: { lt: new Date(floor) } }, { donatedAt: { gt: new Date(now) } }],
     },
   });
 }

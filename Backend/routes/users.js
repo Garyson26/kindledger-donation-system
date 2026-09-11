@@ -1,4 +1,6 @@
 const express = require("express");
+// BUG-11: one refusal shape.
+const { refuse } = require("../utils/respond");
 const router = express.Router();
 const User = require("../models/User");
 const jwt = require("jsonwebtoken");
@@ -8,14 +10,14 @@ const { JWT_SECRET } = require("../config/jwt");
 router.put("/profile", async (req, res) => {
   // Expecting token in Authorization header
   const token = req.headers["authorization"];
-  if (!token) return res.status(401).json({ message: "No token provided" });
+  if (!token) return refuse(res, 401, "No token provided");
 
   let decoded;
   try {
     decoded = jwt.verify(token.replace("Bearer ", ""), JWT_SECRET);
   } catch (err) {
     console.error("JWT verification error:", err);
-    return res.status(401).json({ message: "Invalid token" });
+    return refuse(res, 401, "Invalid token");
   }
 
   try {
@@ -35,13 +37,13 @@ router.put("/profile", async (req, res) => {
       { new: true }
     ).select("-password");
 
-    if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) return refuse(res, 404, "User not found");
 
     console.log("Updated user:", user);
     res.json(user);
   } catch (err) {
     console.error("Profile update error:", err);
-    res.status(500).json({ message: "Server error" });
+    refuse(res, 500, "Server error");
   }
 });
 

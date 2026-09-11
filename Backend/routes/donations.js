@@ -1,4 +1,6 @@
 const express = require("express");
+// BUG-11: one refusal shape. See Backend/utils/respond.js.
+const { refuse } = require("../utils/respond");
 const router = express.Router();
 const Donation = require("../models/Donation");
 const adminAuth = require("../middleware/adminAuth");
@@ -296,7 +298,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 router.patch("/:id/status", adminAuth, async (req, res) => {
   const { status } = req.body; 
   if (!["approved", "rejected"].includes(status)) {
-    return res.status(400).json({ message: "Invalid status" });
+    return refuse(res, 400, "Invalid status");
   }
   try {
     const donation = await Donation.findByIdAndUpdate(
@@ -304,10 +306,10 @@ router.patch("/:id/status", adminAuth, async (req, res) => {
       { status },
       { new: true }
     );
-    if (!donation) return res.status(404).json({ message: "Donation not found" });
+    if (!donation) return refuse(res, 404, "Donation not found");
     res.json(donation);
   } catch (err) {
-    res.status(500).json({ message: "Server error" });
+    refuse(res, 500, "Server error");
   }
 });
 

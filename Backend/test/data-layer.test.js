@@ -723,7 +723,7 @@ test('AG1a: a donation with an IMPLAUSIBLE date is excluded from the purge, not 
     categoryId: cat.id,
     baseAmountMinor: 1000,
     amountMinor: 1000,
-    createdAt: new Date('1970-01-01T00:00:00.000Z'),
+    donatedAt: new Date('1970-01-01T00:00:00.000Z'),
   });
 
   const dry = await scheduler.purgeOldDonations({ dryRun: true });
@@ -745,7 +745,7 @@ test('AG1a: a donation with an IMPLAUSIBLE date is excluded from the purge, not 
     categoryId: cat.id,
     baseAmountMinor: 1000,
     amountMinor: 1000,
-    createdAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+    donatedAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
   });
   const after = await scheduler.purgeOldDonations({ dryRun: true });
   assert.ok(after.implausible >= 2, 'a future-dated row counts as implausible too');

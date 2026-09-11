@@ -158,6 +158,14 @@ jobs:
         # MongoDB.
         run: npm run test:bridge
 
+      - name: Donation characterisation (SPEC-3 package 3.3 baseline)
+        working-directory: Backend
+        run: npm run test:donations
+
+      - name: Auth characterisation (SPEC-3 package 3.2)
+        working-directory: Backend
+        run: npm run test:auth-char
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------

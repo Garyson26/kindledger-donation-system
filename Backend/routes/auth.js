@@ -1,4 +1,6 @@
 const express = require("express");
+// BUG-11: one refusal shape. See Backend/utils/respond.js.
+const { refuse, failed } = require("../utils/respond");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -525,31 +527,38 @@ router.post("/change-password", authMiddleware, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
   try {
     const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ msg: "User not found" });
+    if (!user) return refuse(res, 404, "User not found");
 
     const isMatch = await bcrypt.compare(oldPassword, user.password);
-    if (!isMatch) return res.status(400).json({ msg: "Invalid old password" });
+    if (!isMatch) return refuse(res, 400, "Invalid old password");
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     user.password = hashedPassword;
     await user.save();
-    res.json({ msg: "Password changed successfully" });
+    // `msg` is kept ONLY on this success response: ChangePassword.jsx:26
+    // reads `data.msg`. Its error path already goes through the api
+    // wrapper, which reads `error || message`, so refusals are safe to
+    // change. Phase 5 drops this alias with the rest.
+    res.json({ msg: "Password changed successfully", message: "Password changed successfully" });
   } catch (err) {
-    res.status(500).json({ msg: err.message });
+    // SEC-19: this was `msg: err.message`, returning the raw error text.
+    failed(res, "Could not change the password", err, { tag: "auth" });
   }
 });
 
 // Get current user profile
 router.get("/me", async (req, res) => {
   const token = req.headers["authorization"];
-  if (!token) return res.status(401).json({ message: "No token provided" });
+  if (!token) return refuse(res, 401, "No token provided");
 
   try {
     const decoded = jwt.verify(token.replace("Bearer ", ""), JWT_SECRET);
     const user = await User.findById(decoded.userId).select("-password");
-    if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) return refuse(res, 404, "User not found");
 
-    console.log("User found:", user); // Debug log
+    // SEC-09: was `console.log("User found:", user)`, which wrote the whole
+    // user document - name, email, phone, address - to the application log on
+    // every profile load.
 
     res.json({
       _id: user._id,
@@ -561,7 +570,7 @@ router.get("/me", async (req, res) => {
     });
   } catch (err) {
     console.error("JWT verification error:", err); // Debug log
-    res.status(401).json({ message: "Invalid token" });
+    refuse(res, 401, "Invalid token");
   }
 });
 
