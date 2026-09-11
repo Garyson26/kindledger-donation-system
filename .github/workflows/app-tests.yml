@@ -1,0 +1,88 @@
+# =============================================================================
+# Application tests - PayU callbacks (SEC-01) and reset controls (SEC-02/04)
+# =============================================================================
+# Separate from the Schema workflow on purpose. That one owns MySQL and the
+# drift gate; this one owns application behaviour against the CURRENT MongoDB
+# data layer.
+#
+# These suites are the regression net for the Phase 3 rewrite. When the
+# handlers move to MySQL, this workflow's service block changes from mongo to
+# mysql and the storage seam inside each suite is reimplemented - but the
+# scenarios themselves must keep passing unchanged. If a scenario has to be
+# edited to go green on MySQL, that is a behaviour change and needs saying out
+# loud, not editing quietly.
+#
+# Triggers follow the same reasoning as the Schema workflow: no branch filter
+# and no paths filter, because an allowlist fails SILENTLY - the job just does
+# not run and nothing tells you. See the header of schema.yml.
+# =============================================================================
+
+name: App tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: app-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app-tests:
+    name: PayU callbacks and reset controls
+    runs-on: ubuntu-latest
+
+    services:
+      mongo:
+        # Matches the local development container documented in each suite's
+        # header. No auth: the suites connect without credentials, which is
+        # also why they must never be pointed at a real database.
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+          --health-start-period=20s
+
+    env:
+      # Each suite uses its own database name so they cannot interfere, and
+      # each binds an ephemeral port so they can run in any order.
+      TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: Backend
+        # No lockfile is committed yet (SEC-12). Switch to `npm ci` the moment
+        # package-lock.json lands.
+        run: npm install --no-audit --no-fund
+
+      - name: Character-set guard
+        working-directory: Backend
+        # Fails on undeclared non-ASCII in test/ and db/. Cheap, needs no
+        # service, and runs first so a homoglyph is reported in seconds
+        # instead of after the suites have booted.
+        #
+        # It lives here rather than in the Schema workflow because it guards
+        # the test sources this workflow owns, and because keeping it beside
+        # them avoids two branches editing the same package.json scripts block.
+        run: npm run test:charset
+
+      - name: PayU callback behaviour (SEC-01 + observability)
+        working-directory: Backend
+        run: npm run test:payment
+
+      - name: Password reset controls (SEC-02 + SEC-04 trust proxy)
+        working-directory: Backend
+        run: npm run test:auth

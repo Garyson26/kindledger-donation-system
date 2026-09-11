@@ -321,7 +321,7 @@ test('case-variant emails collide on the unique index', async () => {
 });
 
 test('accent-variant emails do NOT collide', async () => {
-  // jose@ and josé@ are different addresses and must remain distinct.
+  // jose@ and its e-with-acute variant are different addresses and must
   await inRollback(async (tx) => {
     await tx.$executeRawUnsafe(`
       INSERT INTO users (uuid, name, email, password_hash)
