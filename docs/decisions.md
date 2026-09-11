@@ -1627,30 +1627,36 @@ appended.
 
 ### The pattern, and what to do about it
 
-**This is the second time in this project a security fix has carried its own
-defect** (AA3). Two earlier episodes fit that description, and they fit it
-differently, which is worth separating rather than collapsing:
+**The line that matters is CAUGHT BEFORE MERGE versus SHIPPED, and by that line
+there has been exactly one** (AB1). An earlier draft of this record said "the
+second time a security fix has carried its own defect" and then listed
+candidates. Both halves of that were wrong: the count, and the idea that a count
+is the useful measurement.
 
-- **ADR-012, superseded by ADR-026 — the closest match.** SPEC-1A section 5.6
-  stated that the `UNIQUE` index on `donation_payment_details.mihpayid` was the
-  SEC-01 replay defence. It is not: `mihpayid` is an UNSIGNED field in the PayU
-  callback, so an attacker controls it and can vary it freely. The index is a
-  data-integrity control and nothing more. The defect here was not in the
-  mechanism but in the claim attached to it — and a fix documented as
-  providing a protection it does not provide is worse than an absent one,
-  because it closes the question. This was Gary's correction, not a finding of
-  mine; ADR-012 repeated the error before ADR-026 fixed it.
-- **ADR-034 — the same shape, caught one step earlier.** The natural
-  implementation of the SEC-02 attempt cap, clearing the counter on a correct
-  code at `/verify`, would have handed a lucky guesser a fresh budget of five at
-  `/reset` and let them alternate endpoints to stay topped up. The distinction
-  worth keeping is that the code was already correct: this was a gap in the
-  SPECIFICATION that the obvious tidy-up during Phase 3 would have turned into a
-  defect, not a defect that shipped. It is a near miss, recorded so the tidy-up
-  does not happen.
+**Shipped: one.** ADR-012, superseded by ADR-026. SPEC-1A section 5.6 stated
+that the `UNIQUE` index on `donation_payment_details.mihpayid` was the SEC-01
+replay defence. It is not — `mihpayid` is an UNSIGNED field in the PayU
+callback, so an attacker controls it and can vary it freely. The index is a
+data-integrity control and nothing more. The defect was not in the mechanism but
+in the RATIONALE attached to it, written into `db/schema.sql` where the next
+reader would find it, and **a protection that is documented but absent is worse
+than one that is simply absent, because it closes the question.** Anyone looking
+for the replay defence would have found the comment and stopped looking. That is
+the only one of these that reached a merged branch.
 
-If the intended precedent was a third episode, this list is wrong and should be
-corrected here rather than reconciled in conversation.
+**Caught before merge: three, and this is the ordinary case rather than the
+remarkable one.** The IPv6 keying and the `set_real_ip_from` hole above; the
+observability change that nearly broke the failed-payment webhook path; and, one
+step further back still, ADR-034, where the code was already correct and it was
+the SPECIFICATION that left room for the defect.
+
+Keeping the distinction and dropping the count is the point. A tally of
+"security fixes that carried defects" measures how often it happens, which is
+roughly always — every one of these was written by someone thinking hard about
+the attack the fix was for. What is worth measuring is how many got past the
+gates, and the answer to that is one, in the artefact class with the fewest gates
+on it: a rationale comment in a DDL file, which no test asserts and no reviewer
+can falsify by running anything.
 
 What the three have in common is not carelessness. It is that each was written
 while thinking about the attack the fix was FOR, and each defect lived in a
@@ -1734,6 +1740,14 @@ on a developer machine — the inverse of the usual "works on my machine",
 where the local build is the one that is wrong and CI is right. It was found by
 building locally, which the new `trust-proxy` job does in CI and which nothing
 had previously forced anyone to do.
+
+**So this class of defect only ever appears locally, and only when someone
+looks** (AB2). There is no gate that can be added to catch it, because the
+condition that produces it — a populated `node_modules` in the build context
+— cannot exist on the machine running the gate. The control is the
+`.dockerignore` itself, and the check on the control is that someone
+occasionally builds and runs the image by hand rather than trusting that a green
+pipeline means the artefact is right.
 
 **Consequences** `Backend/.dockerignore` now excludes `node_modules`, `.env*`,
 `.git` and build debris, and carries the explanation inline so that deleting it

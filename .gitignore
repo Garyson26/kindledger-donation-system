@@ -25,6 +25,21 @@ docs/*
 # topology look the way they do, and a future contributor needs them.
 !docs/decisions.md
 
+# The remediation map IS tracked, because SPEC-3 section 5 requires every
+# package to update it in the same commit as the work - a gate that cannot be
+# enforced on an untracked file.
+#
+# THIS IS A DELIBERATE TRADE-OFF, NOT AN OVERSIGHT. The map names open
+# vulnerabilities with file and line (SEC-06 at payment.js:601, SEC-07 at
+# payment.js:99, and so on). It is far less detailed than
+# docs/SECURITY-REVIEW.md, which stays excluded, but it is not nothing: on a
+# public repository it is a prioritised list of what is not yet fixed. That is
+# acceptable only while the repository is private, and DEF-01 (see U-1 in the
+# map) currently blocks publication anyway. REVISIT THIS BEFORE THE REPOSITORY
+# IS MADE PUBLIC - the map should be emptied of open items or moved out by then,
+# which is the same condition as it being safe to publish at all.
+!docs/remediation-map.md
+
 # =============================================================================
 # Node
 # =============================================================================

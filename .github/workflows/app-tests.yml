@@ -158,10 +158,13 @@ jobs:
 
     env:
       DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
-      # Deliberately TEST_REDIS_URL and not REDIS_URL. The suite runs the
-      # store-selection assertions in child processes so that each gets a clean
-      # module registry; setting REDIS_URL for the whole job would make the
-      # "falls back to memory when REDIS_URL is unset" case unprovable.
+      # DELIBERATELY TEST_REDIS_URL AND NOT REDIS_URL. DO NOT "STANDARDISE"
+      # THIS NAME. The suite asserts BOTH store-selection branches in child
+      # processes, and the memory branch is proved by REDIS_URL being absent.
+      # Renaming this to REDIS_URL sets it for the whole job, the memory case
+      # then silently selects Redis, and that assertion passes while testing
+      # nothing - the failure mode ADR-048 is about. The test-specific prefix
+      # IS the mechanism, not a naming preference.
       TEST_REDIS_URL: redis://127.0.0.1:6379
 
     steps:
