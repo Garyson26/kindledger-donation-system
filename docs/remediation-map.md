@@ -708,6 +708,26 @@ a package decision.
 
 ---
 
+## Map maintenance: a sequence stated twice is a sequence that will contradict itself (AL3)
+
+The map carried TWO contradictory sequences at once - the corrected table in one
+section, SPEC-3's original numbering in the per-package headings - and it is the
+artefact every package checks itself against. A reader following either was
+right about half the time.
+
+**This belongs in the same class as SPEC-1A section 5.6's mihpayid claim**
+(ADR-012, corrected by ADR-026): not an ABSENT protection but a MISLEADING one,
+which is worse, because it confers confidence without conferring correctness.
+An absent sequence would have sent a reader to ask. A wrong one sent them to
+work.
+
+**Maintenance rule: when a sequence changes, grep the map for every other
+statement of it before committing.** The headings are now keyed by file and
+trigger precisely so there is only one statement of the order left to maintain -
+but the rule stands for anything else that gets stated twice.
+
+---
+
 ## The three ordering constraints, in order of precedence (AK2)
 
 Each was found by hitting it. None was found by planning.
