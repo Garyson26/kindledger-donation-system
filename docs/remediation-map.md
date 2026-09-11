@@ -373,46 +373,51 @@ precisely the error ADR-042 was written to prevent.
 
 ---
 
-## Package 3.1 status - BLOCKED after the characterisation tests
+## Package 3.1 - COMPLETE
 
-**Done and green:** `Backend/test/categories-characterisation.test.js`, 22
-scenarios, passing against the current Mongoose implementation. This is the
-first half of the package and SPEC-3 section 1 requires it before any change.
+`routes/categories.js` is migrated to MySQL and imports no Mongoose. The blocker
+recorded here previously (ADR-050) was resolved by AD1: Option D, a read-through
+bridge for the six unmigrated read sites.
 
-**Not started:** the migration itself. `categories.js` cannot be migrated in
-isolation - `Category` is read by `payment.js` (which prices every donation from
-it), by four `populate("category")` sites in `donations.js`, and by
-`admin.js`'s dashboard tile, none of which move until 3.2, 3.3 and 3.5.
-Migrating only the writes splits the data and changes the id format, so
-`/payment/initiate` would 500 on any category created afterwards. **ADR-050**
-has the evidence and four options with a recommendation. Needs a decision.
+**Delivered**
 
-**Five quirks recorded by the characterisation tests that were in no finding
-list.** Four are now documented behaviour; one is a new defect:
+| | |
+|---|---|
+| `routes/categories.js` | rewritten against `repositories/categories`; no Mongoose |
+| `services/categoryBridge.js` | temporary, deleted in 3.6; logs and counts every MongoDB fallback |
+| `test/categories-characterisation.test.js` | 22 scenarios, green BEFORE and AFTER the migration |
+| `test/category-bridge.test.js` | 11 scenarios, both paths plus twelve malformed inputs |
+| six read sites | `payment.js` x2, `admin.js` x1, `donations.js` x4 |
 
-| | Behaviour | Status |
+**The characterisation evidence.** Twelve assertions passed untouched across the
+migration. Ten changed, each marked `CHANGED IN 3.1` in the test file with the
+finding that caused it. That ratio is the whole argument for writing them first:
+without them, "the category endpoints still work" would have been an opinion.
+
+**Findings closed in this package**
+
+| ID | What changed | Verified by |
 |---|---|---|
-| `donationAmount: 0` is refused as "All fields are required" | the check is falsiness, not presence, so a free category is impossible and the reason given is untrue | documented; MySQL's `ck_categories_amount_positive` also refuses 0, so 3.1 must keep an explicit check or the 400 becomes a 500 |
-| `descriptions: []` IS accepted | `[]` is truthy, so the same check that rejects `0` accepts an empty list | documented |
-| reorder is not atomic | `Promise.all` over independent updates; a bad id mid-list 500s and leaves earlier writes applied | to be fixed by `withTransaction` in 3.1 |
-| a malformed id is a 500, a well-formed unknown id is a 404 | the cast throws before the not-found branch | to be fixed in 3.1 |
-| **BUG-09** | **`PUT /categories/:id` WIPES `descriptions` when the key is absent** | **new finding, see below** |
+| SEC-19 | `err.message` no longer reaches the client from any of the five handlers | `SEC-19: no internal error text reaches the client` - three probes, asserting the body matches none of Cast/ObjectId/Prisma/mongo |
+| BUG-08 | `limit` clamped to 100; non-numeric page/limit is a 400 instead of a 200 carrying nulls | two scenarios |
+| BUG-09 | partial `PUT` no longer wipes `descriptions`; an explicit `[]` still clears them, because "omitted" and "set to empty" are different requests | `BUG-09: a partial PUT no longer wipes descriptions` |
+| falsy-amount | `donationAmount: 0` is refused because it is not positive, not because it is "missing" | `donationAmount 0 is refused, and now says WHY` |
+| malformed-id 500 | a malformed id is a 404 like any other unknown id (AD1b) | `a MALFORMED id is now a 404` |
+| ADR-004 | delete is now archive; the category stays resolvable for the donations that reference it | two scenarios plus a bridge test |
 
-### BUG-09 - `PUT /api/categories/:id` silently wipes descriptions on a partial update
+**Deliberately NOT closed here (AD3)**
 
-**Severity** Medium (silent data loss). **Provenance X** - found by writing the
-characterisation test, not by reading the route. **Owning package 3.1.**
+| | Why |
+|---|---|
+| reorder is not atomic | Needs `withTransaction` and belongs with the rest of the transaction work. The crash it used to cause IS fixed - an unresolvable entry is now skipped and counted rather than raising a CastError mid-batch - but the partial write remains, and the test pins it so that fixing it later requires a deliberate edit. |
 
-`routes/categories.js:103-108` builds `updateData` with
-`descriptions: descriptions || []`, unconditionally. Mongoose drops `undefined`
-keys from an update but `[]` is not undefined, so a client sending a partial
-update - `{ donationAmount: 3000 }`, which is what an "edit the price" form
-does - **clears the description list**.
+**New in this package**
 
-Asserted as current behaviour in
-`categories-characterisation.test.js`. Mechanism: only assign keys the caller
-actually supplied. Verification: the same test, edited to assert the
-descriptions survive - a visible edit, per the characterisation rule.
+| | |
+|---|---|
+| ADR-051 | The external id stays a 24-hex ObjectId for the rest of Phase 3, because `Donation.category` is a required ObjectId ref. **Phase 4 must not read `legacy_id IS NULL` as "created after cutover".** |
+| ADR-050 exit condition | `categoryBridge.fallbackCount()` must be zero over a real run before the bridge is deleted in 3.6 |
+| incidental | `donations.js:265` populated `"name description price"`; two of those three are not fields on the Category schema, so it only ever returned `name`. The bridge returns the whole category - a superset. Flagged for 3.2. |
 
 ---
 
@@ -425,13 +430,7 @@ Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| SEC-19 | Low | `error: err.message` returned to clients | Generic message to client, detail to server log | Characterisation test asserts the response body carries no `message` | **R** |
-| BUG-08 | - | `parseInt(limit)` with no cap or NaN guard (`categories.js:48`) | Clamp to a maximum, default on NaN | Test: `?limit=100000` and `?limit=abc` | **R** |
-| ADR-004 | - | Category delete becomes a soft delete - **behaviour change** | `categories.archive()`; `deletedAt` filter | Characterisation test records the current hard-delete behaviour first, then the change is made visibly | **R** |
-| BUG-09 | Med | `PUT /:id` wipes `descriptions` on a partial update (`categories.js:107`) | Assign only the keys the caller supplied | Characterisation test, edited visibly | **X** |
-| - | - | reorder is not atomic: a bad id mid-list leaves earlier writes applied | `withTransaction` | Characterisation test, edited visibly | **X** |
-| - | - | A malformed id 500s where an unknown id 404s | Validate the id before lookup | Characterisation test, edited visibly | **X** |
-| ADR-050 | - | **BLOCKER** - `categories.js` cannot migrate in isolation | Decision required; four options in ADR-050 | n/a | **X** |
+| - | - | **All closed. See "Package 3.1 - COMPLETE" above.** The one item deliberately left open is the non-atomic reorder, which moves to the transaction work. | | | |
 
 ### Package 3.2 - `routes/donations.js`
 
@@ -555,8 +554,8 @@ silently reconciled.
 
 | State | Count | Rows |
 |---|---|---|
-| Closed | 9 | - |
-| Open, assigned to a Phase 3 package | 42 | 3.1: 7, 3.2: 8, 3.3: 7, 3.4: 11, 3.5: 8, 3.6: 1 |
+| Closed | 15 | 6 closed in package 3.1 |
+| Open, assigned to a Phase 3 package | 36 | 3.1: 1 (non-atomic reorder), 3.2: 8, 3.3: 7, 3.4: 11, 3.5: 8, 3.6: 1 |
 | Open, assigned to Phase 4 / 5 / 6 | 14 | P4: 7, P5: 6, P6: 1 |
 | **Open and unassigned** | **6** | U-1 .. U-6 |
 

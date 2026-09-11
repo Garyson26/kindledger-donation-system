@@ -66,11 +66,14 @@ async function findById(id, tx) {
 }
 
 /** Active categories only. includeArchived is for admin views and the ETL. */
-async function list({ includeArchived = false } = {}, tx) {
+async function list({ includeArchived = false, skip, take } = {}, tx) {
   const rows = await client(tx).category.findMany({
     where: includeArchived ? {} : { deletedAt: null },
     orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
     select: SELECT,
+    // Only applied when supplied, so the unpaginated caller is unaffected.
+    ...(Number.isInteger(skip) ? { skip } : {}),
+    ...(Number.isInteger(take) ? { take } : {}),
   });
   return rows.map(normalise);
 }
@@ -103,6 +106,92 @@ async function archive(id, tx) {
   return findById(id, tx);
 }
 
+/** By the MongoDB ObjectId. The bridge's MySQL-first lookup (ADR-050). */
+async function findByLegacyId(legacyId, tx) {
+  if (!legacyId) return null;
+  return normalise(
+    await client(tx).category.findUnique({ where: { legacyId: String(legacyId) }, select: SELECT })
+  );
+}
+
+/**
+ * By name, for the duplicate check.
+ *
+ * Includes archived categories DELIBERATELY. `uq_categories_name` is a plain
+ * UNIQUE key with no `deleted_at` in it, so an archived category still occupies
+ * its name - filtering it out here would let the route report "available" and
+ * then fail on the insert with a constraint violation, which is a 500 where a
+ * 400 belongs.
+ */
+async function findByName(name, tx) {
+  if (!name) return null;
+  return normalise(
+    await client(tx).category.findUnique({ where: { name: String(name) }, select: SELECT })
+  );
+}
+
+/**
+ * Partial update. ONLY the keys actually supplied are written.
+ *
+ * This is the BUG-09 fix and the reason this is not a spread. The Mongoose
+ * route built `{ descriptions: descriptions || [] }` unconditionally, so a
+ * caller sending only `{ donationAmount }` - which is what the edit-price form
+ * sends - cleared the description list with no error.
+ */
+async function update(id, fields, tx) {
+  const db = client(tx);
+  const existing = await db.category.findUnique({ where: { uuid: id }, select: { id: true } });
+  if (!existing) return null;
+
+  const data = {};
+  if (fields.name !== undefined) data.name = fields.name;
+  if (fields.shortDescription !== undefined) data.shortDescription = fields.shortDescription;
+  if (fields.donationAmountMinor !== undefined) {
+    data.donationAmountMinor = BigInt(fields.donationAmountMinor);
+  }
+  if (fields.displayOrder !== undefined) data.displayOrder = fields.displayOrder;
+
+  if (Object.keys(data).length > 0) {
+    await db.category.update({ where: { id: existing.id }, data });
+  }
+
+  // `descriptions` is replaced only when the caller supplies the key at all.
+  if (fields.descriptions !== undefined) {
+    await replaceDescriptions(id, fields.descriptions, tx);
+  }
+
+  return findById(id, tx);
+}
+
+/** For the reorder endpoint. Returns false when the id does not resolve. */
+async function setDisplayOrder(id, displayOrder, tx) {
+  const db = client(tx);
+  const existing = await db.category.findUnique({ where: { uuid: id }, select: { id: true } });
+  if (!existing) return false;
+  await db.category.update({ where: { id: existing.id }, data: { displayOrder } });
+  return true;
+}
+
+/**
+ * The next display order: max + 1, or 0 when there are none.
+ *
+ * Matches the Mongoose route's behaviour exactly, including that the FIRST
+ * category gets 0 rather than 1. Archived rows are included, so archiving the
+ * highest-ordered category does not cause the next new one to reuse its slot.
+ */
+async function nextDisplayOrder(tx) {
+  const top = await client(tx).category.findFirst({
+    orderBy: { displayOrder: 'desc' },
+    select: { displayOrder: true },
+  });
+  return top ? (top.displayOrder || 0) + 1 : 0;
+}
+
+/** Active categories only, matching `list`. */
+async function count(tx) {
+  return client(tx).category.count({ where: { deletedAt: null } });
+}
+
 async function deleteByNamePrefix(prefix, tx) {
   const res = await client(tx).category.deleteMany({ where: { name: { startsWith: prefix } } });
   return res.count;
@@ -111,7 +200,13 @@ async function deleteByNamePrefix(prefix, tx) {
 module.exports = {
   create,
   findById,
+  findByLegacyId,
+  findByName,
   list,
+  count,
+  update,
+  setDisplayOrder,
+  nextDisplayOrder,
   replaceDescriptions,
   archive,
   deleteByNamePrefix,

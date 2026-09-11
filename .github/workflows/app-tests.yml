@@ -64,10 +64,36 @@ jobs:
           --health-retries=12
           --health-start-period=20s
 
+      mysql:
+        # BOTH STORES, from package 3.1 onwards. This job used to need only
+        # MongoDB. Now `categories.js` is migrated, so the category
+        # characterisation suite reads MySQL while the donations it references
+        # are still MongoDB - and the bridge suite deliberately exercises one
+        # category in each store at once. That is not an awkward test setup, it
+        # is what the application itself looks like for the rest of Phase 3.
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: kindledger
+          MYSQL_USER: kindledger
+          MYSQL_PASSWORD: ci-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-root-password --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+          --health-start-period=40s
+          --character-set-server=utf8mb4
+          --collation-server=utf8mb4_0900_ai_ci
+          --default-time-zone=+00:00
+
     env:
       # Each suite uses its own database name so they cannot interfere, and
       # each binds an ephemeral port so they can run in any order.
       TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_ci
+      DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
 
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +118,21 @@ jobs:
         # instead of after the suites have booted.
         run: npm run test:charset
 
+      - name: Ensure a MySQL client is available
+        run: |
+          if ! command -v mysql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends mysql-client
+          fi
+          mysql --version
+
+      - name: Apply db/schema.sql
+        run: mysql -h 127.0.0.1 -P 3306 -u kindledger -pci-password kindledger < db/schema.sql
+
+      - name: Generate Prisma client
+        working-directory: Backend
+        run: npx prisma generate
+
       - name: PayU callback behaviour (SEC-01 + observability)
         working-directory: Backend
         run: npm run test:payment
@@ -108,6 +149,14 @@ jobs:
         # data-layer one, because the behaviour they pin is still Mongoose-backed
         # - they move across when the route does.
         run: npm run test:categories
+
+      - name: Category bridge (ADR-050, temporary)
+        working-directory: Backend
+        # The bridge is deleted in package 3.6, and is tested anyway: for the
+        # duration of Phase 3 it sits on the PAYMENT PRICING path. It needs both
+        # stores, which is why it is in this job - the data-layer job has no
+        # MongoDB.
+        run: npm run test:bridge
 
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)

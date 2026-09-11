@@ -17,10 +17,16 @@
  * must still pass - so any difference is a DECISION someone made, visible as an
  * edit to this file, rather than an accident nobody noticed.
  *
- * Two of the assertions below are therefore expected to be edited in this same
- * package, deliberately and visibly: the soft-delete change (ADR-004) and the
- * pagination clamp (BUG-08). Those edits are the proof that the change happened
- * on purpose. Every other assertion must survive untouched.
+ * SEAM SWITCHED IN PACKAGE 3.1. `store` now reads and writes MySQL through the
+ * repositories; the scenarios below were written against MongoDB and are
+ * unchanged except where the behaviour deliberately changed. Every such edit is
+ * marked `CHANGED IN 3.1` with the finding that caused it, which is the whole
+ * point of writing these before the migration rather than after.
+ *
+ * Nine assertions changed. Eight are findings being closed; one is ADR-004's
+ * soft delete, which is a behaviour change users can see. Thirteen scenarios
+ * passed untouched, which is the evidence that the migration preserved
+ * behaviour everywhere it was supposed to.
  *
  * AC1: EVERY REFUSAL ASSERTS THE MECHANISM, NOT ONLY THE OUTCOME.
  * Status code, response shape, and that nothing 500'd. An assertion that only
@@ -57,9 +63,12 @@ process.env.FRONTEND_FAILURE_URL = 'http://frontend.test/payment-failure';
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const Category = require('../models/Category');
+// Donation and User are STILL MongoDB - they migrate in packages 3.2 and 3.4.
 const Donation = require('../models/Donation');
 const User = require('../models/User');
+// Categories are MySQL from package 3.1 onwards.
+const categories = require('../repositories/categories');
+const prismaModule = require('../config/prisma');
 
 const NAME_PREFIX = 'ZZZ CAT TEST';
 const EMAIL_PREFIX = 'zzz-cat-test';
@@ -86,7 +95,7 @@ const store = {
    * the code.
    */
   async resetData() {
-    await Category.deleteMany({ name: new RegExp('^' + NAME_PREFIX) });
+    await categories.deleteByNamePrefix(NAME_PREFIX);
     await Donation.deleteMany({ donorEmail: new RegExp('^' + EMAIL_PREFIX) });
   },
 
@@ -96,53 +105,68 @@ const store = {
     await User.deleteMany({ email: new RegExp('^' + EMAIL_PREFIX) });
   },
 
-  /** Normalised view. No storage types leak past here. */
-  async readCategory(id) {
-    if (!id) return null;
-    let doc = null;
-    try {
-      doc = await Category.findById(id);
-    } catch {
-      return null; // A malformed id is "not found" as far as a caller cares.
-    }
-    if (!doc) return null;
+  /**
+   * Normalised view, by EXTERNAL id (the 24-hex ObjectId - see ADR-051).
+   *
+   * `isArchived` is new to this shape and is what makes ADR-004's soft delete
+   * observable: the row is still there, which is the behaviour change.
+   */
+  async readCategory(externalId) {
+    if (!externalId) return null;
+    const row = await categories.findByLegacyId(String(externalId));
+    if (!row) return null;
     return {
-      id: doc._id.toString(),
-      name: doc.name,
-      sortDescription: doc.sortDescription,
-      donationAmount: doc.donationAmount,
-      descriptions: [...(doc.descriptions || [])],
-      displayOrder: doc.displayOrder,
+      id: row.legacyId,
+      uuid: row.id,
+      name: row.name,
+      sortDescription: row.shortDescription,
+      donationAmount: row.donationAmountMinor / 100,
+      descriptions: [...row.descriptions],
+      displayOrder: row.displayOrder,
+      isArchived: row.isArchived,
     };
   },
 
   async readCategoryByName(name) {
-    const doc = await Category.findOne({ name });
-    return doc ? this.readCategory(doc._id) : null;
+    const row = await categories.findByName(name);
+    return row ? this.readCategory(row.legacyId) : null;
   },
 
   async countCategories() {
-    return Category.countDocuments({ name: new RegExp('^' + NAME_PREFIX) });
+    const all = await categories.list({ includeArchived: true });
+    return all.filter((c) => c.name.startsWith(NAME_PREFIX)).length;
   },
 
+  /** Mints an ObjectId-shaped legacy id, exactly as the route does. */
   async createCategoryDirect({ name, donationAmount = 1500, displayOrder = 0, descriptions = [] }) {
-    const doc = await Category.create({
+    const legacyId =
+      Math.floor(Date.now() / 1000).toString(16).padStart(8, '0') +
+      crypto.randomBytes(8).toString('hex');
+    const row = await categories.create({
       name,
-      sortDescription: 'fixture',
-      donationAmount,
-      descriptions,
+      legacyId,
+      shortDescription: 'fixture',
+      donationAmountMinor: Math.round(donationAmount * 100),
       displayOrder,
+      descriptions,
     });
-    return doc._id.toString();
+    return row.legacyId;
   },
 
-  /** A donation pointing at a category, to probe referential behaviour. */
-  async createDonationForCategory(categoryId, tag) {
+  /**
+   * A donation pointing at a category.
+   *
+   * STILL MongoDB - donations migrate in 3.2. It references the category by its
+   * ObjectId-shaped legacy id, which is precisely why ADR-051 keeps that as the
+   * external identifier: `Donation.category` is a required ObjectId ref, so a
+   * uuid here would fail to save.
+   */
+  async createDonationForCategory(categoryExternalId, tag) {
     const doc = await Donation.create({
       donorName: 'ZZZ Cat Test Donor',
       donorEmail: `${EMAIL_PREFIX}-${tag}@invalid.test`,
       amount: 1500,
-      category: categoryId,
+      category: categoryExternalId,
       quantity: 1,
     });
     return doc._id.toString();
@@ -246,6 +270,13 @@ async function assertMongoReachable() {
 
 before(async () => {
   await assertMongoReachable();
+  assert.ok(
+    process.env.DATABASE_URL,
+    'Categories are MySQL from package 3.1. DATABASE_URL must point at a schema-applied MySQL 8.4.'
+  );
+  const probe = await require('../repositories').checkDatabase();
+  assert.equal(probe.ok, true, `MySQL unreachable: ${probe.error}`);
+
   const app = require('../app.js');
   for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
     await new Promise((r) => setTimeout(r, 100));
@@ -271,6 +302,7 @@ after(async () => {
   } finally {
     if (server) server.close();
     await mongoose.connection.close();
+    await prismaModule.disconnect();
   }
 });
 
@@ -357,24 +389,22 @@ test('POST rejects a missing field with 400 and a reason', async () => {
   );
 });
 
-test('QUIRK: donationAmount 0 is refused, because the check is falsiness not presence', async () => {
-  // `if (!name || !descriptions || !sortDescription || !donationAmount)` treats
-  // 0 as absent. A free category cannot be created, and the reason given is
-  // "All fields are required", which is not what happened - the field was
-  // supplied.
+test('donationAmount 0 is refused, and now says WHY (CHANGED IN 3.1, AD3)', async () => {
+  // WAS: refused with "All fields are required", because the check was
+  // `!donationAmount` and 0 is falsy. The field HAD been supplied, so the
+  // stated reason was untrue and a free category was impossible.
   //
-  // Not in the finding list. Recorded here so the migration preserves it rather
-  // than accidentally fixing it: `donation_amount_minor > 0` is a CHECK
-  // constraint in db/schema.sql (ck_categories_amount_positive), so MySQL will
-  // also refuse 0 - but with a 500 from a constraint violation instead of a
-  // 400, unless 3.1 keeps an explicit check.
+  // NOW: presence is checked with `=== undefined`, and the amount is validated
+  // separately. Still a 400 - `ck_categories_amount_positive` would refuse it
+  // anyway, and catching it here keeps that a 400 naming the field instead of a
+  // 500 from a constraint violation.
   const res = await post(
     '/api/categories',
     { name: uniqueName('zero'), sortDescription: 's', donationAmount: 0, descriptions: ['d'] },
     adminToken
   );
   assertRefused(res, 400);
-  assert.equal(res.body.error, 'All fields are required');
+  assert.match(res.body.error, /greater than zero/);
 });
 
 test('QUIRK: an empty descriptions array IS accepted, unlike every other field', async () => {
@@ -478,7 +508,11 @@ test('GET sorts by displayOrder ascending', async () => {
   assert.deepEqual(mine, [a, b, c]);
 });
 
-test('QUIRK (BUG-08): limit is uncapped, so one request can stream everything', async () => {
+test('BUG-08: limit is CLAMPED, not used verbatim (CHANGED IN 3.1)', async () => {
+  // WAS: `?limit=100000` was passed straight through and streamed the table.
+  // NOW: clamped to MAX_PAGE_SIZE. The request still succeeds - clamping rather
+  // than refusing, because a client asking for too much wants as much as it can
+  // have, and a 400 here would break the admin list for no security gain.
   await store.resetData();
   for (const tag of ['p1', 'p2', 'p3']) {
     await store.createCategoryDirect({ name: uniqueName(tag) });
@@ -486,26 +520,24 @@ test('QUIRK (BUG-08): limit is uncapped, so one request can stream everything', 
 
   const res = await get('/api/categories?page=1&limit=100000');
   assert.equal(res.status, 200);
-  assert.equal(res.body.pagination.limit, 100000, 'the client-supplied limit is used verbatim');
+  assert.equal(res.body.pagination.limit, 100, 'clamped to the maximum page size');
   assert.ok(res.body.categories.length >= 3);
 });
 
-test('QUIRK (BUG-08): a non-numeric limit yields NaN in the pagination block', async () => {
-  // `parseInt('abc')` is NaN. It flows into skip/limit and into
-  // Math.ceil(total / NaN). JSON.stringify renders NaN as null, so the client
-  // receives `{"page":null,"pages":null,"limit":null}` with a 200.
+test('BUG-08: a non-numeric limit is a clean 400 (CHANGED IN 3.1)', async () => {
+  // WAS: `parseInt('abc')` gave NaN, which flowed into skip/limit and into
+  // Math.ceil(total / NaN). The client got a 200 with nulls in the pagination
+  // block - a success response describing nothing.
+  // NOW: refused, with the reason.
   //
-  // Asserting the CURRENT behaviour, including that it does not 500 - which
-  // matters, because after the BUG-08 fix this should become a 400 and that
-  // will be a visible edit to this test rather than a silent change.
+  // The edit to this test is the record that the change was deliberate. That is
+  // what writing it before the migration bought.
   await store.resetData();
   await store.createCategoryDirect({ name: uniqueName('nan') });
 
   const res = await get('/api/categories?page=abc&limit=abc');
-  assert.notEqual(Math.floor(res.status / 100), 5, `must not 500: ${res.raw.slice(0, 200)}`);
-  assert.equal(res.status, 200);
-  assert.equal(res.body.pagination.limit, null, 'NaN serialises as null');
-  assert.equal(res.body.pagination.pages, null);
+  assertRefused(res, 400);
+  assert.match(res.body.error, /positive integers/);
 });
 
 // =============================================================================
@@ -524,7 +556,14 @@ test('reorder updates displayOrder and returns only a message', async () => {
   );
 
   assert.equal(res.status, 200, res.raw.slice(0, 200));
-  assert.deepEqual(Object.keys(res.body), ['message'], 'returns no data, only a message');
+  // CHANGED IN 3.1. WAS: `{ message }` and nothing else, so a caller had no way
+  // to know whether anything had actually been reordered. NOW: `updated` and
+  // `skipped` as well, which is what makes the skip-instead-of-500 behaviour
+  // above observable rather than silent. Additive, so a client reading only
+  // `message` is unaffected.
+  assert.deepEqual(Object.keys(res.body).sort(), ['message', 'skipped', 'updated']);
+  assert.equal(res.body.updated, 2);
+  assert.equal(res.body.skipped, 0);
   assert.equal((await store.readCategory(first)).displayOrder, 5);
   assert.equal((await store.readCategory(second)).displayOrder, 4);
 });
@@ -537,14 +576,21 @@ test('reorder refuses a non-array payload with 400', async () => {
   }
 });
 
-test('QUIRK: reorder is NOT atomic - a bad id mid-list leaves earlier writes applied', async () => {
-  // Promise.all over independent findByIdAndUpdate calls. A malformed id
-  // raises a CastError, so the request 500s - but the valid updates in the
-  // same batch have already been written and are NOT rolled back.
+test('reorder is STILL NOT ATOMIC, but a bad id no longer 500s (CHANGED IN 3.1, AD3)', async () => {
+  // TWO SEPARATE THINGS, AND ONLY ONE WAS FIXED.
   //
-  // This is the case SPEC-2 section 4.4's transaction support exists for, and
-  // 3.1 is expected to change it. Asserting the current partial-write
-  // behaviour means that change has to be a visible edit here.
+  // WAS: a malformed id raised a CastError, so the request 500'd - while the
+  // valid updates in the same batch had already been written.
+  //
+  // NOW: the id is validated by shape before use, so an unresolvable entry is
+  // SKIPPED and counted, and the endpoint answers 200 describing what it did.
+  // That is AD1(b) and it closes the crash.
+  //
+  // STILL OPEN, DELIBERATELY (AD3): the batch is not atomic. Wrapping it in
+  // withTransaction is the correct fix and belongs with the rest of the
+  // transaction work, not smuggled into this package. The assertion below
+  // pins the partial write so that when it IS fixed, this test fails and
+  // someone has to edit it on purpose.
   await store.resetData();
   const good = await store.createCategoryDirect({ name: uniqueName('atomic'), displayOrder: 0 });
 
@@ -554,11 +600,13 @@ test('QUIRK: reorder is NOT atomic - a bad id mid-list leaves earlier writes app
     adminToken
   );
 
-  assert.equal(res.status, 500, 'today this is an unhandled cast error');
+  assert.equal(res.status, 200, res.raw.slice(0, 200));
+  assert.equal(res.body.updated, 1);
+  assert.equal(res.body.skipped, 1, 'the unresolvable entry is reported, not silently dropped');
   assert.equal(
     (await store.readCategory(good)).displayOrder,
     7,
-    'and the earlier write survives - the batch is not atomic'
+    'the valid write is applied - the batch is still not atomic'
   );
 });
 
@@ -589,14 +637,12 @@ test('PUT updates the four editable fields and returns the new document', async 
   assert.deepEqual(after.descriptions, ['x', 'y']);
 });
 
-test('QUIRK: omitting descriptions on PUT WIPES them, because of `descriptions || []`', async () => {
-  // Silent data loss on what looks like a partial update. `updateData` always
-  // sets `descriptions`, defaulting to `[]` when the key is absent, so a client
-  // sending only `{ donationAmount }` clears the list.
-  //
-  // Not in the finding list - found while writing this test. Added to the
-  // remediation map as BUG-09 and fixed in this package, which is why the
-  // assertion below is one of the few expected to be edited.
+test('BUG-09: a partial PUT no longer wipes descriptions (CHANGED IN 3.1, AD3)', async () => {
+  // WAS: `updateData` set `descriptions: descriptions || []` unconditionally,
+  // so `{ donationAmount: 3000 }` - exactly what the edit-price form sends -
+  // cleared the list. Data loss, no error, and nobody would connect the two
+  // events.
+  // NOW: only the keys the caller supplied are assigned.
   const id = await store.createCategoryDirect({
     name: uniqueName('wipe'),
     descriptions: ['keep me', 'and me'],
@@ -606,7 +652,14 @@ test('QUIRK: omitting descriptions on PUT WIPES them, because of `descriptions |
   assert.equal(res.status, 200, res.raw.slice(0, 200));
 
   const after = await store.readCategory(id);
-  assert.deepEqual(after.descriptions, [], 'CURRENT behaviour: the descriptions are gone');
+  assert.deepEqual(after.descriptions, ['keep me', 'and me'], 'the descriptions survive');
+  assert.equal(after.donationAmount, 3000, 'and the supplied field was applied');
+
+  // An explicit empty array still clears them - "omitted" and "set to empty"
+  // are different requests and must stay so.
+  const cleared = await put(`/api/categories/${id}`, { descriptions: [] }, adminToken);
+  assert.equal(cleared.status, 200);
+  assert.deepEqual((await store.readCategory(id)).descriptions, []);
 });
 
 test('PUT on an unknown but well-formed id is a clean 404', async () => {
@@ -620,48 +673,71 @@ test('PUT on an unknown but well-formed id is a clean 404', async () => {
   assert.equal(res.body.error, 'Category not found');
 });
 
-test('QUIRK: PUT on a MALFORMED id is a 500, not a 404', async () => {
-  // The id never reaches the not-found branch: casting it to an ObjectId
-  // throws first. Two shapes of "no such category" produce two different
-  // statuses, and the one an attacker can trigger trivially is the 500.
+test('a MALFORMED id is now a 404, like any other unknown id (CHANGED IN 3.1, AD1b)', async () => {
+  // WAS: a 500. The cast threw before the not-found branch, so the two shapes
+  // of "no such category" gave two different statuses - and the one an attacker
+  // could trigger trivially was the crash. The SEC-14 shape.
+  // NOW: the id is validated by shape and an unrecognised one is simply absent.
   const res = await put(
     '/api/categories/not-an-objectid',
     { name: uniqueName('bad'), sortDescription: 's', donationAmount: 1, descriptions: [] },
     adminToken
   );
-  assert.equal(res.status, 500);
+  assertRefused(res, 404);
+  assert.equal(res.body.error, 'Category not found');
 });
 
-test('QUIRK (SEC-19): the 500 body leaks the internal error message', async () => {
-  // Recorded as its own scenario because SEC-19 is assigned to this package.
-  // After the fix the body must carry a generic message; this assertion is
-  // expected to be edited.
-  const res = await put(
-    '/api/categories/not-an-objectid',
-    { name: uniqueName('leak'), sortDescription: 's', donationAmount: 1, descriptions: [] },
-    adminToken
-  );
-  assert.equal(res.status, 500);
-  assert.equal(typeof res.body.error, 'string');
-  assert.match(
-    res.body.error,
-    /Cast to ObjectId failed/,
-    'CURRENT behaviour: the Mongoose error text reaches the client'
-  );
+test('SEC-19: no internal error text reaches the client (CHANGED IN 3.1)', async () => {
+  // WAS: `res.status(500).json({ error: err.message })` on every handler, so
+  // the client received "Cast to ObjectId failed for value ..." with the field
+  // name and the offending value.
+  // NOW: a generic message with the right status; the detail goes to the log.
+  const probes = [
+    await put(
+      '/api/categories/not-an-objectid',
+      { name: uniqueName('leak'), sortDescription: 's', donationAmount: 1, descriptions: [] },
+      adminToken
+    ),
+    await del('/api/categories/not-an-objectid', adminToken),
+    await post(
+      '/api/categories',
+      { name: uniqueName('leak2'), sortDescription: 's', donationAmount: 'abc', descriptions: [] },
+      adminToken
+    ),
+  ];
+
+  for (const res of probes) {
+    assert.equal(typeof res.body.error, 'string');
+    assert.doesNotMatch(res.body.error, /Cast to|ObjectId|Prisma|mongo/i, res.body.error);
+  }
 });
 
 // =============================================================================
 // DELETE /api/categories/:id
 // =============================================================================
 
-test('DELETE removes the category outright - a HARD delete (ADR-004 changes this)', async () => {
+test('DELETE now ARCHIVES rather than removing (CHANGED IN 3.1, ADR-004)', async () => {
+  // THE ONE BEHAVIOUR CHANGE A USER COULD NOTICE, so it is asserted from both
+  // sides: gone from the list, still present in the data.
+  //
+  // The response message is deliberately unchanged - to the admin clicking
+  // Delete, the category has gone, which is what they meant.
   const id = await store.createCategoryDirect({ name: uniqueName('del') });
 
   const res = await del(`/api/categories/${id}`, adminToken);
   assert.equal(res.status, 200, res.raw.slice(0, 200));
   assert.equal(res.body.message, 'Category deleted successfully');
 
-  assert.equal(await store.readCategory(id), null, 'CURRENT behaviour: the row is gone');
+  const after = await store.readCategory(id);
+  assert.ok(after, 'WAS: the row was gone. NOW: it is retained');
+  assert.equal(after.isArchived, true);
+
+  const listed = await get('/api/categories');
+  assert.equal(
+    listed.body.some((c) => c._id === id),
+    false,
+    'and it no longer appears in the list, which is what "deleted" means to the user'
+  );
 });
 
 test('DELETE on an unknown id is a clean 404', async () => {
@@ -692,12 +768,23 @@ test('QUIRK: deleting a category REFERENCED BY A DONATION succeeds and orphans t
   const donationId = await store.createDonationForCategory(catId, 'orphan');
 
   const res = await del(`/api/categories/${catId}`, adminToken);
-  assert.equal(res.status, 200, 'CURRENT behaviour: the delete is allowed');
+  assert.equal(res.status, 200, 'the delete is still allowed');
 
-  assert.equal(await store.readCategory(catId), null);
-  assert.equal(
-    await store.readDonationCategoryRef(donationId),
-    catId,
-    'and the donation still points at the id that no longer exists'
-  );
+  // WAS: readCategory(catId) was null and the donation held a dangling id, so
+  // every report that populated the category saw null for those rows.
+  // NOW: the category is archived and still resolvable, so the financial record
+  // keeps the category that priced it. This is the substance of ADR-004 and the
+  // reason MySQL can enforce ON DELETE RESTRICT without breaking the admin's
+  // ability to retire a category.
+  const stillThere = await store.readCategory(catId);
+  assert.ok(stillThere, 'the category is retained');
+  assert.equal(stillThere.isArchived, true);
+  assert.equal(await store.readDonationCategoryRef(donationId), catId);
+
+  // And the bridge still resolves it for the unmigrated readers, so an old
+  // donation's receipt does not lose its category.
+  const bridge = require('../services/categoryBridge');
+  const resolved = await bridge.resolveCategory(catId);
+  assert.ok(resolved, 'an archived category still resolves for historical records');
+  assert.equal(resolved._source, 'mysql');
 });

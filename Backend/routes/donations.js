@@ -3,6 +3,11 @@ const router = express.Router();
 const Donation = require("../models/Donation");
 const adminAuth = require("../middleware/adminAuth");
 const authMiddleware = require("../middleware/authMiddleware");
+// TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
+// this file is not migrated until a later package, so category reads go through
+// the bridge, which tries MySQL first and falls back to MongoDB with a warning.
+const categoryBridge = require("../services/categoryBridge");
+
 
 // Optional auth middleware - allows both authenticated and guest users
 const optionalAuth = (req, res, next) => {
@@ -114,12 +119,12 @@ router.get("/", adminAuth, async (req, res) => {
 
     // MongoDB-side count and pagination — no full-collection load (BE-MED-01)
     const total = await Donation.countDocuments(filter);
-    const donations = await Donation.find(filter)
-      .populate("category")
+    const donationDocs = await Donation.find(filter)
       .populate("userId", "name email")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limitNum);
+    const donations = await categoryBridge.attachCategories(donationDocs);
 
     // Return paginated response
     res.json({
@@ -222,11 +227,11 @@ router.get("/user/:userId", authMiddleware, async (req, res) => {
     const total = await Donation.countDocuments(filter);
 
     // Execute query with filters, pagination, and sort by createdAt descending
-    const donations = await Donation.find(filter)
-      .populate("category")
+    const donationDocs = await Donation.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limitNum);
+    const donations = await categoryBridge.attachCategories(donationDocs);
 
     res.json({
       donations,
@@ -261,9 +266,13 @@ router.put("/:id", adminAuth, async (req, res) => {
 // Get Single Donation Details (auth required; owner or admin)
 router.get("/:id", authMiddleware, async (req, res) => {
   try {
-    const donation = await Donation.findById(req.params.id)
-      .populate("category", "name description price")
+    const donationDoc = await Donation.findById(req.params.id)
       .populate("userId", "name email");
+    // The old populate selected "name description price"; `description` and
+    // `price` are not fields on the Category schema (they are sortDescription
+    // and donationAmount), so it only ever returned name and _id. The bridge
+    // returns the whole category, which is a superset.
+    const donation = donationDoc ? await categoryBridge.attachCategories(donationDoc) : null;
 
     if (!donation) {
       return res.status(404).json({ error: "Donation not found" });
@@ -337,9 +346,10 @@ router.get("/stats/charts", adminAuth, async (req, res) => {
     }
 
     // Get donations within date range
-    const donations = await Donation.find({
+    const donationDocs = await Donation.find({
       date: { $gte: startDate, $lte: endDate }
-    }).populate("category").sort({ date: -1 });
+    }).sort({ date: -1 });
+    const donations = await categoryBridge.attachCategories(donationDocs);
 
     // Calculate statistics
     const stats = {

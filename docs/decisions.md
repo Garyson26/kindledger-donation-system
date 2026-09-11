@@ -1768,8 +1768,7 @@ describes. The re-run recorded in AA1 was done on a clean image.
 
 ## ADR-050 — `categories.js` cannot be migrated in isolation: it is the most widely READ collection in the system
 
-**Status** Open — **blocks package 3.1's migration half. Characterisation
-tests are done and green; the migration is not started.**
+**Status** RESOLVED — **Option D taken (AD1). Package 3.1 is complete.**
 
 SPEC-3 section 2 sequences `categories.js` first, on the reasoning that it is
 the "smallest surface, simplest queries" and so a cheap place to prove the
@@ -1856,8 +1855,100 @@ to Phase 3's exit criteria (section 7) rather than left to be noticed.
 own rules against another, and B in particular would breach the coverage rule
 that AC5 and section 1 exist to protect.
 
-**What is already done and is unaffected either way:**
+### Resolution (AD1): Option D, with three requirements on the helper
+
+`Backend/services/categoryBridge.js`. `categories.js` is fully migrated and
+imports no Mongoose; the bridge resolves a category from MySQL first and falls
+back to MongoDB, and is called from the six read sites. Deleting it is a Phase 3
+exit criterion.
+
+Three requirements were attached, and each closes a specific way a bridge goes
+wrong:
+
+**a. The fallback is never silent.** Every MongoDB hit logs a warning naming the
+id, and `fallbackCount()` counts them. This is what makes deletion provable
+rather than assumed: once `donations.js`, `admin.js` and `payment.js` are
+migrated, a count of zero over a real run is EVIDENCE that nothing depends on
+the fallback. A temporary abstraction that cannot report whether it is still
+load-bearing is one nobody can argue for removing, which is how they become
+permanent. **Recorded as the section 7 exit condition.**
+
+**b. The id shape is validated before dispatch.** `Category.findById(<uuid>)`
+raises a `CastError`, which a route turns into a 500 where a 400 belongs — the
+SEC-14 shape, and it would have sat on the PRICING path, where one junk form
+field would 500 the donation endpoint. The bridge classifies the id
+(`objectid` / `uuid` / `invalid`) and returns null for anything it cannot place.
+A uuid is never sent to MongoDB at all, because a uuid can only have come from
+MySQL and there is nothing to fall back to.
+
+**c. It has its own tests.** `Backend/test/category-bridge.test.js`, 11
+scenarios: both resolution paths, the archived-category case, MySQL winning when
+a row exists in both stores, batch resolution, and twelve malformed inputs each
+asserted to return null rather than throw. It is temporary, and it is on the
+pricing path; those are not in tension.
+
+**What the readers cost.** Six edits, all confined to the category lookup:
+`payment.js` x2, `admin.js` x1, `donations.js` x4 (two of which are in the same
+handler pair). Each `.populate("category")` became a post-query
+`attachCategories` call, because populate CANNOT work any more: a category
+created after 3.1 has no MongoDB row, so populate resolves it to null and the
+donation appears to have no category at all.
+
+**One incidental behaviour change, recorded rather than hidden.**
+`donations.js:265` used `.populate("category", "name description price")`.
+`description` and `price` are not fields on the Category schema — they are
+`sortDescription` and `donationAmount` — so that populate only ever returned
+`name` and `_id`. The bridge returns the whole category, which is a superset. No
+client can break on a field appearing, but it is a difference and 3.2 should not
+be surprised by it.
+
+**What was already done and was unaffected by the choice:**
 `Backend/test/categories-characterisation.test.js`, 22 scenarios, green against
-the current Mongoose implementation. It records five quirks that were not in any
-finding list, including one new defect (BUG-09, the `descriptions` wipe) and the
-fact that reorder is not atomic. That work is valid under every option above.
+the Mongoose implementation BEFORE the migration and green against the MySQL one
+after it, with ten assertions changed deliberately and marked `CHANGED IN 3.1`.
+Twelve passed untouched, which is the evidence that behaviour was preserved
+everywhere it was meant to be.
+
+---
+
+## ADR-051 — A category's external identifier stays a 24-hex ObjectId for the rest of Phase 3
+
+**Status** Accepted — transitional, reversed in Phase 4
+
+From package 3.1 the categories table is the source of truth, but the id the API
+returns as `_id` is **not** the uuid. It is `legacy_id`: the real MongoDB
+ObjectId for migrated rows, and a freshly minted ObjectId-shaped value for rows
+created after 3.1.
+
+**Why, and it is not a preference.** `Donation.category` is
+
+```js
+{ type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true }
+```
+
+Donations do not migrate until package 3.2. Handing a uuid to the donation write
+path raises a `CastError` on save, so **no donation could be made against any
+category created after package 3.1**. Not a degraded experience — a hard
+failure on the revenue path, appearing the first time an admin adds a category
+rather than at deploy.
+
+The alternatives were worse. Writing a shadow MongoDB row for every category
+would keep Mongoose in the migrated file and create a second source of truth
+with no transaction spanning the two stores. Changing `Donation.category` to a
+string would be a Mongo schema change to a collection holding live production
+data, in a phase forbidden from touching schemas.
+
+**The uuid is not hidden.** It is returned alongside as `uuid`, and it is the
+identifier the repositories use internally. Only the wire format is pinned.
+
+**Consequences, and one deserves flagging for Phase 4.** `legacy_id` is
+populated for rows that were never in MongoDB. The ETL must NOT assume
+`legacy_id IS NULL` means "created after cutover" — it means nothing of the
+kind, and any reconciliation keyed on that assumption will silently mis-classify
+every category created during Phase 3. Minting uses the documented ObjectId
+layout (4-byte seconds, 5-byte random, 3-byte counter) and
+`uq_categories_legacy_id` enforces uniqueness, so a collision is a constraint
+violation rather than a silent overwrite.
+
+Phase 4 switches the wire format to the uuid once `Donation` is a MySQL row with
+a `BIGINT` foreign key and the ObjectId is no longer load-bearing.
