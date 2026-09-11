@@ -69,6 +69,11 @@ const User = require('../models/User');
 // Categories are MySQL from package 3.1 onwards.
 const categories = require('../repositories/categories');
 const prismaModule = require('../config/prisma');
+// Package 3.1r: the Mongoose model and the ETL, so this suite can exercise
+// categories that existed BEFORE the migration - which is the case ADR-056
+// found, and which 22 green scenarios had never touched.
+const MongoCategory = require('../models/Category');
+const { runMigration } = require('../etl/migrate');
 
 const NAME_PREFIX = 'ZZZ CAT TEST';
 const EMAIL_PREFIX = 'zzz-cat-test';
@@ -95,8 +100,16 @@ const store = {
    * the code.
    */
   async resetData() {
-    await categories.deleteByNamePrefix(NAME_PREFIX);
     await Donation.deleteMany({ donorEmail: new RegExp('^' + EMAIL_PREFIX) });
+    await categories.deleteByNamePrefix(NAME_PREFIX);
+    await MongoCategory.deleteMany({ name: new RegExp('^' + NAME_PREFIX) });
+    // MySQL users too. `store.runEtl()` migrates every entity, not just
+    // categories, so MySQL user rows accumulate across runs - and because
+    // `createUser` mints a FRESH ObjectId each time, the next ETL sees a new
+    // legacy_id for an email that already exists and collides on
+    // uq_users_email. Found by the AM1 injection, which failed on that
+    // collision instead of on the assertion it was meant to prove.
+    await require('../repositories/users').deleteByEmailPrefix(EMAIL_PREFIX);
   },
 
   /** Everything, including the fixture users. Teardown only. */
@@ -176,6 +189,45 @@ const store = {
     const doc = await Donation.findById(donationId);
     if (!doc) return null;
     return doc.category ? doc.category.toString() : null;
+  },
+
+  /**
+   * A category in MONGODB ONLY - the state every production category is in.
+   *
+   * Not routed through the repositories on purpose: the whole point is a record
+   * the new store has never seen.
+   */
+  async createMongoCategory(name, { donationAmount = 1500, descriptions = [] } = {}) {
+    const doc = await MongoCategory.create({
+      name,
+      sortDescription: 'from mongo',
+      donationAmount,
+      descriptions,
+      displayOrder: 0,
+    });
+    return doc._id.toString();
+  },
+
+  /** Run the real ETL. Not a stub - the thing 3.1r depends on. */
+  async runEtl() {
+    return runMigration({
+      prisma: prismaModule.getPrisma(),
+      models: {
+        User: require('../models/User'),
+        Category: MongoCategory,
+        Donation: require('../models/Donation'),
+        PendingSignup: require('../models/PendingSignup'),
+      },
+    });
+  },
+
+  /** Does this ObjectId have a MySQL row? AM1's control depends on it. */
+  async hasMysqlRow(legacyId) {
+    return Boolean(await categories.findByLegacyId(String(legacyId)));
+  },
+
+  async clearMongoCategories() {
+    await MongoCategory.deleteMany({ name: new RegExp('^' + NAME_PREFIX) });
   },
 
   async createUser(role, tag) {
@@ -787,4 +839,132 @@ test('QUIRK: deleting a category REFERENCED BY A DONATION succeeds and orphans t
   const resolved = await bridge.resolveCategory(catId);
   assert.ok(resolved, 'an archived category still resolves for historical records');
   assert.equal(resolved._source, 'mysql');
+});
+
+// =============================================================================
+// Package 3.1r - PRE-EXISTING categories (ADR-056)
+// =============================================================================
+// THE SCENARIOS THIS SUITE WAS MISSING, and their absence is why 22 green tests
+// did not notice that `GET /api/categories` returned `[]` for every real
+// category.
+//
+// Every fixture above is created through the seam, which after the 3.1 switch
+// writes to MySQL - so the suite migrated its own data along with the route and
+// then asserted the route works on it. These exercise the other case: a record
+// that existed in MongoDB first.
+// =============================================================================
+
+test('3.1r: a category that existed in MONGODB BEFORE the ETL is fully usable', async () => {
+  // The exact case ADR-056 found. Not a category this suite created after the
+  // switch - one that was in the old store, migrated by the real ETL, and is
+  // then listed, updated and deleted through the migrated route.
+  await store.resetData();
+
+  const name = uniqueName('preexisting');
+  const legacyId = await store.createMongoCategory(name, {
+    donationAmount: 2500,
+    descriptions: ['written', 'in', 'mongo'],
+  });
+
+  // Before the ETL it is invisible to the migrated route. Asserted rather than
+  // assumed, because this is the defect being closed and it must be shown to
+  // have existed.
+  assert.equal(await store.hasMysqlRow(legacyId), false, 'no MySQL row yet');
+  const before = await get('/api/categories');
+  assert.equal(
+    before.body.some((c) => c._id === legacyId),
+    false,
+    'BEFORE the ETL: not listed - this is ADR-056'
+  );
+
+  // The ETL is the mechanism. Run the real one.
+  const stats = await store.runEtl();
+  assert.ok(stats.loaded.categories >= 1, 'the ETL loaded it');
+  assert.equal(await store.hasMysqlRow(legacyId), true, 'AFTER the ETL: a MySQL row exists');
+
+  // LISTED, with the migrated data.
+  const listed = await get('/api/categories');
+  const found = listed.body.find((c) => c._id === legacyId);
+  assert.ok(found, 'AFTER the ETL: listed by GET /api/categories');
+  assert.equal(found.name, name);
+  assert.equal(found.donationAmount, 2500, 'the MIGRATED amount, in major units');
+  assert.deepEqual(found.descriptions, ['written', 'in', 'mongo'], 'and the migrated array');
+
+  // UPDATABLE by its original ObjectId - the id every existing client holds.
+  const updated = await put(`/api/categories/${legacyId}`, { donationAmount: 3000 }, adminToken);
+  assert.equal(updated.status, 200, updated.raw.slice(0, 160));
+  assert.equal((await store.readCategory(legacyId)).donationAmount, 3000);
+  assert.deepEqual(
+    (await store.readCategory(legacyId)).descriptions,
+    ['written', 'in', 'mongo'],
+    'and BUG-09 still holds for a migrated row'
+  );
+
+  // DELETABLE - archived, per ADR-004.
+  const deleted = await del(`/api/categories/${legacyId}`, adminToken);
+  assert.equal(deleted.status, 200, deleted.raw.slice(0, 160));
+  assert.equal((await store.readCategory(legacyId)).isArchived, true);
+});
+
+test('3.1r/AK3: an UN-MIGRATED category is absent, and the ETL is what closes the gap', async () => {
+  // AM1 MAKES THIS STRUCTURAL RATHER THAN PROCEDURAL.
+  //
+  // The fixture is created AFTER the ETL run, so no hook ordering can migrate
+  // it - and the assertion below verifies that positively rather than trusting
+  // the ordering. If it ever has a MySQL row, the SETUP is wrong and this suite
+  // must fail loudly instead of passing quietly, which is exactly the failure
+  // mode ADR-056 was.
+  await store.resetData();
+
+  // Something for the ETL to do, so the run is real.
+  await store.createMongoCategory(uniqueName('migrated'));
+  await store.runEtl();
+
+  // AFTER the ETL. This is the AK3 fixture.
+  const orphanName = uniqueName('never-migrated');
+  const orphanId = await store.createMongoCategory(orphanName);
+
+  // THE CONTROL. Without it the ordering is a convention, and conventions get
+  // reordered.
+  assert.equal(
+    await store.hasMysqlRow(orphanId),
+    false,
+    'SETUP ERROR: the AK3 fixture has a MySQL row, so it was migrated after all. ' +
+      'The ordering in this test is wrong and every assertion below is vacuous.'
+  );
+
+  // The honest behaviour: it is not visible, and that is correct rather than a
+  // defect. At cutover the application writes to MySQL, so a record in this
+  // state should not exist - and if one does, running the ETL is the answer.
+  const listed = await get('/api/categories');
+  assert.equal(listed.body.some((c) => c._id === orphanId), false, 'not listed');
+  assertRefused(await put(`/api/categories/${orphanId}`, { donationAmount: 1 }, adminToken), 404);
+  assertRefused(await del(`/api/categories/${orphanId}`, adminToken), 404);
+
+  // And the gap has exactly one cause. Running the ETL again closes it, which
+  // proves the absence was un-migrated data and not something else.
+  await store.runEtl();
+  assert.equal(await store.hasMysqlRow(orphanId), true);
+  const after = await get('/api/categories');
+  assert.ok(after.body.some((c) => c._id === orphanId), 'the ETL is what closes the gap');
+});
+
+test('3.1r: the ETL is idempotent from the route suite too', async () => {
+  // Five route packages will run it repeatedly. A second run inside a test
+  // fixture must not duplicate rows or renumber display order.
+  await store.resetData();
+  const legacyId = await store.createMongoCategory(uniqueName('idem'));
+
+  const first = await store.runEtl();
+  assert.equal(first.loaded.categories, 1);
+  const second = await store.runEtl();
+  assert.equal(second.loaded.categories, 0);
+  assert.equal(second.skipped.categories, 1);
+
+  const listed = await get('/api/categories');
+  assert.equal(
+    listed.body.filter((c) => c._id === legacyId).length,
+    1,
+    'listed exactly once'
+  );
 });

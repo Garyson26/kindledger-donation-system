@@ -376,7 +376,35 @@ precisely the error ADR-042 was written to prevent.
 
 ---
 
-## Package 3.1 - NOT COMPLETE. Re-opened as 3.1r by ADR-056.
+## Package 3.1r - COMPLETE. ADR-056 closed for categories.
+
+**The specific thing ADR-056 demanded is proven.** A category that existed in
+MongoDB BEFORE the ETL is now listed by `GET /api/categories`, updatable by
+`PUT` using its original ObjectId, and deletable by `DELETE` - with the
+migrated data, not with data the suite created after the switch.
+
+The suite asserts the BEFORE state too: un-migrated, it is absent from the list.
+That is the defect, demonstrated to have existed rather than merely described.
+
+**AK3's fixture is structural, per AM1.** It is created AFTER the ETL run so no
+hook ordering can migrate it, and the suite asserts POSITIVELY that it has no
+MySQL row before exercising the route. Demonstrated by injecting the wrong
+ordering: the control fires with its own message and only that scenario fails.
+
+    SETUP ERROR: the AK3 fixture has a MySQL row, so it was migrated after
+    all. The ordering in this test is wrong and every assertion below is
+    vacuous.
+
+**The injection also found a real bug in the setup**: `resetData()` never
+cleared MySQL users, so rows accumulated across ETL runs and the next one
+collided on `uq_users_email` - because `createUser` mints a fresh ObjectId each
+time, giving a new `legacy_id` for an address that already existed. The
+injection failed on that collision instead of on the assertion it was meant to
+prove, which is how it was found.
+
+25 scenarios. The original 3.1 closure notes follow.
+
+### Superseded: Package 3.1 - NOT COMPLETE (re-opened by ADR-056)
 
 **The route migration below is correct for records created in MySQL and WRONG
 for every record that predates it.** A category that exists only in MongoDB is
@@ -728,6 +756,34 @@ but the rule stands for anything else that gets stated twice.
 
 ---
 
+## BUG-02's mechanism, confirmed by behaviour rather than by reading (AM3)
+
+The claim has been '''Mongoose's enum is not enforced on
+`findByIdAndUpdate`''', taken from the security review and repeated since.
+**Several decisions lean on it**: the ENUM columns in `db/schema.sql`, ADR-018's
+ETL counting requirement, SEC-16's severity, and BUG-03.
+
+It is now verified, and the verification was an accident. While writing the ETL
+suite, a fixture seeding `status: 'approved'` through `Donation.create()` was
+REJECTED by Mongoose:
+
+```
+ValidationError: `approved` is not a valid enum value for path `status`.
+```
+
+So the enum IS enforced on `create`, and the mixed-case data can only have been
+produced by a path that skips validation - which is `findByIdAndUpdate`, exactly
+where the review said. Seeding the test data required `collection.insertOne` to
+bypass validation the same way the real bug does.
+
+**Independent confirmation obtained while doing something else is worth more
+than a re-read**, because it could not have been shaped by expecting the answer.
+Recorded because the claim had been inherited rather than tested, and inherited
+claims are what SEC-03's misclassification and the two contradictory sequences
+were both made of.
+
+---
+
 ## The three ordering constraints, in order of precedence (AK2)
 
 Each was found by hitting it. None was found by planning.
@@ -915,7 +971,7 @@ again and is marked so nobody trusts it.
 | SEC-16 | Low | `PUT /donations/:id` writes any `status` string (`donations.js:249,293` - `findByIdAndUpdate`, no `runValidators`) | Repository accepts only enum members; MySQL ENUM rejects the rest | Test writes a junk status and expects rejection | **R** |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
 | BUG-01 | - | `POST /api/donations` can never succeed - builds a document without the required `donorEmail`/`amount` (`donations.js:22-33`) | Decide: supply the fields or delete the endpoint | Characterisation test records the current 400 **as current behaviour**, then the change is visible | **R** |
-| BUG-02 | - | `PATCH /:id/status` accepts only lowercase `approved`/`rejected` (`donations.js:289`) while callbacks write `Approved` | Canonical enum casing through the repository | Test asserts both casings resolve correctly; see ADR-018 for the ETL side | **R** |
+| BUG-02 | - | `PATCH /:id/status` accepts only lowercase `approved`/`rejected` (`donations.js:289`) while callbacks write `Approved`. **MECHANISM NOW VERIFIED BY BEHAVIOUR (AM3)** - see below | Canonical enum casing through the repository | Test asserts both casings resolve correctly; see ADR-018 for the ETL side | **R**, mechanism confirmed **X** |
 | BUG-06 | - | `optionalAuth` 401s a guest holding a stale token (`donations.js:7-17`) | Catch the auth failure and fall through to guest | Test: expired token + guest donation succeeds | **R** |
 | BUG-08 | - | Unbounded pagination (`donations.js:112,218`) | As 3.1 | As 3.1 | **R** |
 | ADR-041 | - | `distinct()` must keep data semantics, not enum semantics | `donations.listStatusesInUse()` | Already tested in `test:data-layer`; route test asserts the endpoint's shape | **R** |
