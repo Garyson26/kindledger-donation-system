@@ -1483,7 +1483,265 @@ additive model nothing in Phase 2 writes to Mongo at all — it exists so that
 
 **Consequences** Anyone running the plain `docker compose up` without a
 `MONGODB_URI` gets an exited api container, which is why `.env.example` now
-carries the warning at the top rather than buried in a variable comment. Delete
-this file at the Phase 3 cutover alongside `config/db.js`, the Mongoose models
-and the variable itself. If it still exists after Phase 3, something did not get
-switched over.
+carries the warning at the top rather than buried in a variable comment.
+
+---
+
+**AMENDMENT (AA2, accepted). SPEC-2 section 9 is amended at source.**
+
+The conflict was in the spec, not in the implementation: section 1 fenced
+`config/db.js`, section 9 required four healthy services, and `config/db.js`
+exits without Mongo. Those cannot both hold. Same shape as the SPEC-1A
+contradiction ADR-006 handled.
+
+Section 9's acceptance criterion now reads:
+
+> Four healthy services **with `docker-compose.legacy-mongo.yml` applied**:
+>
+> ```
+> docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml up
+> ```
+
+**DELETING `docker-compose.legacy-mongo.yml` IS A PHASE 3 EXIT CRITERION, NOT A
+CLEANUP ITEM.** Phase 3 is not complete while it exists. It is not a tidiness
+task to be carried into Phase 4 with the other leftovers, and it must not
+quietly persist past cutover.
+
+The distinction matters because a cleanup item that survives is untidy, whereas
+this file surviving means something specific and testable is still true: that
+`Backend/config/db.js` still runs, still exits on an unreachable Mongo, and
+therefore that some route is still being served by Mongoose. The file is not a
+convenience that outlived its purpose {D} it is an *observable* that reports
+whether the cutover actually happened. Left in place after Phase 3 it would go
+on supplying a Mongo the application no longer needs, so nothing would fail and
+the leftover coupling would be invisible.
+
+Phase 3 exit therefore requires all four of:
+
+1. `docker-compose.legacy-mongo.yml` deleted.
+2. `Backend/config/db.js` deleted, and with it the last `process.exit` on an
+   infrastructure failure.
+3. `MONGODB_URI` removed from `docker-compose.yml`, `.env.example` and the
+   `trust-proxy` CI job.
+4. `docker compose up` {D} plain, no override {D} bringing four services healthy.
+
+Item 4 is the one that proves the other three, which is why the amended
+criterion is worth restating rather than simply dropping.
+
+---
+
+## ADR-048 — Two security fixes that carried their own defects, and a test that passed for the wrong reason
+
+**Status** Accepted — recorded as a finding in its own right (AA3)
+
+Three related errors, all made during Phase 2, all in code whose entire purpose
+was to close a security finding. Recorded together because the pattern is the
+point: **the most dangerous place to introduce a vulnerability is inside the fix
+for one.** Review attention has already been spent by the time the fix is
+written, the surrounding commentary says the right things, and the tests are
+written by the same person who made the error.
+
+### 1. The limiter keyed IPv6 clients on the raw address
+
+`config/rateLimiters.js` was written with:
+
+```js
+keyGenerator: (req) => `${name}:${req.ip}`,
+```
+
+**The effect.** Every IPv4 client is limited correctly. Every IPv6 client gets an
+unlimited budget. A residential IPv6 allocation is a /64 or shorter, so one
+client holds upwards of 18 quintillion addresses and can present a fresh one per
+request; each lands in its own bucket, and the 5-per-minute auth limit never
+engages. SEC-02's brute-force path reopens for anyone on IPv6.
+
+**Why it is worse than having no limiter at all.** With no limiter, the exposure
+is known and the dashboards say nothing reassuring. With this one, the counters
+increment, the 429s fire for the IPv4 majority, and every metric reads healthy
+while the control is absent for a class of client that is not small and is
+growing. A control that reports success while not functioning is worse than an
+acknowledged gap, because it ends the search.
+
+**The fix.** `ipKeyGenerator(req.ip)` collapses IPv6 to its /56 network and
+leaves IPv4 untouched, so the bucket is the allocation rather than the address.
+
+**How it was caught, which is the uncomfortable part.** Not in review, not by
+reasoning about the design — by `express-rate-limit` v8 emitting
+`ERR_ERL_KEY_GEN_IPV6` during the SPEC-2 section 8 test run. The library's own
+authors anticipated this mistake well enough to ship a detector for it. Without
+that warning the code would have shipped: the surrounding comment block
+discussed keying at length, and discussed the wrong risk.
+
+### 2. The test for the fix passed for the wrong reason
+
+The regression test written alongside the fix asserted that two addresses in one
+allocation share a bucket and that two different networks do not. For the second
+half it used `2001:db8:abcd:0012::1` against `2001:db8:abcd:0099::1`.
+
+Those are the same /56. The prefix boundary falls INSIDE the fourth group —
+only its high byte is in the prefix — so both collapse to
+`2001:db8:abcd::/56`. The assertion was `notEqual` on two values that are equal
+by construction, and it failed, which is the only reason it was noticed.
+
+**Had it been written as `assert.equal`, it would have passed and asserted
+nothing.** That is the instructive case, and it is more instructive than the
+original bug:
+
+- A wrong test that FAILS costs an hour and is self-announcing.
+- A wrong test that PASSES is indistinguishable from a working control, forever.
+  It occupies the slot where the real check was supposed to go, it is counted in
+  the pass total, and it makes the next reader confident.
+
+**A test that passes for the wrong reason is a control that is not there** —
+with the additional cost that its presence discourages anyone from adding the
+one that would have worked.
+
+The corrected test pins the literal expected key (`auth:2001:db8:abcd::/56`) as
+well as the relational assertions, so the boundary is stated rather than
+implied, and it asserts the `:0099:` case as SAME-bucket, which is what it
+actually is.
+
+### 3. The Nginx fix for a spoofing gap contained a spoofing hole
+
+SPEC-2 section 7.3 asked for `X-Forwarded-For` handling to be made correct. The
+configuration written for it kept this block:
+
+```
+set_real_ip_from  172.16.0.0/12;
+real_ip_header    X-Forwarded-For;
+real_ip_recursive on;
+```
+
+`172.16.0.0/12` contains the Docker bridge gateway. `real_ip_header` with a
+trusted source means Nginx REPLACES `$remote_addr` with the client-supplied
+header value — so any request whose source address fell in the bridge range
+could name its own client IP and be believed, then passed upstream as
+authoritative. Host-local and inter-container traffic qualified. On a host whose
+Docker network is reachable, it is a direct rate-limit and audit-log bypass: a
+fresh `X-Forwarded-For` per request, and the `limit_req` zone keyed on
+`$binary_remote_addr` never sees the same client twice.
+
+A spoofing hole, inside the fix for a spoofing gap. Removed entirely (ADR-043),
+and `X-Forwarded-For` is now overwritten with `$remote_addr` rather than
+appended.
+
+### The pattern, and what to do about it
+
+**This is the second time in this project a security fix has carried its own
+defect** (AA3). Two earlier episodes fit that description, and they fit it
+differently, which is worth separating rather than collapsing:
+
+- **ADR-012, superseded by ADR-026 — the closest match.** SPEC-1A section 5.6
+  stated that the `UNIQUE` index on `donation_payment_details.mihpayid` was the
+  SEC-01 replay defence. It is not: `mihpayid` is an UNSIGNED field in the PayU
+  callback, so an attacker controls it and can vary it freely. The index is a
+  data-integrity control and nothing more. The defect here was not in the
+  mechanism but in the claim attached to it — and a fix documented as
+  providing a protection it does not provide is worse than an absent one,
+  because it closes the question. This was Gary's correction, not a finding of
+  mine; ADR-012 repeated the error before ADR-026 fixed it.
+- **ADR-034 — the same shape, caught one step earlier.** The natural
+  implementation of the SEC-02 attempt cap, clearing the counter on a correct
+  code at `/verify`, would have handed a lucky guesser a fresh budget of five at
+  `/reset` and let them alternate endpoints to stay topped up. The distinction
+  worth keeping is that the code was already correct: this was a gap in the
+  SPECIFICATION that the obvious tidy-up during Phase 3 would have turned into a
+  defect, not a defect that shipped. It is a near miss, recorded so the tidy-up
+  does not happen.
+
+If the intended precedent was a third episode, this list is wrong and should be
+corrected here rather than reconciled in conversation.
+
+What the three have in common is not carelessness. It is that each was written
+while thinking about the attack the fix was FOR, and each defect lived in a
+dimension the fix was not thinking about — address family, prefix arithmetic,
+the trust source rather than the header. The mitigations that actually worked
+here were mechanical, not attentional:
+
+1. **Run the thing.** All three were found by execution — a library warning,
+   an assertion failure, a request issued through the real proxy. None was found
+   by reading.
+2. **Test through the real topology.** Package A's `trust proxy` test set the
+   header directly on Express with no proxy in front, which cannot distinguish a
+   deployment that discards a client-supplied value from one that trusts it.
+   The `set_real_ip_from` hole survived that test and could not survive
+   `trust-proxy.test.js`.
+3. **Pin literals, not just relations.** `notEqual(a, c)` encodes an assumption
+   about IPv6 prefix arithmetic. `equal(a, 'auth:2001:db8:abcd::/56')` states
+   the arithmetic, so being wrong about it is visible.
+
+**Consequences** Both gates are now in CI (`app-tests.yml`, jobs `data-layer`
+and `trust-proxy`) rather than local-only, because every one of these findings
+depended on someone choosing to run a suite by hand.
+
+---
+
+## ADR-049 — The api image was built from the developer's `node_modules`; `Backend/.dockerignore` closes it
+
+**Status** Accepted — **defect found while wiring the CI gates (AA1)**
+
+`docker/api.Dockerfile` does:
+
+```dockerfile
+COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node . .
+```
+
+There was no `.dockerignore`. The second `COPY` therefore brought the whole
+build context — including the developer's own `node_modules` — and Docker
+merged it OVER the tree the `deps` stage had just built from the lockfile,
+overwriting every file present in both.
+
+**So the image did not contain the dependencies the lockfile describes. It
+contained the developer's, layered on top of them.**
+
+**How it surfaced, and why that is the interesting part.** It did not surface as
+a build error. It surfaced as `503` from `/api/health` with
+`@prisma/client did not initialize yet` — three weeks and one accepted phase
+after it was introduced — the moment `npm ci` was run on the host while
+verifying the new CI install step. `npm ci` replaces the GENERATED Prisma client
+with the ungenerated stub, and the stub then overwrote the client the `deps`
+stage had correctly generated for Linux.
+
+Every earlier build worked purely because the host had at some point run
+`prisma generate`. That is not a property of the repository. It is a property of
+one machine, and it was the thing holding up the acceptance evidence for Phase
+2.
+
+**What was actually wrong, in ascending order of seriousness:**
+
+1. **Not reproducible.** Two people building the same commit get different
+   images, and neither matches what CI builds. The lockfile that
+   `chore/dependency-cleanup` committed to make the dependency set exact was
+   being overwritten at the last step.
+2. **Wrong-platform binaries.** Prisma ships one query engine per platform
+   (`query_engine-windows.dll.node` against
+   `libquery_engine-debian-openssl-3.0.x.so.node`). Building on Windows put
+   both in a Linux image. Because the filenames differ, nothing collided and
+   nothing complained — which is precisely why it went unnoticed.
+3. **A secret-leak path that happened not to be taken.** There is no
+   `Backend/.env` today. Had there been, it would have been copied into the
+   image and into every registry that image was pushed to. The absence of the
+   file was the only control.
+
+The image also shrank from 1.08GB to 695MB, which is the least important
+consequence and the only visible one.
+
+**Why CI would not have caught it.** A runner checks out a clean tree, so there
+is no host `node_modules` for the second `COPY` to pick up and the image builds
+correctly. This defect is invisible to CI BY CONSTRUCTION and only ever appears
+on a developer machine — the inverse of the usual "works on my machine",
+where the local build is the one that is wrong and CI is right. It was found by
+building locally, which the new `trust-proxy` job does in CI and which nothing
+had previously forced anyone to do.
+
+**Consequences** `Backend/.dockerignore` now excludes `node_modules`, `.env*`,
+`.git` and build debris, and carries the explanation inline so that deleting it
+requires reading why it exists. `test/` is deliberately NOT excluded: the
+container is where the data-layer and schema suites run against real MySQL.
+
+Worth stating plainly against the Phase 2 report: the acceptance evidence given
+for Phase 2 — `docker compose up`, api healthy — was obtained from an image
+built this way. The application code was correct and all the suites genuinely
+passed, but the image they passed in was not the image the Dockerfile
+describes. The re-run recorded in AA1 was done on a clean image.

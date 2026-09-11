@@ -1,16 +1,27 @@
 # =============================================================================
-# Application tests - PayU callbacks (SEC-01) and reset controls (SEC-02/04)
+# Application tests - the behavioural gates
 # =============================================================================
-# Separate from the Schema workflow on purpose. That one owns MySQL and the
-# drift gate; this one owns application behaviour against the CURRENT MongoDB
-# data layer.
+# Three jobs, deliberately separate rather than one long pipeline:
 #
-# These suites are the regression net for the Phase 3 rewrite. When the
-# handlers move to MySQL, this workflow's service block changes from mongo to
-# mysql and the storage seam inside each suite is reimplemented - but the
-# scenarios themselves must keep passing unchanged. If a scenario has to be
-# edited to go green on MySQL, that is a behaviour change and needs saying out
-# loud, not editing quietly.
+#   app-tests    PayU callbacks (SEC-01) and reset controls (SEC-02/04),
+#                against the CURRENT MongoDB data layer.
+#   data-layer   The Phase 2 MySQL repositories, health endpoint, limiter
+#                store selection and scheduler, against real MySQL and real
+#                Redis (SPEC-2 section 8).
+#   trust-proxy  `trust proxy` end to end through the actual Nginx container,
+#                which needs the whole compose stack and so needs Docker.
+#
+# They are separate jobs because they need different services and fail for
+# different reasons. Folding them together would mean a Mongo service outage
+# reported itself as a MySQL data-layer failure, and would serialise three
+# independent things behind one another for no benefit.
+#
+# THE app-tests SUITES ARE THE REGRESSION NET FOR THE PHASE 3 REWRITE. When the
+# handlers move to MySQL, that job's service block changes from mongo to mysql
+# and the storage seam inside each suite is reimplemented - but the scenarios
+# themselves must keep passing unchanged. If a scenario has to be edited to go
+# green on MySQL, that is a behaviour change and needs saying out loud, not
+# editing quietly.
 #
 # Triggers follow the same reasoning as the Schema workflow: no branch filter
 # and no paths filter, because an allowlist fails SILENTLY - the job just does
@@ -31,6 +42,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. PayU callbacks and reset controls (MongoDB data layer)
+  # ---------------------------------------------------------------------------
   app-tests:
     name: PayU callbacks and reset controls
     runs-on: ubuntu-latest
@@ -64,19 +78,18 @@ jobs:
 
       - name: Install dependencies
         working-directory: Backend
-        # No lockfile is committed yet (SEC-12). Switch to `npm ci` the moment
-        # package-lock.json lands.
-        run: npm install --no-audit --no-fund
+        # `npm ci` now that Backend/package-lock.json is committed (SEC-12
+        # closed on chore/dependency-cleanup). It installs exactly the locked
+        # tree and fails if package.json and the lockfile disagree, which
+        # `npm install` would silently reconcile by rewriting the lockfile -
+        # meaning CI could pass against a dependency set nobody committed.
+        run: npm ci --no-audit --no-fund
 
       - name: Character-set guard
         working-directory: Backend
         # Fails on undeclared non-ASCII in test/ and db/. Cheap, needs no
         # service, and runs first so a homoglyph is reported in seconds
         # instead of after the suites have booted.
-        #
-        # It lives here rather than in the Schema workflow because it guards
-        # the test sources this workflow owns, and because keeping it beside
-        # them avoids two branches editing the same package.json scripts block.
         run: npm run test:charset
 
       - name: PayU callback behaviour (SEC-01 + observability)
@@ -86,3 +99,228 @@ jobs:
       - name: Password reset controls (SEC-02 + SEC-04 trust proxy)
         working-directory: Backend
         run: npm run test:auth
+
+  # ---------------------------------------------------------------------------
+  # 2. Phase 2 data layer (MySQL + Redis)
+  # ---------------------------------------------------------------------------
+  # This is the largest surface in the project, and until this job existed it
+  # had no CI coverage at all - the suite ran only where someone remembered to
+  # run it. Two gates running LOCAL ONLY is precisely the drift the CI gates
+  # were built to prevent.
+  #
+  # It lives in this workflow rather than in schema.yml even though it needs
+  # MySQL, because what it asserts is application behaviour: that the
+  # repositories round-trip, that money survives as minor units, that the
+  # health endpoint discloses nothing, that a dead database does not kill the
+  # process. schema.yml owns the SHAPE of the database and the drift gate;
+  # this owns the code that talks to it.
+  # ---------------------------------------------------------------------------
+  data-layer:
+    name: MySQL data layer, health, limiter store, scheduler
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        # Must match docker-compose.yml. CHECK constraints are only enforced
+        # from 8.0.16, and several of these tests assert that a constraint
+        # REJECTS a write - against an older server they would pass while
+        # proving the opposite.
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: kindledger
+          MYSQL_USER: kindledger
+          MYSQL_PASSWORD: ci-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-root-password --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+          --health-start-period=40s
+          --character-set-server=utf8mb4
+          --collation-server=utf8mb4_0900_ai_ci
+          --default-time-zone=+00:00
+
+      redis:
+        # A REAL Redis, not a stub. The assertion is that the limiter selects
+        # the Redis store when REDIS_URL is set, and rate-limit-redis only
+        # reports that once it has actually issued a command.
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=3s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
+      # Deliberately TEST_REDIS_URL and not REDIS_URL. The suite runs the
+      # store-selection assertions in child processes so that each gets a clean
+      # module registry; setting REDIS_URL for the whole job would make the
+      # "falls back to memory when REDIS_URL is unset" case unprovable.
+      TEST_REDIS_URL: redis://127.0.0.1:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: Backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Ensure a MySQL client is available
+        # Not assumed: the runner image's bundled MySQL/MariaDB client has
+        # changed across ubuntu images. Installing it explicitly removes one
+        # environmental reason for a red run. Same reasoning as schema.yml.
+        run: |
+          if ! command -v mysql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends mysql-client
+          fi
+          mysql --version
+
+      - name: Apply db/schema.sql
+        # The normative artefact, applied exactly as the MySQL container's
+        # docker-entrypoint-initdb.d does locally. This also seeds the
+        # branding_settings singleton the repository tests read.
+        run: mysql -h 127.0.0.1 -P 3306 -u kindledger -pci-password kindledger < db/schema.sql
+
+      - name: Generate Prisma client
+        working-directory: Backend
+        run: npx prisma generate
+
+      - name: Data layer, health, limiter and scheduler tests
+        working-directory: Backend
+        run: npm run test:data-layer
+
+  # ---------------------------------------------------------------------------
+  # 3. trust proxy, through the real Nginx
+  # ---------------------------------------------------------------------------
+  # WHY THIS NEEDS THE WHOLE STACK, AND WHY A CHEAPER VERSION IS WORTHLESS.
+  #
+  # Package A's test set X-Forwarded-For directly on a request to Express with
+  # no proxy in front. That shows Express READS the header. It cannot show
+  # Express reads it SAFELY, because in that arrangement the attacker is the
+  # only party writing the header - the test passes identically whether the
+  # deployment discards a client-supplied value or trusts it. The question is
+  # what happens to a header the CLIENT sent, and it cannot be asked without
+  # the proxy that is supposed to overwrite it.
+  #
+  # So this job builds the api image and runs the real compose topology. It is
+  # the most expensive job in the repository. It earns that by being the only
+  # thing standing between us and a silent rate-limit bypass: ADR-043 records
+  # that set_real_ip_from 172.16.0.0/12 contained the Docker bridge gateway,
+  # which is exactly the class of mistake that reads fine in review.
+  # ---------------------------------------------------------------------------
+  trust-proxy:
+    name: trust proxy through Nginx (full stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Confirm Docker and Compose v2 are present
+        # Stated rather than assumed. If a future runner image drops either,
+        # this fails with the cause instead of with a confusing compose error
+        # forty lines into the next step.
+        run: |
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+
+      - name: Write a CI .env for the compose stack
+        # CI-only values. Every one of these is a throwaway on a runner that
+        # is destroyed at the end of the job, and none of them is a secret -
+        # which is the point: this job must not need repository secrets, or it
+        # would not run on a fork's pull request, and a security gate that
+        # skips on the contributions most in need of checking is not a gate.
+        #
+        # JWT_SECRET is 32+ characters because the application refuses to boot
+        # below that. HEALTH_DIAGNOSTIC_SECRET is 16+ for the same reason in
+        # routes/health.js - the diagnostic form is what makes the resolved
+        # client address observable, so a short value here would silently
+        # reduce this job to asserting 200 OK.
+        run: |
+          cat > .env <<'ENVEOF'
+          NODE_ENV=production
+          MYSQL_ROOT_PASSWORD=ci-root-password
+          MYSQL_DATABASE=kindledger
+          MYSQL_USER=kindledger
+          MYSQL_PASSWORD=ci-password
+          DATABASE_URL=mysql://kindledger:ci-password@db:3306/kindledger
+          REDIS_URL=redis://redis:6379
+          JWT_SECRET=ci-only-jwt-secret-at-least-32-characters-long
+          ADMIN_CREATION_KEY=ci-only-admin-creation-key
+          ALLOWED_ORIGINS=http://localhost:5173
+          SCHEDULER_ENABLED=false
+          PRISMA_CONNECTION_LIMIT=10
+          HEALTH_DIAGNOSTIC_SECRET=ci-only-health-diagnostic-secret
+          ENVEOF
+          echo "wrote .env with $(grep -c . .env) settings"
+
+      - name: Bring up the full stack
+        # The legacy-mongo override is REQUIRED, not a convenience. The
+        # migration is additive, so Backend/config/db.js still runs and still
+        # calls process.exit(1) without MONGODB_URI - the api container would
+        # exit before answering its healthcheck. ADR-047; deleting that
+        # override is a Phase 3 exit criterion.
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml \
+            up -d --build
+
+      - name: Wait for the api healthcheck to pass
+        # The healthcheck is itself part of what this job proves: SPEC-2's
+        # acceptance criterion is four healthy services, and ADR-039 says an
+        # unreachable database must produce an unhealthy container rather than
+        # an exited one. Both are asserted here by waiting for `healthy` and
+        # failing with the logs if it never arrives.
+        run: |
+          for i in $(seq 1 60); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' kindledger-api-1 2>/dev/null || echo missing)
+            echo "attempt $i: api=$state"
+            if [ "$state" = "healthy" ]; then
+              docker compose ps
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::api never became healthy"
+          docker compose ps
+          docker compose logs --tail 120
+          exit 1
+
+      - name: Install test dependencies
+        working-directory: Backend
+        # The suite itself runs on the RUNNER, not inside a container: it
+        # drives `docker run` to create the distinct clients, so it has to sit
+        # outside the network it is testing.
+        run: npm ci --no-audit --no-fund
+
+      - name: trust proxy through Nginx
+        working-directory: Backend
+        env:
+          TEST_STACK: '1'
+          HEALTH_DIAGNOSTIC_SECRET: ci-only-health-diagnostic-secret
+        run: npm run test:trust-proxy
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        # -v so the MySQL volume goes too. Without it a cached volume would
+        # skip docker-entrypoint-initdb.d on a re-run and the stack would come
+        # up against a schema nobody applied.
+        run: docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml down -v

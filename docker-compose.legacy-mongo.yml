@@ -28,9 +28,17 @@
 # target system runs both. An override that must be named explicitly on the
 # command line cannot be mistaken for the target state.
 #
-# DELETE THIS FILE AT THE PHASE 3 CUTOVER, together with Backend/config/db.js,
-# the Mongoose models, and the MONGODB_URI variable. If it is still here after
-# Phase 3, something did not get switched over.
+# DELETING THIS FILE IS A PHASE 3 EXIT CRITERION, NOT A CLEANUP ITEM (AA2).
+# Phase 3 is not complete while it exists. It goes together with
+# Backend/config/db.js, the Mongoose models and the MONGODB_URI variable.
+#
+# The distinction is not pedantry. A leftover cleanup item is untidy; THIS file
+# surviving means something specific is still true - that config/db.js still
+# runs and still exits on an unreachable Mongo, and therefore that something is
+# still being served by Mongoose. Left in place after cutover it would go on
+# supplying a Mongo the application no longer needs, so nothing would fail and
+# the remaining coupling would be invisible. The file is an observable, not a
+# convenience. See ADR-047.
 #
 # NOT FOR ANY DEPLOYED HOST. No authentication, no persistence, no backups.
 # =============================================================================
