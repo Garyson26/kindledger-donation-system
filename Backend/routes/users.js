@@ -1,49 +1,51 @@
+/**
+ * =============================================================================
+ * User profile  (SPEC-3 package 3.2)
+ * =============================================================================
+ * NO MONGOOSE. Storage goes through repositories/users.
+ *
+ * IT NOW USES authMiddleware INSTEAD OF VERIFYING THE JWT ITSELF. The previous
+ * version duplicated the verification inline, which meant every check added to
+ * the middleware silently did not apply here - and SEC-05's `isActive`
+ * enforcement is exactly such a check. A disabled user could have kept editing
+ * their profile indefinitely while every other route refused them.
+ *
+ * SEC-09: four `console.log` calls are gone. They wrote the request body, the
+ * user id, the changed fields and the ENTIRE updated user document - name,
+ * email, phone, address - to the application log on every profile save.
+ * =============================================================================
+ */
+
 const express = require("express");
-// BUG-11: one refusal shape.
-const { refuse } = require("../utils/respond");
 const router = express.Router();
-const User = require("../models/User");
-const jwt = require("jsonwebtoken");
-const { JWT_SECRET } = require("../config/jwt");
+const authMiddleware = require("../middleware/authMiddleware");
+const { refuse, failed } = require("../utils/respond");
+const users = require("../repositories/users");
 
-// Update profile
-router.put("/profile", async (req, res) => {
-  // Expecting token in Authorization header
-  const token = req.headers["authorization"];
-  if (!token) return refuse(res, 401, "No token provided");
-
-  let decoded;
+/**
+ * PUT /api/users/profile
+ *
+ * The assignable fields are an ALLOWLIST held in the repository, so `role`,
+ * `isActive` and `isVerified` cannot be set by a caller editing their own
+ * profile. That was already true here by virtue of the three-field loop; it is
+ * now true in one place instead of two.
+ */
+router.put("/profile", authMiddleware, async (req, res) => {
   try {
-    decoded = jwt.verify(token.replace("Bearer ", ""), JWT_SECRET);
-  } catch (err) {
-    console.error("JWT verification error:", err);
-    return refuse(res, 401, "Invalid token");
-  }
-
-  try {
-    console.log("Update request body:", req.body); // Debug log
-    console.log("User ID from token:", decoded.userId); // Debug log
-
-    const updateFields = {};
-    ["name", "phone", "address"].forEach(field => {
-      if (req.body[field] !== undefined) updateFields[field] = req.body[field];
+    const updated = await users.updateProfile(req.user.id, {
+      name: req.body.name,
+      phone: req.body.phone,
+      address: req.body.address,
     });
 
-    console.log("Update fields:", updateFields); // Debug log
+    if (!updated) return refuse(res, 404, "User not found");
 
-    const user = await User.findByIdAndUpdate(
-      decoded.userId,
-      { $set: updateFields },
-      { new: true }
-    ).select("-password");
-
-    if (!user) return refuse(res, 404, "User not found");
-
-    console.log("Updated user:", user);
-    res.json(user);
+    // `normalise` never returns a hash or any OTP column, so this cannot leak
+    // one - the old `.select("-password")` was a denylist, and a denylist is
+    // wrong the first time a column is added.
+    res.json(updated);
   } catch (err) {
-    console.error("Profile update error:", err);
-    refuse(res, 500, "Server error");
+    failed(res, "Could not update the profile", err, { tag: "users" });
   }
 });
 

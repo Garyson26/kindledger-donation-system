@@ -147,6 +147,16 @@ function createBridge(cfg) {
 module.exports = {
   createBridge,
   idShape,
+  /**
+   * Record a fallback taken OUTSIDE createBridge - currently only
+   * userBridge.resolveAuthUser, which does its own lookup so it can log the
+   * event distinctly (AJ1b). Without this the shared total would under-report
+   * exactly the fallbacks that matter most.
+   */
+  noteFallback: () => {
+    fallbacks += 1;
+    return fallbacks;
+  },
   /** Read by the tests and by the package 3.5 exit check (AE3). */
   fallbackCount: () => fallbacks,
   resetFallbackCount: () => {

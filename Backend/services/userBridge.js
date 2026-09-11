@@ -45,10 +45,93 @@ const bridge = createBridge({
   fromMongo: (doc) => project(doc._id.toString(), doc.name, doc.email),
 });
 
+// =============================================================================
+// The AUTHORISATION projection - INTERNAL ONLY (AJ1)
+// =============================================================================
+// A SECOND ALLOWLIST ON THE SAME ENTITY. Under AF2 that is a parameter, not a
+// second mechanism: no merging, no write path, no cross-store ordering.
+//
+// WHAT MAKES IT SAFE IS THAT IT IS NARROWER, NOT WIDER. The risk AE2 guards
+// against is a bridge returning MORE than the caller asked for. This returns
+// LESS - no email, no name beyond what the middleware needs for `req.user`, and
+// nothing that could be serialised into a response - to a consumer that never
+// serialises anything.
+//
+// NEVER PUT THIS IN A RESPONSE BODY. It carries `isActive` and `tokenVersion`,
+// which describe the account's security state. Neither is secret, and neither
+// is any client's business: `tokenVersion` in particular tells an attacker
+// holding a stale token exactly why it stopped working, and whether an admin
+// has noticed them. Asserted by `test/user-bridge.test.js`, not merely written
+// here - the AI4 pattern.
+const AUTH_ALLOWED = ['id', 'name', 'role', 'isActive', 'tokenVersion'];
+
+function projectAuth(id, row, source) {
+  return {
+    id,
+    name: row.name || '',
+    role: row.role || 'user',
+    // Mongo's User schema has isActive; it has NO tokenVersion, so a user still
+    // in Mongo is version 0. Tokens issued before this package carry no version
+    // claim and are read as 0 too, which is what lets them keep working until
+    // they expire rather than logging everyone out at deploy.
+    isActive: row.isActive !== false,
+    tokenVersion: typeof row.tokenVersion === 'number' ? row.tokenVersion : 0,
+    _source: source,
+  };
+}
+
+/**
+ * Resolve a user for an AUTHORISATION decision.
+ *
+ * @returns {Promise<null | {id, name, role, isActive, tokenVersion, _source}>}
+ */
+async function resolveAuthUser(id) {
+  const { idShape } = require('./legacyBridge');
+  const shape = idShape(id);
+  if (shape === 'invalid') return null;
+  const value = String(id).trim();
+
+  const users = require('../repositories/users');
+  const row = shape === 'objectid' ? await users.findByLegacyId(value) : await users.findById(value);
+  if (row) return projectAuth(row.legacyId || row.id, row, 'mysql');
+
+  if (shape === 'uuid') return null;
+
+  let doc = null;
+  try {
+    doc = await require('../models/User').findById(value).select('name role isActive');
+  } catch {
+    return null;
+  }
+  if (!doc) return null;
+
+  // AJ1b: NO SILENT FALLBACK FOR AUTH.
+  //
+  // Deliberately NOT just an increment on the shared counter. If MySQL missed
+  // and MongoDB answered, an AUTHORISATION DECISION has been made from the
+  // store we are migrating away from, for a user who is mid-migration. During
+  // package 3.2 that is the single most interesting event in the system, and it
+  // has to be findable in a log search rather than inferable from a total.
+  //
+  // The tag is deliberately ugly and unique so it greps cleanly.
+  const total = require('./legacyBridge').noteFallback();
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[AUTH-DECISION-FROM-MONGO] userId=${value} role=${doc.role || 'user'} ` +
+      `isActive=${doc.isActive !== false} tokenVersion=0(absent-in-mongo) ` +
+      '- this account has NOT been migrated to MySQL and an authorisation ' +
+      'decision was just made from MongoDB. Expected during package 3.2; ' +
+      `investigate if seen afterwards (AJ1b). Fallbacks so far: ${total}.`
+  );
+  return projectAuth(doc._id.toString(), doc, 'mongo');
+}
+
 module.exports = {
   resolveUser: bridge.resolve,
   resolveMany: bridge.resolveMany,
   /** Replace `userId` on a donation (or a list of them) with the resolved user. */
   attachUsers: (docs) => bridge.attach(docs, 'userId'),
+  resolveAuthUser,
   ALLOWED_FIELDS: ALLOWED,
+  AUTH_ALLOWED_FIELDS: AUTH_ALLOWED,
 };

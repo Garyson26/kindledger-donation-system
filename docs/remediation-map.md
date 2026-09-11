@@ -653,6 +653,47 @@ field that was never written.
 
 ---
 
+## BLOCKER - package 3.1 would empty the donation form (ADR-056)
+
+**STOP. Read ADR-056 before any further route migration.**
+
+Probed against the running stack: a category that exists only in MongoDB - which
+is every category in production, since no ETL has run - is invisible to
+`GET /api/categories` (it returns `[]`) and 404s on edit and delete.
+
+**Deployed as it stands, package 3.1 empties the public donation form.** The
+branch has never been deployed, so production is unaffected today.
+
+The read-through bridge covers the wrong direction. It lets UNMIGRATED readers
+resolve one record by id, which it does correctly. It does nothing for the
+MIGRATED route's own list, update and delete paths, because those address a
+STORE rather than a record.
+
+**Third ordering constraint, and the one that governs:**
+
+> A route's LIST and WRITE paths cannot migrate before that entity's DATA has
+> migrated. Single-record reads can be bridged. Lists and writes cannot.
+
+**Why 22 green characterisation scenarios missed it.** Every fixture was created
+through the seam, which after the switch writes to MySQL. The suite migrated its
+own data along with the route and then asserted the route works on it - 22
+scenarios, green before and after, not one exercising a record that predated the
+migration.
+
+The coverage rule was followed to the letter and still missed this, because it
+says to pin the endpoint's behaviour and says nothing about the PROVENANCE of
+the data it is pinned against. AE3 made exactly this point about the fallback
+check - "a database of only new records cannot take the fallback path, so it
+proves nothing" - and it was not generalised to the suites. That generalisation
+is the lesson, and it is cheap to apply: every characterisation suite needs at
+least one fixture created in the OLD store.
+
+Four options in ADR-056. The recommendation is C, one cutover before the route
+migrations - which reorders two phases and makes J3 critical-path, so it is not
+a package decision.
+
+---
+
 ## Corrected package sequence (AD2) and the Phase 3 exit criteria
 
 **SPEC-3 section 2 sequenced by the size of the file being changed. That was the

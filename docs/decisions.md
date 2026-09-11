@@ -2383,3 +2383,130 @@ discovering this was one analysis rather than a broken package.
 characterisation baseline (it pins the CURRENT Mongoose behaviour, which the
 swap does not change), AG1a's purge floor, and the `createdAt` support in
 `repositories/donations.create`.
+
+---
+
+## ADR-056 — A read-through bridge does not make a route migration additive. Package 3.1 would empty the donation form.
+
+**Status** Open — **CRITICAL. Blocks package 3.2, and package 3.1 must not be
+deployed as it stands.**
+
+### What was found
+
+Probed directly against the running stack: a category that exists ONLY in
+MongoDB — which is **every category in production**, because no ETL has run:
+
+```
+GET    /api/categories       ->  []                        it is not listed at all
+PUT    /api/categories/:id   ->  404 Category not found
+DELETE /api/categories/:id   ->  404 Category not found
+```
+
+**Deployed as it stands, package 3.1 empties the donation form.** Not a subtle
+regression — the list endpoint that drives the public donation page returns an
+empty array, so no donation can be started for anything. Every admin edit and
+delete answers 404 for categories that plainly exist.
+
+The same defect then appeared immediately in package 3.2: `PUT
+/api/users/profile` answered 500, because `repositories/users.updateProfile`
+addresses a MySQL row for a user who is still in MongoDB.
+
+### The reasoning error
+
+**The bridge covers the wrong direction.** It was built to let UNMIGRATED
+readers resolve a record by id after its entity migrated — `payment.js`
+pricing a donation, `donations.js` populating a listing. It does that correctly.
+
+It does nothing for the MIGRATED ROUTE'S OWN paths:
+
+| Path | Covered by the bridge? |
+|---|---|
+| Another file resolving one record by id | **Yes.** This is what it was built for |
+| The migrated route's LIST endpoint | **No.** It queries MySQL; Mongo rows are invisible |
+| The migrated route's UPDATE / DELETE | **No.** It addresses a MySQL row that does not exist |
+| The migrated route's CREATE | Works, but only creates records the old readers then need the bridge for |
+
+"Additive" was taken to mean "the new layer is added alongside the old one".
+What it has to mean is "**every existing record still behaves as it did**", and
+a route whose reads and writes address only the new store cannot satisfy that
+while the records are in the old one.
+
+### Why the tests did not catch it, which is the more important half
+
+Every fixture in `categories-characterisation.test.js` is created through
+`store.createCategoryDirect`, which after the seam switch writes to **MySQL**.
+So the suite migrated its own data along with the route and then asserted the
+route works on it.
+
+**22 scenarios, green before and after, and not one of them exercised a record
+that predated the migration.** The coverage rule was followed to the letter and
+still missed the defect, because the rule says to pin the endpoint's behaviour
+and says nothing about the PROVENANCE of the data it is pinned against.
+
+This is the same shape as AE3's requirement for the fallback check — "a
+database of only new records cannot take the fallback path, so it proves
+nothing" — which was written about the bridge's exit criteria and applies with
+equal force to every characterisation suite. It was not generalised at the time,
+and this is the cost.
+
+### The constraint
+
+> A route's LIST and WRITE paths cannot migrate before that entity's DATA has
+> migrated. Reads of a single record by id can be bridged. Lists, updates and
+> deletes cannot, because they address a store rather than a record.
+
+This sits alongside the two already recorded:
+
+1. Read dependency (AD2).
+2. Foreign key direction (ADR-055).
+3. **Data location (this ADR).** The strictest of the three, and the one that
+   actually governs.
+
+### Options
+
+**A. Per-entity ETL inside each package.** Before switching a route, copy that
+entity's rows from MongoDB to MySQL, preserving ids in `legacy_id`. Phase 4 work
+pulled forward, one entity at a time.
+*Cost:* each package grows an ETL step, and rows written to MongoDB after the
+copy but before the switch are lost unless the switch is a deployment event with
+a freeze. That is a cutover, per entity, five times.
+
+**B. Dual-read in the migrated route.** The route lists from both stores and
+merges; updates locate the record in whichever store holds it.
+*Cost:* **this is the AF2 stop condition, twice** — merging results from both
+stores, and a write path that must choose a store. Refused on the same grounds
+as before, and reported rather than implemented.
+
+**C. One cutover for all entities, at the start of Phase 3.** Run the full ETL
+once, then migrate routes against data that is already in MySQL. The bridge
+still covers unmigrated readers resolving by id.
+*Cost:* Phase 4 moves before Phase 3, which is a re-plan of the remaining
+project rather than a package decision. It also makes the ETL rehearsal a
+prerequisite, which is currently blocked on production Mongo credentials (J3).
+
+**D. Revert the route migrations; keep the data layer, the bridges and every
+test.** Phase 3 becomes finding remediation on the Mongoose stack, and the
+route switch happens after the Phase 4 cutover.
+*Cost:* 3.1's migration is undone. Its findings (SEC-19, BUG-08, BUG-09, the
+falsy-amount check, ADR-004) would need reapplying to the Mongoose handler.
+Everything else built so far survives.
+
+### Recommendation
+
+**C**, with the ordering re-derived: the ETL is the thing every route migration
+depends on, and it is currently scheduled after all of them. That is the same
+error as sequencing by file size — the dependency runs the other way from the
+plan.
+
+**C is not a package decision and I am not taking it.** It reorders two phases
+and makes a blocked dependency (J3, production Mongo credentials) critical-path.
+
+### Immediate status
+
+- **Package 3.1 is merged into `phase-2-data-layer` and MUST NOT reach
+  production** in its current form. The branch has never been deployed, so
+  nothing is broken in production today.
+- **Package 3.2 is stopped** at the same wall, one file in.
+- The data layer, both bridges, the repositories and all 150+ tests are
+  unaffected by whichever option is taken. Only the three migrated route files
+  are in question.

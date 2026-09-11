@@ -207,6 +207,85 @@ async function setActive(id, isActive, tx) {
   return findById(id, tx);
 }
 
+/** By the MongoDB ObjectId. The bridge's MySQL-first lookup (ADR-050). */
+async function findByLegacyId(legacyId, tx) {
+  if (!legacyId) return null;
+  return normalise(
+    await client(tx).user.findUnique({ where: { legacyId: String(legacyId) }, select: SELECT })
+  );
+}
+
+/**
+ * Issue a login OTP. Stored HASHED (SEC-13) and the attempt counter is reset,
+ * because a new code is a new budget - unlike the reset-code counter, which
+ * ADR-034 deliberately does not clear on a correct guess.
+ */
+async function setLoginOtp(id, code, expiresAt, tx) {
+  await client(tx).user.update({
+    where: { uuid: id },
+    data: {
+      loginOtpHash: hashCode(code),
+      loginOtpExpiresAt: new Date(expiresAt),
+      loginOtpAttempts: 0,
+    },
+  });
+  return findById(id, tx);
+}
+
+/** SEC-02 parity for the login path. Returns a verdict, never the hash. */
+async function verifyLoginOtp(id, candidate, tx) {
+  const row = await client(tx).user.findUnique({
+    where: { uuid: id },
+    select: { loginOtpHash: true, loginOtpExpiresAt: true, loginOtpAttempts: true },
+  });
+  if (!row) return { ok: false, reason: 'not-found' };
+  if (row.loginOtpAttempts >= 5) return { ok: false, reason: 'attempts-exhausted' };
+  if (!row.loginOtpHash) return { ok: false, reason: 'no-code' };
+  if (!row.loginOtpExpiresAt || new Date() > row.loginOtpExpiresAt) {
+    return { ok: false, reason: 'expired' };
+  }
+  const expected = Buffer.from(row.loginOtpHash, 'hex');
+  const actual = Buffer.from(hashCode(candidate), 'hex');
+  const match = expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  return match ? { ok: true } : { ok: false, reason: 'mismatch' };
+}
+
+async function incrementLoginOtpAttempts(id, tx) {
+  const row = await client(tx).user.update({
+    where: { uuid: id },
+    data: { loginOtpAttempts: { increment: 1 } },
+    select: { loginOtpAttempts: true },
+  });
+  return row.loginOtpAttempts;
+}
+
+async function clearLoginOtp(id, tx) {
+  await client(tx).user.update({
+    where: { uuid: id },
+    data: { loginOtpHash: null, loginOtpExpiresAt: null, loginOtpAttempts: 0 },
+  });
+  return findById(id, tx);
+}
+
+async function setVerified(id, isVerified, tx) {
+  await client(tx).user.update({
+    where: { uuid: id },
+    data: { isVerified: Boolean(isVerified) },
+  });
+  return findById(id, tx);
+}
+
+/** Profile fields a user may change about themselves. An ALLOWLIST. */
+async function updateProfile(id, fields, tx) {
+  const data = {};
+  if (fields.name !== undefined) data.name = fields.name;
+  if (fields.phone !== undefined) data.phone = fields.phone;
+  if (fields.address !== undefined) data.address = fields.address;
+  if (Object.keys(data).length === 0) return findById(id, tx);
+  await client(tx).user.update({ where: { uuid: id }, data });
+  return findById(id, tx);
+}
+
 async function countAdmins(tx) {
   return client(tx).user.count({ where: { role: 'admin' } });
 }
@@ -220,6 +299,13 @@ module.exports = {
   create,
   findById,
   findByEmail,
+  findByLegacyId,
+  setLoginOtp,
+  verifyLoginOtp,
+  incrementLoginOtpAttempts,
+  clearLoginOtp,
+  setVerified,
+  updateProfile,
   verifyPassword,
   setPassword,
   setResetCode,
