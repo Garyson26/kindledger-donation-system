@@ -495,6 +495,68 @@ while looking like it had been fixed.
 
 ---
 
+## BUG-12 - two endpoints disagree about what "not found" means (AG3)
+
+**Severity** Low. **Provenance X** - found by the 3.2 characterisation baseline.
+**Owning package: whichever migrates `donations.js`.**
+
+`PUT /api/donations/:id` has no not-found branch. `findByIdAndUpdate` returns
+null for a missing donation and the handler answers **200** with
+`{ message: "Donation updated", donation: null }`. `PATCH /api/donations/:id/status`,
+doing the same job on the same resource, returns a correct 404.
+
+A caller integrating against the first has no way to tell a successful update
+from an update of nothing: the status says success and the message says
+"updated". Pinned as current behaviour in the baseline; the fix is a visible
+edit to that assertion.
+
+---
+
+## BUG-11 compounds AC1 - the inconsistent error shape weakens the rule (AG2)
+
+Recorded as a dependency rather than a second finding.
+
+AC1 requires every refusal path to assert its MECHANISM, including the reason.
+**A test asserting a reason has to know which key to read**, and this codebase
+answers under `error`, `message` or `msg` depending on which layer refused.
+Package 3.2's baseline hit this directly: the refusal helper accepted two of the
+three and reported a real refusal as a malformed one.
+
+The consequence is that the helper must accept all three, which means it can no
+longer assert that a SPECIFIC key carries the reason - so it verifies less than
+AC1 asks for. Every reason-asserting test written before BUG-11 is fixed is
+weaker than it looks.
+
+**BUG-11's fix is therefore a PREREQUISITE for the reason-asserting tests in the
+packages that follow it, not a UX improvement.** It is assigned to the package
+that owns the middleware, which under the ADR-055 order is now 3.2 - so the
+dependency resolves before `donations.js`, `payment.js` and `admin.js` write
+their characterisation suites. That is fortunate rather than planned, and worth
+noting because the previous order would have had three suites written against
+the inconsistent shape.
+
+---
+
+## A guest donation cannot be retrieved by the person who made it (AG4)
+
+**Record, do not fix.** Product question for Phase 5, alongside U-3.
+
+`GET /api/donations/:id` resolves ownership by comparing the caller's id to
+`donation.userId`. For a guest donation that field is null, so `isOwner` can
+never be true and only an admin can read it. The donor who made the donation
+cannot retrieve their own record.
+
+That is arguably correct - there is no authenticated identity to match against,
+and matching on donor email instead would let anyone read any guest donation by
+guessing an address. But it is currently **an accident of the data model rather
+than a decision**, and the distinction matters: nobody chose it, so nobody has
+weighed it against giving guests a receipt-lookup path.
+
+Pinned in the 3.2 baseline so the behaviour cannot change silently while the
+question is open.
+
+---
+
 ## Corrected package sequence (AD2) and the Phase 3 exit criteria
 
 **SPEC-3 section 2 sequenced by the size of the file being changed. That was the
@@ -505,18 +567,27 @@ its data has moved, or when a bridge exists.
 | Pkg | File(s) | Introduces | Retires |
 |---|---|---|---|
 | 3.1 | `categories.js` **(done)** | `Category` bridge | - |
-| **3.2** | `donations.js`, and retire `dataCleanupService` | `Donation` bridge, `User` bridge | `dataCleanupService`; `PendingSignup`'s second reader |
-| **3.3** | `auth.js` + `users.js` + `middleware/` | - | stop minting `legacy_id` (AE1b) |
+| **3.2** | `auth.js` + `users.js` + `middleware/` **(swapped, ADR-055)** | `User` bridge | - |
+| **3.3** | `donations.js`, and retire `dataCleanupService` **(swapped)** | `Donation` bridge | `dataCleanupService`; `PendingSignup`'s second reader; stop minting `legacy_id` (AE1b) |
 | **3.4** | `payment.js` | - | - |
 | **3.5** | `admin.js` | - | **all three bridges deleted** |
 | **3.6** | Mongoose removal | - | minted `legacy_id`s, then MongoDB |
 
-Two changes of position, both forced by the corrected criterion: `admin.js`
-moves from third to **last**, because it is the last reader of all three bridged
-collections and putting it last lets every bridge die in one package rather than
-lingering; `auth.js` + `middleware` moves from fourth to **second**, because
-nothing in the read graph requires it to wait and it holds the largest
-concentration of open security findings.
+`admin.js` moves from third to **last**, because it is the last reader of all
+three bridged collections and putting it last lets every bridge die in one
+package rather than lingering. `auth.js` + `middleware` moves to **second**.
+
+**3.2 and 3.3 were swapped again by ADR-055**, on a constraint the read-
+dependency analysis could not see: `donations.user_id` is a FOREIGN KEY into
+`users(id)`, so donations cannot migrate before users exist in MySQL. Reads can
+be bridged; references cannot. The corrected principle in full:
+
+> Sequence by READ DEPENDENCY, subject to FOREIGN KEY DIRECTION. A table cannot
+> migrate before the tables it references.
+
+The FK roots in this schema are `categories` and `users`; `donations` references
+both; `donation_payment_details` references `donations`. 3.1 migrated a root,
+which is why it worked.
 
 **Bridge count: two new, three alive at peak** - and they are three instances of
 ONE mechanism, not three bespoke components. ADR-052 records that generalising

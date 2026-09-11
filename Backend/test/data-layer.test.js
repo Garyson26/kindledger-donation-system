@@ -700,6 +700,58 @@ test('the pending-signup sweep deletes expired rows and spares live ones', async
   assert.ok(await repos.pendingSignups.findByEmail(liveEmail), 'live row must survive');
 });
 
+test('AG1a: a donation with an IMPLAUSIBLE date is excluded from the purge, not swept by it', async () => {
+  // THE FAILURE THIS PREVENTS. The ten-year bound is what makes the cleanup
+  // endpoint safe today (BUG-10), and that bound is only as reliable as the
+  // date column. The Phase 4 ETL carries dates from MongoDB, where the Mongoose
+  // schema never enforced them (SPEC-1A section 8) - so a row can arrive with a
+  // zero epoch, a mis-parsed string, or a 1970 default.
+  //
+  // With a one-sided window such a row is "older than ten years ago" and the
+  // first admin to click cleanup after cutover destroys a real donation. The
+  // cause would be a date bug in the ETL and the symptom an admin endpoint;
+  // nobody would connect the two.
+  const cat = await repos.categories.create({
+    name: `${CAT_PREFIX} floor ${crypto.randomBytes(3).toString('hex')}`,
+    shortDescription: 'fixture',
+    donationAmountMinor: 1000,
+  });
+
+  const zeroEpoch = await repos.donations.create({
+    donorName: 'ZZZ',
+    donorEmail: `${TAG}-zeroepoch@invalid.test`,
+    categoryId: cat.id,
+    baseAmountMinor: 1000,
+    amountMinor: 1000,
+    createdAt: new Date('1970-01-01T00:00:00.000Z'),
+  });
+
+  const dry = await scheduler.purgeOldDonations({ dryRun: true });
+  assert.ok(dry.implausible >= 1, 'the implausible row is COUNTED and reported');
+  assert.equal(dry.floor, scheduler.PLAUSIBLE_FLOOR.toISOString(), 'the floor is reported');
+
+  // The real run must leave it alone. A zero-epoch date is evidence of a
+  // migration defect, and deleting the evidence is the worst response.
+  await scheduler.purgeOldDonations();
+  assert.ok(
+    await repos.donations.findById(zeroEpoch.id),
+    'a donation dated 1970 must SURVIVE - it is a data defect, not an old donation'
+  );
+
+  // A future date is the same class of defect and is excluded the same way.
+  const future = await repos.donations.create({
+    donorName: 'ZZZ',
+    donorEmail: `${TAG}-future@invalid.test`,
+    categoryId: cat.id,
+    baseAmountMinor: 1000,
+    amountMinor: 1000,
+    createdAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+  });
+  const after = await scheduler.purgeOldDonations({ dryRun: true });
+  assert.ok(after.implausible >= 2, 'a future-dated row counts as implausible too');
+  assert.ok(await repos.donations.findById(future.id));
+});
+
 test('the retention purge spares recent donations and reports its cutoff', async () => {
   // Inert in practice until Phase 4 loads data, so what is asserted is that it
   // computes the right window and does not touch anything inside it.

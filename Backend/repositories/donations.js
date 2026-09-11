@@ -153,6 +153,12 @@ async function create(input, tx) {
       status: input.status || 'Pending',
       paymentStatus: input.paymentStatus || 'Pending',
       ...(input.donatedAt ? { donatedAt: new Date(input.donatedAt) } : {}),
+      // The Phase 4 ETL must preserve the original row timestamps rather than
+      // stamping every migrated donation with the import time - otherwise the
+      // retention window resets at cutover and the purge becomes a no-op for
+      // another decade. Accepted here so the ETL has no reason to reach past
+      // this layer. Also what lets AG1a's floor be tested.
+      ...(input.createdAt ? { createdAt: new Date(input.createdAt) } : {}),
     },
     select: SELECT,
   });
@@ -261,16 +267,48 @@ async function listStatusesInUse(tx) {
   return rows.map((r) => r.status);
 }
 
-/** Rows older than `cutoff`. Backs the retention purge (BUG-04). */
-async function countOlderThan(cutoff, tx) {
-  return client(tx).donation.count({ where: { createdAt: { lt: new Date(cutoff) } } });
+/**
+ * Rows inside the retention window. Backs the purge (BUG-04).
+ *
+ * THE WINDOW IS BOUNDED AT BOTH ENDS (AG1a). `{ lt: cutoff }` alone treats
+ * "impossibly old" as "old", and that is not theoretical: the Phase 4 ETL
+ * carries dates from MongoDB, where the Mongoose schema never enforced them
+ * (SPEC-1A section 8). A row arriving with a zero epoch, a mis-parsed string or
+ * a 1970 default lands INSIDE the ten-year window, and the first admin to click
+ * cleanup after cutover destroys it - a donation record lost to a date bug
+ * nobody would connect to an admin endpoint.
+ *
+ * `floor` is the earliest date that can plausibly be a real donation. Rows
+ * below it are NOT deleted; they are counted and reported, because an
+ * implausible date is evidence of a migration defect and deleting the evidence
+ * is the worst available response.
+ *
+ * NOTE THE COLUMN: `createdAt`, not `donatedAt`. That matches the legacy
+ * dataCleanupService this replaces, and it is deliberately unchanged here - but
+ * see ADR-054, because which column the retention policy should key on is a
+ * real question and the ETL's treatment of `created_at` decides whether this
+ * job does anything at all after cutover.
+ */
+async function countOlderThan(cutoff, floor, tx) {
+  return client(tx).donation.count({
+    where: { createdAt: { lt: new Date(cutoff), gte: new Date(floor) } },
+  });
 }
 
-async function deleteOlderThan(cutoff, tx) {
+async function deleteOlderThan(cutoff, floor, tx) {
   const res = await client(tx).donation.deleteMany({
-    where: { createdAt: { lt: new Date(cutoff) } },
+    where: { createdAt: { lt: new Date(cutoff), gte: new Date(floor) } },
   });
   return res.count;
+}
+
+/** Rows dated before the plausible floor, or in the future. NEVER deleted. */
+async function countImplausibleDates(floor, now, tx) {
+  return client(tx).donation.count({
+    where: {
+      OR: [{ createdAt: { lt: new Date(floor) } }, { createdAt: { gt: new Date(now) } }],
+    },
+  });
 }
 
 /** Test and ETL support: remove rows by donor-email prefix. Never used at runtime. */
@@ -291,6 +329,7 @@ module.exports = {
   listStatusesInUse,
   countOlderThan,
   deleteOlderThan,
+  countImplausibleDates,
   deleteByDonorEmailPrefix,
   normalise,
 };

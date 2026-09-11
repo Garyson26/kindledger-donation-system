@@ -2242,3 +2242,117 @@ deferred to 3.6: `services/scheduler.js` already reimplements its work against
 MySQL, so the retirement is a repoint of three admin endpoints, and it removes a
 reader of `Donation`, `User` and `PendingSignup` at once. The reachability
 finding it concealed is recorded as BUG-10 in the remediation map.
+
+---
+
+## ADR-054 — The retention purge keys on `created_at`, and the ETL decides whether it works at all
+
+**Status** Open — AG1b. Recorded for Phase 4; the guard it needs is built.
+
+The purge deletes rows where **`created_at`** is older than ten years. That
+matches the legacy `dataCleanupService` it replaces and is deliberately
+unchanged, but two things follow that are not obvious.
+
+**1. `created_at` is not `donated_at`.** The schema carries both:
+`donated_at` is commented "Mongo `date`. The field all reports filter on", and
+every admin filter and chart uses it. The retention policy therefore keys on
+when the ROW WAS WRITTEN while every report keys on when the DONATION
+HAPPENED. For rows created through the application those are minutes apart and
+the distinction never shows. For migrated rows they can differ by years.
+
+Which one a ten-year retention policy *should* use is a real question and not
+mine to settle: "we keep donation records for ten years" reads as being about
+the donation. Left as `created_at` for now because changing it silently would
+be worse than either answer.
+
+**2. If the ETL stamps `created_at` at import time, this job becomes a no-op
+for a decade.** `created_at` is `DEFAULT CURRENT_TIMESTAMP(3)`, so an ETL that
+does not set it explicitly gives every migrated donation today's date. The
+purge then finds nothing until 2036 — silently, because "no rows older than
+ten years" is exactly what a healthy system reports. `repositories/donations.create`
+now accepts `createdAt` so the ETL has no reason to reach past the data layer.
+
+**Phase 4 verification harness must assert:** no migrated row has `created_at`
+or `donated_at` outside a sane range, and **report** any it finds rather than
+correcting them (AG1b). A date that cannot be right is evidence about the
+migration, and a harness that quietly repairs it destroys the only signal that
+something went wrong.
+
+**Already built (AG1a):** `purgeOldDonations` bounds the window at BOTH ends
+against `PLAUSIBLE_FLOOR` (2000-01-01), counts rows outside it as
+`implausible`, refuses to delete them, and warns. Tested with a zero-epoch row
+and a future-dated row, both asserted to survive a real purge.
+
+---
+
+## ADR-055 — Read dependency is not the only ordering constraint: FOREIGN KEY DIRECTION is the other, and it reverses packages 3.2 and 3.3
+
+**Status** Open — **blocks package 3.2 as sequenced. Needs approval to swap.**
+
+AD2 re-derived the package order by READ dependency and that analysis stands.
+It is also **incomplete**, and package 3.2 hit the gap on its first real
+attempt.
+
+**The constraint AD2 missed.** `donations.user_id` is
+`BIGINT UNSIGNED NULL` with `CONSTRAINT fk_donations_user FOREIGN KEY (user_id)
+REFERENCES users (id)`. Users do not migrate until 3.3. So **a donation by a
+registered user cannot be written to MySQL in 3.2** — the referenced row does
+not exist and InnoDB refuses the insert. Guest donations (`user_id NULL`) are
+fine; every registered donation is not.
+
+This is not a read problem, so no amount of read-dependency analysis finds it.
+Reads can be bridged — that is what a read-through bridge IS. **A foreign key
+cannot be bridged**, because the constraint is enforced inside one database
+against rows that are in another.
+
+**The three ways out, and two are closed.**
+
+- **Store `user_id` as NULL during 3.2 and backfill in 3.3.** Every donation
+  made in that window loses its attribution, and donor attribution is the
+  substance of the record. Refused.
+- **Shadow-create a MySQL user row whenever a donation references one.** This
+  is **exactly the AF2 stop trigger**: "any entity needing a WRITE path through
+  the bridge". It also needs a consistency guarantee across the two stores, the
+  third trigger. Two of the three. Refused, and reported rather than
+  implemented, which is what AF2 asked for.
+- **Swap 3.2 and 3.3.** Migrate `auth.js` + `users.js` + `middleware/` first,
+  so `users` is populated before anything references it.
+
+**Recommended order:**
+
+| Pkg | File(s) | Was |
+|---|---|---|
+| 3.2 | `auth.js` + `users.js` + `middleware/` | 3.3 |
+| 3.3 | `donations.js`, and retire `dataCleanupService` | 3.2 |
+| 3.4 | `payment.js` | unchanged |
+| 3.5 | `admin.js` | unchanged |
+| 3.6 | Mongoose removal | unchanged |
+
+Nothing else moves, and the read-dependency reasoning is untouched — the swap
+is compatible with it, because neither file reads data the other writes in a
+way that a bridge cannot cover. The `User` bridge is now introduced in 3.2 as
+part of the user package rather than by the donations package, which is also
+where it more naturally belongs.
+
+**The corrected principle, stated in full:**
+
+> Sequence by READ DEPENDENCY, subject to FOREIGN KEY DIRECTION. A table cannot
+> migrate before the tables it references. Reads can be bridged; references
+> cannot.
+
+The FK order in this schema is: `categories` and `users` first (neither
+references anything), then `donations` (references both), then
+`donation_payment_details` (references `donations`). Package 3.1 migrated
+`categories`, which is why it worked. `users` is the other root and should
+therefore have been second on this criterion as well as on the security one.
+
+**How it was found, which is the argument for the coverage rule.** Not by
+reading the schema — it had been read several times — but by attempting the
+migration and asking what a `Donation` row would actually contain. The
+characterisation baseline for 3.2 was already written and green, so the cost of
+discovering this was one analysis rather than a broken package.
+
+**What is already done and survives the swap:** the 24-scenario donations
+characterisation baseline (it pins the CURRENT Mongoose behaviour, which the
+swap does not change), AG1a's purge floor, and the `createdAt` support in
+`repositories/donations.create`.

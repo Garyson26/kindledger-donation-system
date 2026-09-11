@@ -56,14 +56,46 @@ function tenYearsAgo(now = new Date()) {
  * will delete a decade of accumulated rows in one pass and nobody currently
  * knows how many that is.
  */
+/**
+ * The earliest date that can plausibly be a real donation (AG1a).
+ *
+ * Not a guess at the organisation's founding date - a floor below which a value
+ * is certainly a defect rather than history. A donation dated 1969 is a zero
+ * epoch; one dated 1900 is a parse failure. Neither is a donation.
+ */
+const PLAUSIBLE_FLOOR = new Date('2000-01-01T00:00:00.000Z');
+
 async function purgeOldDonations({ dryRun = false, now = new Date() } = {}) {
   const cutoff = tenYearsAgo(now);
-  const candidates = await donations.countOlderThan(cutoff);
-  if (dryRun || candidates === 0) {
-    return { cutoff: cutoff.toISOString(), candidates, deleted: 0, dryRun: Boolean(dryRun) };
+
+  // Counted FIRST and reported whatever happens next. An implausible date is
+  // evidence of a migration defect, and this job must never be the thing that
+  // destroys the evidence.
+  const implausible = await donations.countImplausibleDates(PLAUSIBLE_FLOOR, now);
+
+  const candidates = await donations.countOlderThan(cutoff, PLAUSIBLE_FLOOR);
+  const base = {
+    cutoff: cutoff.toISOString(),
+    floor: PLAUSIBLE_FLOOR.toISOString(),
+    candidates,
+    implausible,
+  };
+
+  if (implausible > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[scheduler] ${implausible} donation(s) are dated before ` +
+        `${PLAUSIBLE_FLOOR.toISOString()} or in the future. They are EXCLUDED from the ` +
+        'purge. This is a data defect - investigate rather than widening the floor (AG1a).'
+    );
   }
-  const deleted = await donations.deleteOlderThan(cutoff);
-  return { cutoff: cutoff.toISOString(), candidates, deleted, dryRun: false };
+
+  if (dryRun || candidates === 0) {
+    return { ...base, deleted: 0, dryRun: Boolean(dryRun) };
+  }
+
+  const deleted = await donations.deleteOlderThan(cutoff, PLAUSIBLE_FLOOR);
+  return { ...base, deleted, dryRun: false };
 }
 
 /**
@@ -108,9 +140,16 @@ function initializeScheduler() {
           // eslint-disable-next-line no-console
           console.log('[scheduler] retention purge', JSON.stringify(result));
         } catch (err) {
-          // A failed scheduled job must never take the process down.
+          // A failed scheduled job must not take the process down - but it must
+          // not look like a quiet success either. The legacy
+          // dataCleanupService returned 0 from its catch, which made a partial
+          // delete indistinguishable from a clean no-op to every caller
+          // INCLUDING the log line, which was the only record (BUG-10).
           // eslint-disable-next-line no-console
-          console.error('[scheduler] retention purge failed:', err && err.message);
+          console.error(
+            '[scheduler] retention purge FAILED - rows may have been partially deleted:',
+            err && err.stack ? err.stack : err
+          );
         }
       },
       { timezone: TIMEZONE }
@@ -161,5 +200,6 @@ module.exports = {
   sweepExpiredSignups,
   enabled,
   RETENTION_YEARS,
+  PLAUSIBLE_FLOOR,
   tenYearsAgo,
 };
