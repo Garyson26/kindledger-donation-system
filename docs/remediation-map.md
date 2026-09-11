@@ -113,7 +113,7 @@ assertion was vacuous; here it was real but tested the wrong property.
 
 **Retroactive application is deliberately deferred.** `payment-callbacks.test.js:355`
 should assert a 4xx and the absence of a thrown error rather than only the
-donation state. That change belongs in **package 3.5**, alongside the SEC-14
+donation state. That change belongs with **`payment.js`'s migration**, alongside the SEC-14
 fix, not now - editing a regression suite before the code it guards is changed
 would break the "suites pass unchanged" property that every package between here
 and there depends on.
@@ -213,16 +213,19 @@ established what donor action produces that callback versus an ordinary failure,
 and PayU's own vocabulary does not cleanly separate them - a realistic
 cancellation arrives as `status=failure` with `unmappedstatus=usercancelled`
 (ADR-021). Until it is settled, the meaning of the `Cancelled` enum member is
-unclear, which affects the admin filter, the Phase 4 ETL's status mapping, and
+unclear, which affects the admin filter, the 4a ETL's status mapping, and
 any report that counts cancellations.
 
-**SPLIT (AC2). The code goes to 3.2; the data question goes to the J3 session.**
+**SPLIT (AC2). The code goes with `donations.js`; the data question goes to
+the J3 session in 4b.** The code half said "3.2" when 3.2 meant donations; the
+ADR-055 swap made 3.2 mean auth, and the assignment silently became wrong. A
+trigger would not have moved.
 
 PayU documents only `success` and `failure` as signed statuses. So the question
 to settle from production data is narrow and answerable: **has any donation ever
 actually reached `Cancelled`?** If none has, the enum carries a state nothing
 writes, and the decision is whether to keep it for future use or drop it -
-which is a Phase 4 schema question, not a Phase 3 handler question.
+which is a 4a schema question, not a route-handler question.
 
 3.2 therefore treats `Cancelled` as a value that may legitimately exist in the
 data and must round-trip, and does not attempt to decide what produces it.
@@ -335,7 +338,7 @@ Not exploitable for payment fraud. It is an unauthenticated remote 500 on a
 public endpoint, and it is the finding the review actually raised - "malformed
 hash input crashes response verification" - still true.
 
-**Assigned to package 3.5.** Fix: validate `/^[0-9a-f]{128}$/i` before decoding.
+**Trigger: `payment.js` migrates.** Fix: validate `/^[0-9a-f]{128}$/i` before decoding.
 Verification: extend the existing test to assert the response status, not only
 the donation state.
 
@@ -367,13 +370,24 @@ here - it is simply older than the fix. Marked closed below.**
 **SEC-04 is deliberately absent from this table.** Half of it is closed -
 `app.set('trust proxy', 1)` is at `app.js:50` and proven through Nginx. The
 limiter store is not wired; `routes/auth.js:19-25` still constructs a default
-in-memory limiter. Per ADR-042 the finding stays open until package 3.4 swaps
-the import. Reporting it closed on the strength of the store existing is
+in-memory limiter. Per ADR-042 the finding stays open until **`auth.js` migrates**
+and swaps the import. Reporting it closed on the strength of the store existing is
 precisely the error ADR-042 was written to prevent.
 
 ---
 
-## Package 3.1 - COMPLETE
+## Package 3.1 - NOT COMPLETE. Re-opened as 3.1r by ADR-056.
+
+**The route migration below is correct for records created in MySQL and WRONG
+for every record that predates it.** A category that exists only in MongoDB is
+invisible to `GET /api/categories` and 404s on edit and delete. Re-opened as
+3.1r: once 4a can migrate the categories data locally, the route is re-verified
+against it and an AK3 fixture is added. The findings it closed (SEC-19, BUG-08,
+BUG-09, the falsy-amount check, ADR-004) are unaffected - they are properties of
+the handler, not of where the data lives.
+
+The original closure notes follow, and remain accurate about everything except
+completeness.
 
 `routes/categories.js` is migrated to MySQL and imports no Mongoose. The blocker
 recorded here previously (ADR-050) was resolved by AD1: Option D, a read-through
@@ -415,7 +429,7 @@ without them, "the category endpoints still work" would have been an opinion.
 
 | | |
 |---|---|
-| ADR-051 | The external id stays a 24-hex ObjectId for the rest of Phase 3, because `Donation.category` is a required ObjectId ref. **Phase 4 must not read `legacy_id IS NULL` as "created after cutover".** |
+| ADR-051 | The external id stays a 24-hex ObjectId for the rest of Phase 3, because `Donation.category` is a required ObjectId ref. **The 4a ETL must not read `legacy_id IS NULL` as "created after cutover".** |
 | ADR-050 exit condition | `categoryBridge.fallbackCount()` must be zero over a real run before the bridge is deleted in 3.6 |
 | incidental | `donations.js:265` populated `"name description price"`; two of those three are not fields on the Category schema, so it only ever returned `name`. The bridge returns the whole category - a superset. Flagged for 3.2. |
 
@@ -425,7 +439,7 @@ without them, "the category endpoints still work" would have been an opinion.
 
 **Severity** Medium. **Provenance X** - found by the AD2 read-dependency
 analysis, which enumerates callers rather than reasoning about purpose.
-**Owning package 3.2.**
+**Trigger: `dataCleanupService` is retired, which happens with `donations.js`.**
 
 `POST /api/admin/cleanup/trigger` (`admin.js:281`) calls
 `triggerManualCleanup()`, which deletes donations older than ten years, and
@@ -458,7 +472,7 @@ users older than ten years who have no donations.
 Taken together: the one operation in the system that destroys donor records has
 the weakest feedback of any endpoint in it.
 
-**Mechanism.** Retire `dataCleanupService.js` in package 3.2 and repoint the
+**Mechanism.** Retire `dataCleanupService.js` with `donations.js` and repoint the
 endpoint at `services/scheduler.js`, which already implements the same retention
 rules against MySQL and takes a `dryRun` flag. Make the dry run the default, so
 a real delete requires an explicit parameter. Return the counts rather than
@@ -474,11 +488,11 @@ statements about one caller and about all callers.
 
 ---
 
-## BUG-11 - a refused request names its reason under three different keys
+## BUG-11 (CLOSED) - a refused request named its reason under three different keys
 
 **Severity** Low. **Provenance X** - found while writing package 3.2's
 characterisation tests; the refusal helper had to be widened to accept a third
-key name. **Owning package 3.3** (it lives in the middleware).
+key name. **CLOSED** - fixed ahead of the reason-asserting suites, per AG2.
 
 Route handlers answer `{error}`, `adminAuth` answers `{message}`, and
 `authMiddleware` answers `{msg}`. Counted across the middleware and
@@ -597,8 +611,8 @@ availability failure standing in for an access control.
 
 **Standing instruction for whoever restores Atlas: the deploy-before-restore
 ordering now guards TWO findings, not one.** SEC-03 becomes reachable the
-instant those credentials are fixed. It is not closed until package 3.2 merges
-**and deploys**.
+instant those credentials are fixed. It is not closed until **`auth.js` migrates**,
+merges **and deploys**.
 
 **Do not write a Mongo-side hotfix for it.** Sanitising the query on the old
 stack duplicates work the migration deletes, and parameterised SQL closes the
@@ -694,7 +708,86 @@ a package decision.
 
 ---
 
-## Corrected package sequence (AD2) and the Phase 3 exit criteria
+## The three ordering constraints, in order of precedence (AK2)
+
+Each was found by hitting it. None was found by planning.
+
+| # | Constraint | Found by | Governs |
+|---|---|---|---|
+| **1** | **Data location** (ADR-056). A route's LIST and WRITE paths cannot migrate before that entity's DATA has migrated. Single-record reads can be bridged; lists and writes cannot, because they address a STORE rather than a record. | Probing a Mongo-only category against the migrated route: `GET` returned `[]` | Everything. It subordinates both the others |
+| **2** | **Foreign key direction** (ADR-055). A table cannot migrate before the tables it references. Reads can be bridged; references cannot, because the constraint is enforced inside one database against rows in another. | Attempting to write a donation whose `user_id` referenced a MySQL row that did not exist | Which entity before which |
+| **3** | **Read dependency** (AD2). A file is safe to migrate when everything reading its data has moved, or when a bridge exists. | Finding that `categories.js` has the smallest write surface and the largest read surface | Which FILE before which, once 1 and 2 are satisfied |
+
+**The original criterion - the size of the file being changed - was wrong
+entirely**, not merely incomplete. It is a property of the work; every real
+constraint above is a property of the data. Sequencing by how much typing a
+package involves has no relationship to what makes a package safe.
+
+Worth stating plainly: three corrections, each one found by attempting the work
+rather than by analysing it harder. The analysis got better each time and still
+missed the next constraint, because each was invisible from where the previous
+one was standing.
+
+---
+
+## The suite-provenance rule (AK3) - SPEC-3 §1 amendment
+
+> **Every characterisation suite must include at least one fixture created in
+> the OLD store and NOT migrated, and must assert the endpoint behaves correctly
+> against it.**
+
+**Why the existing rule was not enough.** Every suite creates its fixtures
+through the `store` seam. After the seam switches, the suite writes to the NEW
+store - so it migrates its own data along with the route and then asserts the
+route works on it. The categories suite was green 22/22 before and after, and
+not one scenario exercised a record that predated the migration. Meanwhile the
+endpoint returned `[]` for every real category.
+
+The coverage rule was followed to the letter. It says to pin the endpoint's
+BEHAVIOUR and says nothing about the PROVENANCE of the data it is pinned
+against, and that gap is exactly the size of ADR-056.
+
+**AE3 had already made this point about a different control:** "a database of
+only new records cannot take the fallback path, so it proves nothing". Identical
+reasoning, written three packages earlier, about the bridge's exit check.
+Neither of us generalised it to the suites.
+
+**So record the meta-lesson too: a rule stated about one control does not
+propagate to the others on its own.** It has to be restated, deliberately, at
+each place it applies. AE3 was correct and specific and therefore stayed
+specific.
+
+**Retroactive**: apply to `categories-characterisation` (22) and
+`donations-characterisation` (24) before either package is considered closed.
+
+---
+
+## Revised sequence (AK5)
+
+| Pkg | Work | Trigger |
+|---|---|---|
+| **4a** | The ETL: schema-aware transform for all five entities, run LOCALLY, with the SPEC-1A §8 pre-flight reports. Report-only, never silently correct | none - it is the root |
+| **3.1r** | Categories data migrated locally; route re-verified; AK3 fixture added | 4a exists |
+| **3.2** | `auth.js` + `users.js` + `middleware/` - completing what is already built | users data migrated |
+| **3.3** | `donations.js` + retire `dataCleanupService` | donations data migrated; users migrated (FK) |
+| **3.4** | `payment.js` | donations data migrated |
+| **3.5** | `admin.js` - last reader of every bridged entity | all bridged entities migrated |
+| **3.6** | Mongoose removal | no file imports Mongoose; `fallbackCount()` zero (AE3) |
+| **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
+
+**4a moving ahead does not reorder the phases** - it splits one. 4b stays last
+and is stronger for it: the ETL will have been exercised by five route packages
+against real data before it is ever pointed at production, instead of rehearsed
+once against a snapshot. Nothing on the critical path is blocked on credentials.
+
+---
+
+## Corrected package sequence (AD2) - SUPERSEDED BY AK5 ABOVE
+
+Kept because it records the read-dependency reasoning, which still holds as the
+THIRD constraint. The sequence table in it is out of date; AK5 is current.
+
+### The Phase 3 exit criteria (still current)
 
 **SPEC-3 section 2 sequenced by the size of the file being changed. That was the
 wrong criterion** - the risk is in the files NOT being changed. Re-derived by
@@ -771,18 +864,31 @@ rather than never broken.
 
 ---
 
-## Open findings, by owning package
+## Open findings, by OWNING FILE
 
-Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
-"Verification" is what proves it.
+**Keyed by file and TRIGGER, not by package number (AJ2).** "Mechanism" is how
+it gets fixed; "Verification" is what proves it.
 
-### Package 3.1 - `routes/categories.js`
+**These headings previously carried package numbers, and they were WRONG.** The
+ADR-055 swap renumbered the sequence and this section was not updated with it,
+so the map contained two contradictory numberings at once: the sequence table
+said 3.2 was auth, while this section still said 3.2 was donations. A reader
+following either one would have been right about half the time.
+
+That is the whole argument for AJ2. **A package number is a position; the real
+dependency is an event.** We have now reordered three times - write size, read
+dependency, foreign keys, and now data location - and each reorder invalidated
+every number written down and none of the triggers. The `*(trigger: ...)*` note
+is the durable part; the "currently N" is a convenience that will go stale
+again and is marked so nobody trusts it.
+
+### `routes/categories.js`  *(trigger: categories data migrated locally; currently 3.1r)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
 | - | - | **All closed. See "Package 3.1 - COMPLETE" above.** The one item deliberately left open is the non-atomic reorder, which moves to the transaction work. | | | |
 
-### Package 3.2 - `routes/donations.js`
+### `routes/donations.js`  *(trigger: donations data migrated; currently 3.3)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
@@ -795,7 +901,7 @@ Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
 | ADR-041 | - | `distinct()` must keep data semantics, not enum semantics | `donations.listStatusesInUse()` | Already tested in `test:data-layer`; route test asserts the endpoint's shape | **R** |
 | ADR-003 | - | Deleting a user preserves their donations - **behaviour change** | FK `ON DELETE SET NULL`; `donor.isGuest` distinguishes | Test: delete a donor, donation survives and stays attributable | **R** |
 
-### Package 3.3 - `routes/admin.js`
+### `routes/admin.js`  *(trigger: LAST reader of every bridged entity; currently 3.5)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
@@ -807,7 +913,7 @@ Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
 | BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` (`Backend/vercel.json:15-20`) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
 | BUG-08 | - | Unbounded pagination (`admin.js:80`) | As 3.1 | As 3.1 | **R** |
 
-### Package 3.4 - `routes/auth.js` + `middleware/` + seam
+### `routes/auth.js` + `routes/users.js` + `middleware/`  *(trigger: users data migrated; currently 3.2)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
@@ -823,7 +929,7 @@ Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
 | ADR-033 | - | Duplicate index declarations in the Mongoose models | Moot once the models go (3.6); must not be reintroduced in the Prisma schema | Drift gate; boot logs free of the Mongoose duplicate-index warning | **X** |
 | SEC-09 | Medium | Donor PII written to application logs | Strip PII; level-aware logger | Assert no PII in captured log output | **R** (ADR-032 upgraded the evidence to observed - **X**) |
 
-### Package 3.5 - `routes/payment.js` + remaining seam
+### `routes/payment.js` + remaining seam  *(trigger: donations data migrated; currently 3.4)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
@@ -836,7 +942,7 @@ Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
 | ADR-024 §3 / ADR-026 / ADR-027 | - | No security decision may rest on an unsigned field; unsigned text must be escaped per sink | Keep the `verifyHash` banner; escape at each sink, not at ingest | Test asserts `unmappedstatus` cannot drive the decision | **R** |
 | SPEC-3 §4.6 | - | Alternate-case parser fallbacks (`.AMOUNT`, `.STATUS`, `udf_4`, `udf[4]`) | Delete them; keep the banner comment | Tests unchanged - they are unreachable today | **R** |
 
-### Package 3.6 - Mongoose removal
+### Mongoose removal  *(trigger: no file imports Mongoose; currently 3.6)*
 
 Exit criteria are SPEC-3 section 7. The map's own condition: every Phase 3
 finding above is closed or explicitly deferred, and SEC-04 is reported closed
@@ -850,17 +956,34 @@ with its wiring commit, reversing the Phase 2 report.
 
 ## Deferred to later phases
 
-### Phase 4 - ETL and cutover
+### Phase 4a - the ETL itself  *(moves ahead of the route migrations, AK1)*
+
+**Nothing here needs production access.** Built and run locally against seeded
+and synthetic data; each route package migrates its entity's data in the local
+database before migrating the route. That is what makes the route migrations
+possible at all (ADR-056), and it means the ETL is exercised five times by real
+packages rather than rehearsed once against a snapshot.
 
 | ID | Finding / constraint | Prov |
 |---|---|---|
-| ADR-013 | The ETL must never use `INSERT IGNORE` / `UPDATE IGNORE` | **X** (found by a schema test) |
-| ADR-018 | The ETL must count mixed-case status values before insert; supersedes SPEC-1A's assumption that MySQL rejects them - it does not, `_ci` collation canonicalises silently | **X** |
-| ADR-022 | The ETL must re-check strict SQL mode in its own preflight | **R** |
+| ADR-013 | Never `INSERT IGNORE` / `UPDATE IGNORE` | **X** (found by a schema test) |
+| ADR-018 | Count mixed-case status values before insert; supersedes SPEC-1A's assumption that MySQL rejects them - it does not, `_ci` collation canonicalises silently | **X** |
+| ADR-022 | Re-check strict SQL mode in its own preflight | **R** |
 | ADR-025 | `gateway_status` will be NULL for the entire paid population at cutover | **R** |
+| ADR-054 | Assert no migrated row has `donated_at` or `created_at` outside a sane range, and **report** rather than correct | **R** |
+| ADR-051 | `legacy_id` is populated for rows that were never in MongoDB, so it does NOT mean "migrated" during the Phase 3 window | **R** |
+| SPEC-1A §8 | The five pre-flight reports: case-variant emails, mixed-case status, float-to-paise, amount vs base+extra, orphaned category refs. **Report-only; never silently correct** | **R** |
+
+### Phase 4b - the production cutover  *(stays last)*
+
+**Everything credential-blocked lives here, and nothing else depends on it.**
+
+| ID | Finding / constraint | Prov |
+|---|---|---|
 | ADR-031 | The rollback window closes at the first real donation into MySQL | **R** |
-| J3 | Admin account enumeration, the `Password@123` check, the `PendingSignup` TTL index check. **Blocked on a dedicated read-only Atlas user.** SPEC-3 §8 requires flagging again when 3.4 completes | **R** |
-| - | A restored production snapshot to rehearse the ETL against. Same credential dependency | **R** |
+| J3 | Admin account enumeration, the `Password@123` check, the `PendingSignup` TTL index check. **Blocked on a dedicated read-only Atlas user** | **R** |
+| - | A restored production snapshot. Same credential dependency, but now a CONFIRMATION of an ETL already exercised locally rather than its first real run | **R** |
+| - | The freeze window and the cutover runbook | **R** |
 
 ### Phase 5 - frontend and dependencies
 
