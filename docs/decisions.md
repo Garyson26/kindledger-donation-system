@@ -1952,3 +1952,222 @@ violation rather than a silent overwrite.
 
 Phase 4 switches the wire format to the uuid once `Donation` is a MySQL row with
 a `BIGINT` foreign key and the ObjectId is no longer load-bearing.
+
+### AE1(a) — the ordering constraint, and it is a HARD one
+
+**A minted `legacy_id` is distinguishable from a real one ONLY while MongoDB
+still exists.** The test is exact: look the value up in the `categories`
+collection. A row means it is genuine; no row means it was minted here. That
+oracle is destroyed the moment Mongo is deleted, and it is destroyed
+PERMANENTLY — there is no way to recover the distinction afterwards.
+
+Get the order wrong and minted values become indistinguishable from genuine
+ones forever. A fresh open-source install would then carry fabricated ObjectIds
+in a column whose `COMMENT` says it holds real MongoDB identifiers, and every
+future reconciliation, support query and data-provenance question would be
+answered wrongly with complete confidence.
+
+**PACKAGE 3.6 EXIT CRITERIA, IN THIS ORDER. The order is the whole control:**
+
+1. For every category with a non-NULL `legacy_id`, look it up in MongoDB.
+   **If absent, set `legacy_id` to NULL.**
+2. **Only then** delete MongoDB.
+
+**Do not use ObjectId timestamp heuristics to decide which is which.** The
+first four bytes are a timestamp, so it is tempting to treat "created after the
+3.1 merge" as minted. That is a guess dressed as a fact: a genuine category
+created in the same window would be NULLed, and a minted one whose clock was
+skewed would survive. The lookup is a fact. The heuristic is a plausible story,
+and the difference only becomes visible long after the evidence is gone.
+
+### AE1(b) — stop minting when `donations.js` migrates
+
+Minting exists for exactly one reason: `Donation.category` is an ObjectId ref.
+**The moment `donations.js` migrates and that column becomes a `BIGINT` foreign
+key, the reason is gone.** Every value minted after that point is avoidable
+cleanup — more rows for step 1 above to visit and NULL, created for no benefit.
+
+Recorded as a task on whichever package migrates `donations.js`: remove
+`mintObjectId()` from `routes/categories.js` and let `legacy_id` stay NULL for
+new rows, which is what SPEC-1A section 4.1 says it means.
+
+### AE1(c) — SPEC-1A section 4.1 is temporarily false, and is corrected here
+
+SPEC-1A section 4.1 states that `legacy_id` is NULL for rows created after
+cutover, so that a non-NULL value identifies a migrated row.
+
+**That invariant does not hold during the Phase 3 window.** From package 3.1
+until `donations.js` migrates, categories created through the API carry a minted
+`legacy_id` and were never in MongoDB. Anything relying on the invariant in that
+window — an ETL reconciliation, a provenance report, a "which rows came from
+the old system" query — gets the wrong answer with no error.
+
+The exception is bounded and self-correcting: AE1(b) stops new ones being
+created, and AE1(a) step 1 removes the ones that exist. **After package 3.6 the
+SPEC-1A invariant is true again**, and it is true because it was restored
+deliberately rather than because it was never broken.
+
+---
+
+## ADR-052 — Bridges return requested fields only; the fallback exit check, defined
+
+**Status** Accepted — AE2 and AE3. Applies from package 3.2.
+
+### AE2 — narrow the return rule
+
+Package 3.1's write-up said of the category bridge returning the whole record
+rather than the three fields `donations.js` asked for: "a superset, so nothing
+can break on it". **That is true for Category and wrong as a general rule**, and
+the generalisation is the dangerous part because the next two packages bridge
+`User` and `Donation`.
+
+A superset can break a caller three ways, none hypothetical here:
+
+1. **Anything that iterates keys.** A frontend rendering `Object.entries`, a CSV
+   exporter building its header row from the first record, a PDF table. Each
+   gains a column nobody asked for, and the CSV case silently changes the shape
+   of an export an NGO may be reconciling against.
+2. **Anything that serialises the record onward.** A receipt, an email
+   template, a webhook payload.
+3. **Disclosure.** `Category` has nothing sensitive. `User` has
+   `passwordHash`, `resetPasswordCode`, `loginOTP` and `resetPasswordAttempts`;
+   `Donation` has donor name, email and phone. A bridge that returns "the whole
+   record" on those is an information leak wearing the clothes of a
+   compatibility shim — and it would be introduced by a package whose stated
+   purpose is to change nothing.
+
+**The rule, from 3.2 onwards: a bridge returns the fields the caller requested,
+not the whole record** — unless the record has been explicitly checked for
+fields that must not cross the boundary, and that check is written down.
+
+For the `User` bridge specifically, the three existing call sites all request
+`"name email"`. The bridge returns those two and nothing else, and the field
+list is an allowlist rather than a denylist, because a denylist is wrong the
+first time a column is added.
+
+The Category bridge is left as it is. Its superset is already relied upon by
+the corrected `donations.js` behaviour, it carries nothing sensitive, and
+changing it now would be a second behaviour change to a package already
+verified — recorded as a known exception rather than silently excluded.
+
+### AE3 — the fallback exit check, made checkable
+
+`fallbackCount()` returning zero "over a real run" is not yet a condition anyone
+can verify, and a vague exit condition on a deletion is how a bridge survives.
+The failure mode is specific: someone runs the unit tests, sees zero, and
+deletes a bridge that was never exercised on the path that needed it.
+
+**The condition, both parts required:**
+
+1. **Zero fallbacks across the FULL test suite** — every suite, not the one
+   that looks relevant. Asserted, not eyeballed: the package that removes a
+   bridge adds a check that reads `fallbackCount()` after the suite and fails
+   if it is non-zero.
+2. **Zero fallbacks across a manual exercise of every migrated route**, against
+   a database holding BOTH migrated and post-3.1 records. The second half of
+   that sentence is the point. A database containing only records created after
+   the migration cannot take the fallback path at all, so it proves nothing; the
+   fixture has to contain rows of both provenances for the check to mean
+   anything.
+
+Part 1 without part 2 is the trap. Part 2 without part 1 misses the paths no
+human thinks to click.
+
+### AD2 — the corrected package order, re-derived by read dependency
+
+SPEC-3 section 2 sequenced by the size of the file being changed.
+**The corrected principle: sequence by READ DEPENDENCY.** A file is safe to
+migrate when everything reading its data has already moved, or when a bridge
+exists. The risk lives in the files that are NOT being changed.
+
+**The dependency map, built from source after package 3.1:**
+
+| Collection | Written by | Read by |
+|---|---|---|
+| `Category` | `categories.js` **(migrated)** | `payment.js`, `donations.js`, `admin.js` **(all bridged)** |
+| `PendingSignup` | `auth.js` | `auth.js`, `dataCleanupService` |
+| `Donation` | `donations.js`, `payment.js`, `dataCleanupService` | + `admin.js` |
+| `User` | `auth.js`, `users.js`, `admin.js`, `dataCleanupService` | + `authMiddleware`, `adminAuth`, `donations.js`, `payment.js` |
+
+`BrandingSettings` has no MongoDB model and no consumer; it is a Phase 2 MySQL
+table waiting for Phase 5. Nothing to sequence.
+
+**`dataCleanupService` is live-reachable and had been treated as dead.**
+`routes/admin.js:13` imports `triggerManualCleanup`, `cleanupOldDonations` and
+`cleanupInactiveUsers`. BUG-04 means the *cron* never fires, which is what made
+it look inert — but an admin can still invoke it by hand, and it DELETES
+donations and users. It is therefore a reader and a writer of three collections,
+and it was not in the sequencing picture at all.
+
+**Retiring it is the single largest simplification available.** Phase 2's
+`services/scheduler.js` already reimplements its work against MySQL, so
+repointing `admin.js`'s three endpoints and deleting the legacy service removes
+a reader of `Donation`, `User` AND `PendingSignup` in one change — and takes
+`PendingSignup` down to a single reader (`auth.js`), so **`PendingSignup` needs
+no bridge at all.**
+
+**Why `User` cannot avoid a bridge.** Its readers are `auth.js`, `users.js`,
+`admin.js`, both middlewares, `donations.js` and `payment.js` — effectively
+the whole application, because every authenticated request passes through
+`authMiddleware`. Avoiding a bridge would mean migrating all of them in one
+package, which abandons the incremental model and the coverage rule together.
+
+**Why `Donation` cannot avoid one either.** It is written by `donations.js` and
+`payment.js` and read by both plus `admin.js`. The split appears the moment the
+FIRST writer migrates, so avoiding a bridge means one package containing the
+three largest files in the project.
+
+**The corrected order:**
+
+| Pkg | File(s) | Introduces | Retires |
+|---|---|---|---|
+| **3.2** | `donations.js`, and retire `dataCleanupService` | `Donation` bridge, `User` bridge | `dataCleanupService`; `PendingSignup`'s second reader |
+| **3.3** | `auth.js` + `users.js` + `middleware/` | — | stop minting `legacy_id` (AE1b) once 3.2 lands |
+| **3.4** | `payment.js` | — | — |
+| **3.5** | `admin.js` | — | **`Category`, `Donation` and `User` bridges all deleted** |
+| **3.6** | Mongoose removal | — | AE1(a) step 1, then MongoDB |
+
+**What changed from SPEC-3, and why.**
+
+- `admin.js` moves from third to **last**. Under "size of the file" it was
+  third; under read dependency it is the LAST READER of all three bridged
+  collections, so putting it last is what allows every bridge to die in one
+  package instead of lingering.
+- `auth.js` + `middleware` moves from fourth to **second**. It is the largest
+  concentration of open security findings — SEC-03, SEC-04's wiring, SEC-05,
+  SEC-08, SEC-10, SEC-13 — and nothing in the read graph requires it to wait.
+  Sequencing by dependency happens to fix the security findings sooner, which is
+  a bonus rather than the reason.
+- `payment.js` stays late. Highest risk, best coverage, and by then the pattern
+  is proven. That reasoning survives the re-derivation intact.
+
+**Bridge count: two new, three alive at peak.**
+
+Two NEW bridges (`User`, `Donation`), which is the threshold. The third is
+`Category`, already built. All three are alive together from 3.2 until they are
+all deleted in 3.5.
+
+**They are three INSTANCES OF ONE MECHANISM, not three bespoke components**, and
+that distinction is what makes three acceptable where three unrelated shims
+would not be. Each is: validate the id shape, try MySQL, fall back to MongoDB,
+log and count. The recommendation is to generalise `categoryBridge.js` into one
+parameterised module in 3.2 rather than copy it twice — one place where the
+CastError guard lives, one `fallbackCount()` covering all three, and one file to
+delete in 3.5.
+
+**If that generalisation turns out not to fit** — if `User` or `Donation`
+needs materially different resolution logic rather than different parameters
+— that is the signal to stop and reconsider the shape of the middle of this
+phase, rather than to write a second and third bespoke bridge.
+
+### A note for 3.2's characterisation tests
+
+`donations.js:265` requested `populate("category", "name description price")`.
+Two of those three are not fields on the Category schema, so that call only ever
+returned `name` and `_id`. **Audited: it was the only one.** The three remaining
+populate calls all request `"name email"` on `User`, and both fields exist.
+
+The lesson stands regardless of the count: **3.2's characterisation tests must
+pin what the endpoint ACTUALLY returned, not what the code appears to ask for.**
+Reading the field list in a `populate()` call is reading an intention; only
+running it shows what the client received.

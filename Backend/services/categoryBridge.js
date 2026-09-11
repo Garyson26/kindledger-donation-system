@@ -23,6 +23,16 @@
  * THE FALLBACK IS NEVER SILENT (AD1a). Every hit logs a warning naming the id.
  * Silent fallback is precisely how a bridge becomes permanent: nothing ever
  * says it is still carrying traffic, so nobody can argue for deleting it.
+ *
+ * THIS BRIDGE RETURNS THE WHOLE RECORD. That is a KNOWN EXCEPTION to the rule
+ * in ADR-052 (AE2), which requires a bridge to return only the fields the
+ * caller asked for. It is allowed here for two reasons and neither generalises:
+ * a Category carries nothing sensitive, and the corrected donations.js
+ * behaviour already depends on the superset. The User and Donation bridges in
+ * package 3.2 MUST NOT copy this - User holds passwordHash, resetPasswordCode
+ * and loginOTP, and Donation holds donor name, email and phone. A bridge
+ * returning "the whole record" on those is an information leak wearing the
+ * clothes of a compatibility shim.
  * =============================================================================
  */
 

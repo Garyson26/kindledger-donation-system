@@ -421,6 +421,74 @@ without them, "the category endpoints still work" would have been an opinion.
 
 ---
 
+## Corrected package sequence (AD2) and the Phase 3 exit criteria
+
+**SPEC-3 section 2 sequenced by the size of the file being changed. That was the
+wrong criterion** - the risk is in the files NOT being changed. Re-derived by
+READ DEPENDENCY in ADR-052. A file is safe to migrate when everything reading
+its data has moved, or when a bridge exists.
+
+| Pkg | File(s) | Introduces | Retires |
+|---|---|---|---|
+| 3.1 | `categories.js` **(done)** | `Category` bridge | - |
+| **3.2** | `donations.js`, and retire `dataCleanupService` | `Donation` bridge, `User` bridge | `dataCleanupService`; `PendingSignup`'s second reader |
+| **3.3** | `auth.js` + `users.js` + `middleware/` | - | stop minting `legacy_id` (AE1b) |
+| **3.4** | `payment.js` | - | - |
+| **3.5** | `admin.js` | - | **all three bridges deleted** |
+| **3.6** | Mongoose removal | - | minted `legacy_id`s, then MongoDB |
+
+Two changes of position, both forced by the corrected criterion: `admin.js`
+moves from third to **last**, because it is the last reader of all three bridged
+collections and putting it last lets every bridge die in one package rather than
+lingering; `auth.js` + `middleware` moves from fourth to **second**, because
+nothing in the read graph requires it to wait and it holds the largest
+concentration of open security findings.
+
+**Bridge count: two new, three alive at peak** - and they are three instances of
+ONE mechanism, not three bespoke components. ADR-052 records that generalising
+`categoryBridge.js` into one parameterised module is the recommendation, and
+that needing materially different resolution logic rather than different
+parameters is the signal to stop.
+
+**`dataCleanupService` was live-reachable and had been treated as dead.**
+`admin.js:13` imports three of its functions, which DELETE donations and users.
+BUG-04 stops the cron firing, which is what made it look inert, but an admin can
+still invoke it. Retiring it removes a reader of `Donation`, `User` AND
+`PendingSignup` in one change, and takes `PendingSignup` to a single reader so
+it needs no bridge at all.
+
+### Phase 3 exit criteria, as amended
+
+SPEC-3 section 7, plus what AE1 and AE3 added. **The order of the first two is
+the control, not a preference.**
+
+| # | Condition | Why it is in this position |
+|---|---|---|
+| 1 | For every category with a non-NULL `legacy_id`, look it up in MongoDB; **if absent, NULL it** | A minted id is distinguishable from a genuine one ONLY while MongoDB exists. Do this after deleting Mongo and the distinction is gone permanently, and a fresh open-source install ships fabricated ObjectIds in a column documented as holding real ones. **No timestamp heuristics** - the lookup is a fact, the heuristic is a guess. |
+| 2 | Delete MongoDB | Only after 1 |
+| 3 | `fallbackCount()` zero across the **full** test suite, asserted rather than eyeballed | Part one of AE3 |
+| 4 | `fallbackCount()` zero across a manual exercise of every migrated route, against a database holding **both** migrated and post-3.1 records | Part two of AE3. A database of only new records cannot take the fallback path, so it proves nothing |
+| 5 | All three bridges deleted | Follows 3 and 4 |
+| 6 | No file under `Backend/` imports Mongoose; `config/db.js` and `models/` deleted | SPEC-3 section 7 |
+| 7 | `docker-compose.legacy-mongo.yml` deleted; plain `docker compose up` gives four healthy services | ADR-047 |
+| 8 | `mongoose` and `mongodb` out of `package.json`, both lockfiles regenerated; Mongo service out of `app-tests.yml` | SPEC-3 section 7 |
+| 9 | SEC-04 reported **closed** with its wiring commit, reversing the Phase 2 report | SPEC-3 section 7 |
+
+### Two items AE1 adds to the backlog
+
+| ID | Item | Owner |
+|---|---|---|
+| AE1-a | NULL every minted `legacy_id` before MongoDB is deleted, by lookup | 3.6, as criterion 1 above |
+| AE1-b | Remove `mintObjectId()` from `categories.js` once `donations.js` has migrated | 3.3 |
+
+**SPEC-1A section 4.1 is temporarily false** and is corrected in ADR-051(c):
+its invariant that a non-NULL `legacy_id` means "migrated from MongoDB" does not
+hold during the Phase 3 window. AE1(b) stops new violations, AE1(a) removes the
+existing ones, and after 3.6 the invariant is true again - deliberately restored
+rather than never broken.
+
+---
+
 ## Open findings, by owning package
 
 Phase assignments follow SPEC-3 section 2. "Mechanism" is how it gets fixed;
