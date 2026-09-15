@@ -126,10 +126,18 @@ This map stays tracked - SPEC-3 section 5's "updated in the same commit"
 requirement cannot be enforced on an untracked file. The exposure is handled by
 a checkable condition rather than by a coupling to DEF-01:
 
-> **Publication requires EITHER zero open findings in this map, OR the map
-> redacted of file and line for everything still open.**
+> **Publication requires EITHER zero open findings, OR redaction of file and
+> line for everything still open - in THIS MAP and in
+> `docs/entity-ownership-audit.md`.**
 
 **Recorded as a Phase 6 gate.**
+
+**THE AUDIT IS COVERED BY THE SAME GATE, added in AR1.** It is tracked for the
+same reason - a per-package gate cannot be enforced on an untracked file - and
+it carries the same exposure in a more concentrated form: it is an index of
+exactly where each entity is written and read, by file and line, which is a
+faster route to the seams than the finding list itself. **A file added to the
+tracked set inherits the gate; it does not get a quiet exception for being new.**
 
 The reasoning is worth keeping, because the obvious framing is wrong. A map of
 **closed** findings with file and line is not an exposure at all - it is good
