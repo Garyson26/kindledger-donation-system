@@ -94,6 +94,15 @@ jobs:
       # each binds an ephemeral port so they can run in any order.
       TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_ci
       DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
+      # A PER-RUN rate-limit namespace. Package 3.2 wired the Redis-backed
+      # limiter, which unlike the MemoryStore it replaced is SHARED and
+      # PERSISTENT - so two suites in one job, or a re-run inside the 60-second
+      # window, inherit each other's counters and fail with 429 on their FIRST
+      # request. The code is right; without this the symptom looks like a flaky
+      # test, which is the worst kind of wrong signal.
+      # QUOTED: the value both starts a `{` and ends in `:`, either of which
+      # makes YAML read it as a flow mapping rather than a string.
+      RATE_LIMIT_PREFIX: "ci-${{ github.run_id }}-${{ github.run_attempt }}:"
 
     steps:
       - uses: actions/checkout@v4

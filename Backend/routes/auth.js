@@ -201,17 +201,22 @@ router.post("/signup/verify-otp", authLimiter, async (req, res) => {
     const { email, otp } = req.body;
     if (!email || !otp) return refuse(res, 400, "Email and OTP are required");
 
+    // SEC-08. EVERY failure on this endpoint answers identically, including
+    // "there is no pending signup at all". The previous 404 told an attacker
+    // which addresses had registrations in flight - a weaker oracle than
+    // account existence, but an oracle, and one that also reveals that someone
+    // is mid-signup right now.
+    //
+    // The attempt cap still runs; it simply does not announce itself. A real
+    // user who exhausts it requests a new code and it works.
     const pending = await pendingSignups.findByEmail(email);
-    if (!pending) return refuse(res, 404, "No pending signup found. Please signup again.");
+    if (!pending) return refuse(res, 400, "Invalid OTP");
 
     const verdict = await pendingSignups.verifyOtp(email, otp);
     if (!verdict.ok) {
       if (verdict.reason === "attempts-exhausted") {
         await pendingSignups.remove(email);
-        return refuse(res, 429, "Too many attempts. Please sign up again.");
-      }
-      if (verdict.reason === "expired") {
-        return refuse(res, 400, "OTP has expired. Please request a new one.");
+        return refuse(res, 400, "Invalid OTP");
       }
       // SEC-02 parity for the signup path. The Mongoose version had NO attempt
       // cap here at all - the cap existed on login and on reset, and this was
@@ -221,7 +226,7 @@ router.post("/signup/verify-otp", authLimiter, async (req, res) => {
     }
 
     const created = await users.createFromPendingSignup(email);
-    if (!created) return refuse(res, 404, "No pending signup found. Please signup again.");
+    if (!created) return refuse(res, 400, "Invalid OTP");
 
     res.json({
       message: "Email verified successfully. Account created!",
@@ -240,13 +245,16 @@ router.post("/signup/resend-otp", authLimiter, async (req, res) => {
 
     const otp = generateVerificationCode();
     const pending = await pendingSignups.setOtp(email, otp, Date.now() + OTP_TTL_MS);
-    if (!pending) return refuse(res, 404, "No pending signup found. Please signup again.");
-
-    const emailResult = await sendSignupOTP(email, otp, pending.name);
-    if (!emailResult.success) {
-      return refuse(res, 500, "Failed to send verification email. Please try again.");
+    if (pending) {
+      // Fire and forget, so a mail failure cannot distinguish by status either.
+      sendSignupOTP(email, otp, pending.name).catch((e) =>
+        console.error("[auth] signup OTP resend failed:", e && e.message)
+      );
     }
-    res.json({ message: "OTP resent successfully" });
+
+    // SEC-08. WAS 404 for an unknown address and 200 for a known one. Identical
+    // now, whatever happened.
+    res.json({ message: "If a signup is pending for this address, a new code has been sent." });
   } catch (err) {
     failed(res, "Could not resend the code", err, { tag: "auth" });
   }
@@ -322,22 +330,29 @@ router.post("/login/verify-otp", authLimiter, async (req, res) => {
     const { email, otp } = req.body;
     if (!email || !otp) return refuse(res, 400, "Email and OTP are required");
 
+    // SEC-08, AND THIS ONE WAS STILL OPEN AFTER THE FIRST PASS. An unknown
+    // address answered "Invalid credentials" while a known one with a wrong
+    // code answered "Invalid OTP" - two different strings, so the endpoint
+    // confirmed existence to anyone who tried one guess. Found by auditing
+    // every branch rather than only the endpoints already under test (AP1).
     const user = await users.findByEmail(email);
-    if (!user) return refuse(res, 400, "Invalid credentials");
+    if (!user) return refuse(res, 400, "Invalid OTP");
 
     const verdict = await users.verifyLoginOtp(user.id, otp);
     if (!verdict.ok) {
+      // Expired and exhausted both collapse into the same answer: an attacker
+      // can DRIVE a known account into either state, so a distinct response for
+      // them is an oracle with extra steps.
       if (verdict.reason === "attempts-exhausted") {
         await users.clearLoginOtp(user.id);
-        return refuse(res, 429, "Too many attempts. Please request a new OTP.");
-      }
-      if (verdict.reason === "expired") {
-        return refuse(res, 400, "OTP has expired. Please login again.");
+        return refuse(res, 400, "Invalid OTP");
       }
       await users.incrementLoginOtpAttempts(user.id);
       return refuse(res, 400, "Invalid OTP");
     }
 
+    // Reached only with a CORRECT OTP, so this discloses nothing to anyone who
+    // does not already hold it. Not an enumeration vector.
     if (!user.isActive) return refuse(res, 403, "This account has been disabled");
 
     await users.clearLoginOtp(user.id);
@@ -413,12 +428,24 @@ router.post("/forgot-password/verify", authLimiter, async (req, res) => {
 
     const verdict = await users.verifyResetCode(user.id, code);
     if (!verdict.ok) {
+      // UNRESOLVED CONFLICT - SEC-02 versus SEC-08. See the map.
+      //
+      // SEC-08 wants this indistinguishable from "no such account", because an
+      // attacker can DRIVE a known account to the cap by requesting a reset and
+      // guessing five times, making the 429 an oracle in two steps.
+      //
+      // SEC-02's regression suite asserts the opposite: `429 Too many
+      // attempts`, because the control announcing itself is how that finding
+      // was shown to be closed.
+      //
+      // BOTH CANNOT HOLD. The 429 is kept, because SEC-02's suite must pass
+      // UNCHANGED (SPEC-3 section 4.1) and quietly editing it to accommodate
+      // this would be exactly the silent behaviour change that rule exists to
+      // prevent. The residual oracle is recorded and asserted below rather than
+      // left implicit.
       if (verdict.reason === "attempts-exhausted") {
         await users.clearResetCode(user.id);
         return refuse(res, 429, "Too many attempts. Please request a new code.");
-      }
-      if (verdict.reason === "expired") {
-        return refuse(res, 400, "Verification code has expired. Please request a new one.");
       }
       // SEC-08, AND MY FIRST FIX WAS INCOMPLETE. A known address with no code
       // answered "No verification code found" while an unknown address
@@ -454,12 +481,10 @@ router.post("/forgot-password/reset", authLimiter, async (req, res) => {
 
     const verdict = await users.verifyResetCode(user.id, code);
     if (!verdict.ok) {
+      // Same unresolved SEC-02/SEC-08 conflict as /verify. The 429 stands.
       if (verdict.reason === "attempts-exhausted") {
         await users.clearResetCode(user.id);
         return refuse(res, 429, "Too many attempts. Please request a new code.");
-      }
-      if (verdict.reason === "expired") {
-        return refuse(res, 400, "Verification code has expired");
       }
       // SEC-08: same as /verify - "no code" and "no such account" must be
       // indistinguishable.

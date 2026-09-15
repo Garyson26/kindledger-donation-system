@@ -359,6 +359,140 @@ test('SEC-08 is closed on /login - the two cases are indistinguishable', async (
   assert.equal(unknown.body.error, 'Invalid credentials');
 });
 
+test('SEC-08 AUDIT: EVERY existence-dependent endpoint answers identically (AP1)', async () => {
+  // THE FULL AUDIT, not only the endpoints that were already under test.
+  //
+  // The first fix missed four oracles, and the one that caught the miss was a
+  // BYTE-IDENTICAL BODY assertion - a status-only check passed while the oracle
+  // was still open on a different endpoint, which would have marked SEC-08
+  // closed while it was not.
+  //
+  // So this asserts the WHOLE BODY, and it does so for every endpoint whose
+  // response can vary with whether an account exists. `deepEqual` also catches
+  // a difference in an extra field or a nested code, which is where an oracle
+  // hides once the obvious string has been unified.
+  await store.reset();
+  const email = uniqEmail('audit');
+  await store.createUser({ email });
+  const absent = uniqEmail('absent');
+
+  // Drive the KNOWN account into every state an attacker can reach without
+  // credentials: a live reset code, then five wrong guesses to exhaust the cap.
+  await post('/api/auth/forgot-password/request', { email });
+  for (let i = 0; i < 6; i += 1) {
+    await post('/api/auth/forgot-password/verify', { email, code: '000000' });
+  }
+
+  const cases = [
+    [
+      'POST /forgot-password/request',
+      ['/api/auth/forgot-password/request', { email }, { email: absent }],
+    ],
+    // The two reset-code endpoints are covered BELOW instead, in their own
+    // scenario, because they carry an unresolved SEC-02/SEC-08 conflict.
+
+    [
+      'POST /login (wrong password vs no account)',
+      ['/api/auth/login', { email, password: 'WrongPass999!' }, { email: absent, password: 'WrongPass999!' }],
+    ],
+    [
+      'POST /login/verify-otp (no OTP issued vs no account)',
+      ['/api/auth/login/verify-otp', { email, otp: '000000' }, { email: absent, otp: '000000' }],
+    ],
+    [
+      'POST /login/resend-otp',
+      ['/api/auth/login/resend-otp', { email }, { email: absent }],
+    ],
+    [
+      'POST /signup/resend-otp (no pending signup either way)',
+      ['/api/auth/signup/resend-otp', { email }, { email: absent }],
+    ],
+    [
+      'POST /signup/verify-otp (no pending signup either way)',
+      ['/api/auth/signup/verify-otp', { email, otp: '000000' }, { email: absent, otp: '000000' }],
+    ],
+  ];
+
+  for (const [label, [path, known, unknown]] of cases) {
+    const a = await post(path, known);
+    const b = await post(path, unknown);
+    assert.equal(a.status, b.status, `${label}: status differs (${a.status} vs ${b.status})`);
+    assert.deepEqual(
+      a.body,
+      b.body,
+      `${label}: BODY differs -\n  known:   ${a.raw.slice(0, 120)}\n  unknown: ${b.raw.slice(0, 120)}`
+    );
+  }
+});
+
+test('SEC-02 vs SEC-08: the reset-code cap IS an oracle, and that is unresolved', async () => {
+  // AN UNRESOLVED CONFLICT, ASSERTED SO IT CANNOT BE FORGOTTEN.
+  //
+  // SEC-08 wants every response identical for existing and non-existing
+  // accounts. SEC-02's regression suite asserts `429 Too many attempts` at the
+  // cap, because a control that announces itself is how that finding was shown
+  // to be closed. An attacker can reach the cap on a KNOWN account by
+  // requesting a reset and guessing five times, so the 429 confirms existence.
+  //
+  // BOTH CANNOT HOLD as written. The 429 stands, because the SEC-02 suite must
+  // pass unchanged (SPEC-3 section 4.1). This test pins the residual oracle so
+  // the day it is closed, this fails and someone edits it deliberately.
+  //
+  // The fix that satisfies both is a per-ADDRESS attempt counter that also
+  // applies to addresses with no account, so an unknown address exhausts and
+  // answers 429 too. That is new mechanism, not a tweak, and it is recorded in
+  // the map rather than improvised here.
+  await store.reset();
+  const email = uniqEmail('capconflict');
+  await store.createUser({ email });
+  const absent = uniqEmail('capabsent');
+
+  await post('/api/auth/forgot-password/request', { email });
+  // EXACTLY five, so the NEXT call is the one that trips the cap. A sixth here
+  // would trip it and VOID the code, and the assertion below would then see the
+  // no-code path returning 400 - which looks like the oracle being closed when
+  // it is only the fixture being off by one.
+  for (let i = 0; i < 5; i += 1) {
+    await post('/api/auth/forgot-password/verify', { email, code: '000000' });
+  }
+
+  const known = await post('/api/auth/forgot-password/verify', { email, code: '000000' });
+  const unknown = await post('/api/auth/forgot-password/verify', { email: absent, code: '000000' });
+
+  assert.equal(known.status, 429, 'SEC-02: the cap announces itself');
+  assert.equal(unknown.status, 400, 'SEC-08: an unknown address cannot reach a cap');
+  assert.notEqual(
+    known.status,
+    unknown.status,
+    'THE ORACLE, asserted deliberately. If this starts failing, the conflict was ' +
+      'resolved and this test should be updated to assert the new behaviour.'
+  );
+});
+
+test('SEC-08: the one remaining oracle is /signup, and it is deliberate', async () => {
+  // Recorded as a test so the deferral cannot be forgotten: if someone closes
+  // it, this fails and they update it on purpose.
+  await store.reset();
+  const email = uniqEmail('signupleak');
+  await store.createUser({ email });
+
+  const known = await post('/api/auth/signup', { name: 'x', email, password: 'ValidPassword1!' });
+  const unknown = await post('/api/auth/signup', {
+    name: 'x',
+    email: uniqEmail('nobody'),
+    password: 'ValidPassword1!',
+  });
+
+  assert.notDeepEqual(
+    known.body,
+    unknown.body,
+    'STILL AN ORACLE, deliberately: closing it needs a second email template in ' +
+      'config/email.js, which package 3.2 does not own. If this assertion starts ' +
+      'failing, the oracle was closed and this test should be updated to assert that.'
+  );
+  assert.match(known.body.error, /already exists/i);
+});
+
 test('SEC-08: the reset and resend paths no longer leak existence (CHANGED IN 3.2)', async () => {
   // WAS: /login/resend-otp, /forgot-password/verify and /forgot-password/reset
   // each answered 404 "User not found" for an unknown address and something

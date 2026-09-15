@@ -831,9 +831,16 @@ understated:**
 | SEC-03 is "NoSQL operator injection", High | the security review | An unauthenticated authentication bypass. The title named the mechanism and hid the outcome |
 | SPEC-1A section 5.6: the `mihpayid` UNIQUE index is the SEC-01 replay defence | the spec, repeated in ADR-012 | `mihpayid` is unsigned and attacker-mutable. The index is integrity only (ADR-026) |
 | The package sequence | SPEC-3, then restated in the map | Two contradictory sequences in one document (AL3) |
+| SEC-08 lists `/login` as leaking via `needsSignupVerification` | the security review | **Wrong.** That branch is reached only after `bcrypt.compare` SUCCEEDS, so a caller without the password gets the same `Invalid credentials` as any other failure. Read the branch (AP3) |
 
 Each was correct-looking, repeated, and load-bearing. That combination is the
 signature, and the countermeasure is cheap: **run it once.**
+
+**FOUR NOW, and the signature is holding as a predictor.** That is worth knowing
+with three packages left: it means the remaining inherited claims are more
+likely to be wrong than a base rate would suggest, and AJ3's severity pass
+should be read as an application of this rule rather than a separate exercise.
+The four fell in four consecutive packages, each found by doing something else.
 
 **Applies to AJ3's severity pass**, which is the same rule aimed at one class of
 claim - a severity derived from a mechanism is an inherited guess at an outcome.
@@ -925,6 +932,105 @@ because an ObjectId was being looked up as a uuid.
 account VISIBLY half-migrated: a handler that needs the repository gets null and
 answers 404, rather than searching for an id that cannot match and failing for a
 reason nobody can see.
+
+---
+
+## Information-disclosure findings: assert the FULL BODY, never the status (AP1)
+
+> **For any finding about information disclosure through response differences,
+> assert the entire response body identical across the cases being compared.
+> Never the status alone.**
+
+**The worked example is my own incomplete fix.** Package 3.2 unified three
+endpoints for SEC-08 and reported it closed. It was not: a known address with no
+reset code answered "No verification code found" while an unknown one answered
+"Invalid verification code" - same status, different body. **A status-only
+assertion passes, and SEC-08 gets marked closed while still open.**
+
+**The full audit then found four MORE oracles** that the original fix had not
+touched, because it only looked at the endpoints already under test:
+
+| Endpoint | The oracle |
+|---|---|
+| `/login/verify-otp` | `Invalid credentials` (unknown) vs `Invalid OTP` (known) |
+| `/signup/resend-otp` | 404 (unknown) vs 200 (pending signup exists) |
+| `/signup/verify-otp` | 404 "No pending signup found" vs an OTP error |
+| `/forgot-password/verify` and `/reset` | "expired" and the attempt cap are reachable ONLY for an existing account |
+
+All closed except the last, which is a genuine conflict - see below.
+
+**This is BUG-11's assertion-strictness decision paying off in an unrelated
+package.** Narrowing `assertRefused` from "any of three keys carries a reason"
+to "`error` carries it" was done for BUG-11; the same instinct - assert the
+strongest true thing, not the most convenient - is what made the SEC-08 test
+compare bodies. A test that asserts less than it could is not cheaper, it is
+just quieter about what it did not check.
+
+**Field ordering and nested codes count.** `deepEqual` catches an oracle hiding
+in an extra field or a nested error code, which is where one goes once the
+obvious string has been unified.
+
+---
+
+## UNRESOLVED: SEC-02 versus SEC-08 on the reset-code cap
+
+**Both cannot hold as written, and the conflict is recorded rather than
+resolved by quietly picking one.**
+
+- **SEC-08** wants every response identical for existing and non-existing
+  accounts. An attacker can DRIVE a known account to the attempt cap - request a
+  reset, guess five times - so the `429 Too many attempts` confirms the account
+  exists.
+- **SEC-02's regression suite** asserts that exact 429, because a control that
+  announces itself is how that finding was demonstrated closed. That suite must
+  pass UNCHANGED (SPEC-3 section 4.1).
+
+**The 429 stands**, because editing the SEC-02 scenario to accommodate this
+would be precisely the silent behaviour change section 4.1 exists to prevent.
+The residual oracle is ASSERTED in `auth-characterisation.test.js` so that the
+day it is closed, that test fails and someone updates it deliberately.
+
+**The fix that satisfies both** is a per-ADDRESS attempt counter that applies to
+addresses with no account too, so an unknown address also exhausts and also
+answers 429. That is new mechanism rather than a tweak, and it needs a decision
+about where the counter lives. **Not assigned.**
+
+---
+
+## SEC-08 on `/signup` - DEFERRED, with a trigger and an owner problem (AP2)
+
+`"User already exists with this email"` is the one remaining account oracle, and
+it is deliberate. Closing it means always answering "check your email" and
+sending EITHER a verification code OR a "someone tried to register with your
+address" notice.
+
+**Trigger: the package that migrates `Backend/config/email.js`.**
+
+**AND THAT IS A GAP IN THE PLAN, which is worth saying plainly.** Checked
+against the sequence: `config/email.js` is not owned by any Phase 3 package -
+3.3 is donations, 3.4 payment, 3.5 admin, 3.6 Mongoose removal - and Phase 5 is
+scoped to the frontend and dependencies. **No package owns the email templates.**
+
+That is exactly how U-2 through U-6 happened: a defensible deferral with no
+owner. Recorded here as an unassigned item needing a decision, not as a
+deferral that has been dealt with.
+
+---
+
+## When the symptom points away from the cause (AP4)
+
+A short list, because the pattern has now cost real time three times.
+
+| Symptom | Cause | The "fix" that would have hidden it |
+|---|---|---|
+| The auth suites PASS and then hang forever | Wiring Redis left a socket holding the event loop | A force-exit flag - which would have hidden a genuine resource leak, in a module every process imports |
+| The SEC-02 suite fails with 429 on its FIRST request | The Redis limiter is shared and persistent, so a re-run inherits the previous run's counters | Marking the suite flaky, or adding a retry |
+| An injected login returns 500 | The SMTP send failing AFTER the credential check was passed | Reading the 500 as a refusal - which is what happened, and it hid SEC-03 for a full package |
+
+The common shape: **infrastructure made correct produces a symptom that reads as
+a broken test.** The natural response makes the test quiet rather than making
+the system right. In all three the honest read was available immediately from
+asking what the symptom would mean if the code were correct.
 
 ---
 

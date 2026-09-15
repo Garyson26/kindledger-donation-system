@@ -86,7 +86,21 @@ function buildStore() {
   storeKind = 'redis';
   return new RedisStore({
     sendCommand: (...args) => redisClient.sendCommand(args),
-    prefix: 'kl:rl:',
+    // THE PREFIX IS OVERRIDABLE, AND THAT IS NOT A TEST CONVENIENCE.
+    //
+    // Wiring the Redis store in package 3.2 made the limiter SHARED and
+    // PERSISTENT, which is the entire point in production and a problem
+    // everywhere else. The MemoryStore it replaced reset with the process, so a
+    // suite could be re-run immediately; Redis remembers for the full window,
+    // and the SEC-02 regression suite started failing with 429 on its FIRST
+    // request when run twice inside a minute. The code was correct and the
+    // symptom looked like a broken test.
+    //
+    // It matters beyond tests: two DEPLOYMENTS sharing one Redis - a blue/green
+    // pair, or a staging environment pointed at the wrong instance - would
+    // share rate-limit buckets and throttle each other, which is very hard to
+    // diagnose from either side.
+    prefix: process.env.RATE_LIMIT_PREFIX || 'kl:rl:',
   });
 }
 
