@@ -637,10 +637,19 @@ SEC-03.** The deployed system carries this bypass today. It is currently
 unreachable **only because MongoDB rejects the application's credentials** - an
 availability failure standing in for an access control.
 
-**Standing instruction for whoever restores Atlas: the deploy-before-restore
-ordering now guards TWO findings, not one.** SEC-03 becomes reachable the
-instant those credentials are fixed. It is not closed until **`auth.js` migrates**,
-merges **and deploys**.
+**HOTFIXED ON THE MONGO STACK (AN1).** Branch `hotfix/sec-03-auth-bypass`, off
+`main`. The earlier instruction not to write one assumed package 3.2 would land
+soon; Phase 3 now has four packages left plus 4b, and production returns to
+service on MongoDB in the meantime. Weeks of a live unauthenticated auth bypass
+on a public donation platform outweighs the duplicate-work argument.
+
+The hotfix rejects non-scalar request bodies on every auth route. It is deleted
+at the cutover: package 3.2 replaces the file with parameterised SQL, which
+closes the CLASS rather than this instance.
+
+**It is not closed in production until that branch merges AND DEPLOYS.** Until
+then the deploy-before-restore ordering still guards it, along with SEC-01's
+successor conditions.
 
 **Do not write a Mongo-side hotfix for it.** Sanitising the query on the old
 stack duplicates work the migration deletes, and parameterised SQL closes the
@@ -781,6 +790,53 @@ than a re-read**, because it could not have been shaped by expecting the answer.
 Recorded because the claim had been inherited rather than tested, and inherited
 claims are what SEC-03's misclassification and the two contradictory sequences
 were both made of.
+
+---
+
+## The inherited-claim rule (AN3)
+
+> **A claim that several decisions rest on must be verified BY BEHAVIOUR at
+> least once. Do not carry it from the document that first asserted it.**
+
+A claim in a review, a spec or an ADR is an observation someone made once. Every
+reader after the first inherits it, and the inheritance is invisible: the claim
+reads the same whether it was tested yesterday or guessed three years ago. The
+more decisions rest on it, the less likely anyone is to re-derive it, because by
+then it is load-bearing and questioning it looks like wasted effort.
+
+**The worked example - BUG-02.** The claim was "Mongoose's enum is not enforced
+on `findByIdAndUpdate`". Four things rest on it: the ENUM columns in
+`db/schema.sql`, ADR-018's ETL counting requirement, SEC-16's severity, and
+BUG-03. It had been repeated through a security review, a project document, a
+finding map and three packages, and never run.
+
+It was confirmed by accident. A test fixture seeding `status: 'approved'`
+through `Donation.create()` was REJECTED:
+
+```
+ValidationError: `approved` is not a valid enum value for path `status`.
+```
+
+So the enum IS enforced on `create`, and the mixed-case data can only have come
+from a path that skips validation - which is `findByIdAndUpdate`, exactly where
+the review said. **Confirmation obtained while doing something else is worth
+more than a re-read**, because it could not have been shaped by expecting the
+answer.
+
+**Three findings in this project were inherited claims that turned out wrong or
+understated:**
+
+| Claim | Inherited from | What running it showed |
+|---|---|---|
+| SEC-03 is "NoSQL operator injection", High | the security review | An unauthenticated authentication bypass. The title named the mechanism and hid the outcome |
+| SPEC-1A section 5.6: the `mihpayid` UNIQUE index is the SEC-01 replay defence | the spec, repeated in ADR-012 | `mihpayid` is unsigned and attacker-mutable. The index is integrity only (ADR-026) |
+| The package sequence | SPEC-3, then restated in the map | Two contradictory sequences in one document (AL3) |
+
+Each was correct-looking, repeated, and load-bearing. That combination is the
+signature, and the countermeasure is cheap: **run it once.**
+
+**Applies to AJ3's severity pass**, which is the same rule aimed at one class of
+claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
