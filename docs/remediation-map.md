@@ -886,6 +886,129 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## AV2 - A CORRECT CONTROL, ACTING ON A CORRECT FINDING, BROKE A LIVE PATH
+
+**Its own class. Not AT3, not AU3, and the difference is the useful part.**
+
+| | What went wrong |
+|---|---|
+| **AT3** (3 instances) | the FIX was wrong - it instantiated the shape its rule prohibited |
+| **AU3** | the CONTROL was incomplete - correct on the subset where nothing was at stake |
+| **AV2 (PAY-02)** | **nothing was wrong.** The finding was real, the control was right, the remedy was correct, and a live path broke |
+
+AT4's gate says: no file may import the Mongoose model of an entity whose
+authoritative store is MySQL. `routes/admin.js` imported `models/User` and used
+it nowhere. The gate flagged it; the import was removed; both were correct.
+
+And `GET /api/payment/status/:txnid` started answering 500 to every request,
+because `.populate('userId')` resolves through Mongoose's GLOBAL MODEL REGISTRY
+and that `require()` was the only thing populating it.
+
+### The statement
+
+> **A correct control acting on a correct finding can break a live path when its
+> MODEL OF THE CODE and the RUNTIME'S MODEL diverge.**
+>
+> AT4 checks REFERENCES. Mongoose's model registration is a SIDE EFFECT OF
+> MODULE LOADING. Those are different properties, and no amount of care about
+> the first tells you anything about the second.
+
+The control was not checking the wrong thing - "does a file reference a migrated
+model" is exactly the right question for the coupling AT4 was built to find. It
+is that the ANSWER to that question does not determine whether the import can be
+removed, and nothing in the question hints that it might not.
+
+### The countermeasure is NOT a better import checker
+
+That is the tempting conclusion and it is wrong. A checker that also understood
+Mongoose's registry would miss the next registry - a decorator, a plugin system,
+an `express.Router` collected at import time, a `process.on` handler. **The
+space of load-time side effects is not enumerable by static analysis**, which is
+precisely why they are side effects.
+
+> **REMOVALS GET THE SAME INJECTION-PROOF STANDARD AS ADDITIONS.**
+
+This project already proves a gate by breaking the thing it guards and watching
+it fail. That discipline had only ever been applied to what a change ADDS.
+PAY-02 says a deletion is a change to the running system and earns the same
+treatment: delete it, run the thing that might have depended on it, and look.
+
+Concretely, the cost of catching PAY-02 was one request to an endpoint in the
+file's blast radius - and the baseline that eventually caught it was written one
+package later, for a different reason, because AU1 required it.
+
+### The gate, and ITS OWN EXPIRY DATE
+
+`test/migration-state.test.js` asserts the exact set of Mongoose models the app
+registers at boot. As of package 3.4 that set is **empty**.
+
+**IT MUST BE REMOVED IN PACKAGE 3.6, IN THE SAME COMMIT THAT REMOVES MONGOOSE.**
+Once no Mongoose exists, the gate guards a coupling that cannot occur - and a
+gate protecting nothing is AU3's shape one package out: it passes forever,
+nobody can tell whether it still works, and it makes the suite look better
+covered than it is.
+
+Recorded here AND in the test's own comment, because a note in only one of the
+two is how a gate outlives its subject.
+
+---
+
+## AV3 - the txnid length claim: CLOSED from the public documentation
+
+**Carried as UNVERIFIED for exactly one package, and closed without a sandbox.**
+
+Package 3.4 replaced the guessable `TXN${Date.now()}${rand(0,999)}` reference
+(16-17 characters, proven against the live gateway) with 80 random bits
+(23 characters). The claim "PayU accepts 23 characters" rested on reasoning
+rather than on an observation, and it was the ONLY unverified claim on the money
+path.
+
+**PayU documents it:**
+
+> "Transaction ID (or Order ID) generated at the merchant end. Must be unique
+> for every new transaction. **Character limit: 25.**"
+> — https://docs.payu.in/reference/addl_info-payment-apis
+
+23 of 25, alphanumeric, two characters of headroom. **Asserted by
+`test:payment-char` so the headroom cannot be spent by someone lengthening the
+reference for entropy without knowing there is a ceiling.**
+
+It did not need the sandbox credentials at all - the `llms.txt` route reached it
+in three fetches. Worth noting because the instinct was to defer it to 4b, and
+deferring a question that a public document answers is how a blocker acquires a
+dependency it never had.
+
+### THE SAME PAGE SURFACED A SHARPER ONE: PAY-03
+
+| Field | Production limit | **TEST limit** |
+|---|---|---|
+| `firstname` | 60 | **20** |
+| productinfo | 100 | 100 |
+| email | 50 | 50 |
+| udf1-udf5 | 255 | 255 |
+
+**`firstname` is truncated to 20 characters in PayU's TEST environment and 60 in
+production.** Our own callback fixtures use
+`'ZZZ SYNTHETIC TEST DO NOT PROCESS'` - **33 characters**.
+
+**Why that is a trap rather than a detail.** `firstname` is a SIGNED field: it
+appears in both the request hash and the response hash. If PayU's test
+environment stores a truncated value and signs its response with that, the
+response hash is computed over a different string than the one we sent, and
+`verifyHash` refuses it. **Every sandbox payment would fail hash verification,
+and the symptom - "invalid_hash" - points at the hashing code, which is correct.**
+
+It is not live today: nothing reaches PayU from the test suite. It becomes live
+the moment anyone runs a sandbox payment, which is the first thing 4b does.
+
+**Assigned to Phase 4b's pre-cutover checklist**, alongside the credentials
+dependency. The fix is to keep the donor name under 20 characters in any sandbox
+exercise, or to confirm PayU rejects rather than truncates - a distinction the
+documentation does not make and which decides whether this is a nuisance or a
+silent one.
+
+---
+
 ## PAY-02 - AS7 broke the donor receipt lookup by deleting a DEAD IMPORT
 
 **Severity** High, availability. **Provenance X** - found by extending the

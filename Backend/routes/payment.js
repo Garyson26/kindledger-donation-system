@@ -58,12 +58,16 @@ const MAX_EXTRA_MAJOR = 1_000_000;
  * scheme produced 16-17 characters and is proven against the live gateway at
  * that length, so this stays at 23 rather than using a 36-character uuid.
  *
- * **UNVERIFIED (AU2): PayU's documented maximum txnid length.** I could not
- * check it against the gateway from here. 23 characters is shorter than every
- * limit I am aware of and longer than nothing we have already sent
- * successfully, but the claim "PayU accepts this" rests on that reasoning and
- * not on an observation. It is the one thing in this package to confirm against
- * the PayU sandbox before cutover.
+ * **VERIFIED (AV3). PayU's documented limit is 25 characters; this is 23.**
+ *
+ *   "Transaction ID (or Order ID) generated at the merchant end. Must be
+ *    unique for every new transaction. Character limit: 25."
+ *   - https://docs.payu.in/reference/addl_info-payment-apis
+ *
+ * Two characters of headroom, and the value is alphanumeric. It was carried as
+ * UNVERIFIED for one package and closed from the public documentation without a
+ * sandbox at all - the `llms.txt` route. `test:payment-char` asserts the length
+ * so the headroom cannot be spent by accident.
  */
 function mintTransactionRef() {
   return 'TXN' + crypto.randomBytes(10).toString('hex');
