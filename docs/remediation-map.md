@@ -163,9 +163,9 @@ them in would make them look like ordinary work items.
 | U-1 | Licence (DEF-01) | **Gary.** Recommendation: Apache-2.0 | Phase 6 |
 | U-2 | `verify_payment` reconciliation | **3.4, DESIGN ONLY (re-homed by AT2)** - was 3.5, which no longer exists. The call itself is a later package | nothing |
 | U-3 | The `Cancelled` state | **Code to 3.2; the data question to the J3 session** | nothing |
-| U-4 | BUG-05 redirect URLs | **Gary, production session** | nothing |
+| U-4 | BUG-05 redirect URLs | **HALF CLOSED (AW3).** `.env.example` already matches `App.jsx`. The deployed values need one `vercel env pull` - not a session | nothing |
 | U-5 | `for_ocean_security_review.md` at HEAD | **Done in package 3.0** - see below | nothing |
-| U-6 | prisma advisory | **Trigger, not cadence** - start of every phase | nothing |
+| U-6 | prisma advisory | **DONE (AW3).** 3 high, one chain, in the PRODUCTION tree via `@prisma/client`; not attacker-reachable. Fix deserves its own package | nothing |
 
 ### U-1. DEF-01 - the licence is undecided and blocks publication
 **Source** ADR-020, ADR-029 (ADR-029 is on the unmerged `docs/incident-j1-j6`
@@ -883,6 +883,165 @@ both were found, and is AD2's method applied to something other than ordering.
 
 **Applies to AJ3's severity pass**, which is the same rule aimed at one class of
 claim - a severity derived from a mechanism is an inherited guess at an outcome.
+
+---
+
+## AW1 - A TEST THAT ENCODED A HARM AS A REQUIREMENT, AND THEN PROTECTED IT
+
+**Its own class. The three neighbours are all about CONTROLS; this one is about
+a TEST.**
+
+| | What was wrong |
+|---|---|
+| **AT3** | the FIX instantiated the shape its rule prohibited |
+| **AU3** | the CONTROL was correct only where nothing was at stake |
+| **AV2** | the control was RIGHT; its model of the code and the runtime's diverged |
+| **AW1** | **nothing was a control at all.** A TEST asserted a harm as a requirement, and the discipline protecting tests then protected the harm |
+
+### The shape, in four steps
+
+1. **`clearResetCode` at the cap defended nothing.** An exhausted counter
+   refuses the code without ever comparing it, so voiding it removed no
+   capability from an attacker.
+2. **It handed anyone who knows an address a five-request denial of service** on
+   that user's pending reset. Request a reset for someone, guess five times,
+   their code is destroyed. Repeat.
+3. **SEC-02's regression suite asserted it as a requirement**, in good faith:
+   `assert.equal(u.hasResetCode, false, 'the reset code must be voided at the cap')`.
+4. **It survived because it reads like defence in depth.** "The code is voided
+   at the cap" is the sentence a careful person writes. Nothing about it looks
+   like a mistake, and the assertion message argues for itself.
+
+### THE UNCOMFORTABLE PART, WHICH BELONGS IN THE RECORD
+
+**The discipline that makes tests trustworthy is what gave this its
+durability.**
+
+- *Do not edit scenarios quietly* (SPEC-3 section 4.1) meant nobody could remove
+  it without a deliberate act and a written justification.
+- *Assert the strongest true thing* (BUG-11, AP1) meant it was written as a
+  tight, specific assertion rather than a loose one - which made it harder to
+  drift past.
+- *A regression suite must pass UNCHANGED* meant every subsequent package
+  treated it as fixed ground.
+
+**A WRONG ASSERTION INHERITS THE PROTECTION BUILT FOR RIGHT ONES.** Every one of
+those rules is correct and I would keep all three. The cost of them is that a
+mistake written in the protected form is more durable than one written
+carelessly - and the more security-shaped the mistake sounds, the longer it
+lasts.
+
+That is not an argument for weaker discipline. It is an argument that the
+discipline has no opinion about whether an assertion is CORRECT, only about
+whether it is STABLE, and something else has to supply the first.
+
+### The countermeasure, as a question
+
+Added to the per-package acceptance criteria:
+
+> **For any assertion that a control DESTROYS or REVOKES something at a
+> threshold, ask: what does an attacker gain by reaching that threshold ON
+> SOMEONE ELSE'S BEHALF?**
+
+A question rather than a rule, because the answer is often "nothing" and the
+assertion is then correct - the point is that it must be ASKED, not that the
+pattern is forbidden. `setActive(false)` incrementing `token_version` is exactly
+this shape and is right: an attacker cannot reach that threshold, only an admin
+can.
+
+**AW2 applies this question to every existing suite.**
+
+---
+
+## AW3 - which open items are BLOCKED, and which are merely PARKED
+
+**Applying AV3's instinct: "deferring a question a public document answers is
+how a blocker acquires a dependency it never had."**
+
+| Item | Verdict |
+|---|---|
+| **U-1** Licence | **Genuinely blocked, on a PERSON.** Not a lookup - it is a choice about what the organisation wants. No document answers it |
+| **U-3** the `Cancelled` state, data half | **Genuinely blocked.** Needs a count from production MongoDB. That is J3 |
+| **U-4** BUG-05 redirect URLs | **HALF ALREADY CLOSED, and the map did not say so. The rest is narrower than recorded** - see below |
+| **U-6** prisma advisory | **NOT BLOCKED. Done - see below** |
+| **J3** production Mongo credentials | **Genuinely blocked.** Credentials |
+| **4b** snapshot rehearsal | **Genuinely blocked.** Depends on J3 |
+| **PAY-03** firstname 20 in PayU's TEST env | **Genuinely blocked** on a sandbox run - but the DOCUMENTED half is already extracted (AV3), so the sandbox exercise is a confirmation rather than an investigation |
+
+### U-4 - the `.env.example` half is ALREADY FIXED
+
+The map says: "`.env.example` used `/payment/success` and `/payment/failure`;
+`App.jsx` defines `/payment-success` and `/payment-failure`."
+
+**Checked. `.env.example` lines 219-220 now read:**
+
+```
+FRONTEND_SUCCESS_URL=https://donation.example.org/payment-success
+FRONTEND_FAILURE_URL=https://donation.example.org/payment-failure
+```
+
+**Which match `App.jsx:180-181` exactly.** The documentation defect was fixed at
+some point and the finding was never updated - it has been describing a
+corrected file for several packages.
+
+**What remains is the DEPLOYED values, and that is genuinely unreachable from
+here** - two independent reasons, both checked rather than assumed:
+
+1. The Vercel tooling available to this session can WRITE environment variables
+   and cannot READ them. `get_project` returns framework, domains and deployment
+   state; no environment values.
+2. Behavioural probing is unavailable: the backend deployment's `readyState` is
+   `BLOCKED` and `live` is `false`, and the production domain answers 404. (The
+   invalid-hash path would otherwise have revealed `FRONTEND_FAILURE_URL`
+   without any credential, since it redirects before any hash check passes.)
+
+**But it is no longer a "production session".** It is one `vercel env pull`, or
+one look at the dashboard, comparing two values against exactly:
+
+```
+/payment-success
+/payment-failure
+```
+
+The comparison is pre-computed, so whoever reads the values is confirming rather
+than investigating. **That is the difference AV3 is about**: the task did not
+shrink, the part of it that needed a human did.
+
+### U-6 - the prisma advisory check, DONE
+
+The item was "trigger, not cadence - start of every phase", and Phase 4 is next.
+Run against the deployed tree:
+
+```
+deepmerge-ts  <8.0.0   HIGH   stack exhaustion on recursive object graphs
+  @prisma/config
+    prisma
+3 high severity vulnerabilities
+```
+
+**The chain IS in the PRODUCTION tree, and the obvious reading is wrong.**
+`prisma` is declared a devDependency - so the natural conclusion is "build
+tooling only". `npm ls` says otherwise:
+
+```
+@prisma/client@6.19.3      <- a production dependency
+`-- prisma@6.19.3
+  `-- @prisma/config@6.19.3
+    `-- deepmerge-ts@7.1.5
+```
+
+`@prisma/client` pulls `prisma` transitively. **Checking the declaration would
+have given the wrong answer; checking the tree gave the right one.**
+
+**It is not reachable by an attacker.** `deepmerge-ts` is used by
+`@prisma/config` to merge Prisma CONFIGURATION, which is developer-controlled.
+No request path reaches it, and stack exhaustion needs attacker-controlled
+recursive input.
+
+**Recommendation: its own small package, not folded into 3.6.** The fix is a
+Prisma bump, which regenerates the client - the one dependency the entire data
+layer sits on. It deserves a full suite run of its own rather than being
+absorbed into a package that is already removing Mongoose.
 
 ---
 
@@ -2629,6 +2788,18 @@ naming the test that covers that condition forces the question "does one exist?"
 It did not. The test I later wrote failed with `Missing expected rejection`,
 which is precisely the state the citation rule asks you to discover before
 writing the sentence rather than after.
+
+#### AND FOR DESTRUCTIVE ASSERTIONS, ONE MORE QUESTION (AW1)
+
+> **For any assertion that a control DESTROYS or REVOKES something at a
+> threshold, ask: what does an attacker gain by reaching that threshold ON
+> SOMEONE ELSE'S BEHALF?**
+
+A question, not a prohibition - the answer is often "nothing" and the assertion
+is then correct. It exists because SEC-02's suite asserted that a user's reset
+code must be VOIDED at the attempt cap, which defended nothing and handed anyone
+who knows an address a five-request denial of service on that user's reset. See
+AW1.
 
 #### What this does NOT require
 
