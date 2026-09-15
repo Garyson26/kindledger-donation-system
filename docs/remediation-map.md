@@ -886,6 +886,76 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## Package 3.5a - SEC-08's LAST ORACLE CLOSED
+
+`config/email.js` gains one template and `/signup` uses it. AQ2's audit said it
+would be one template; it was one template.
+
+### Both halves are required
+
+A uniform response with no email behind it is **a lie to the attacker and a
+SILENCE TO THE VICTIM** - the person whose address was used would never learn it
+happened. So the existing-account path sends a notice and says the same thing to
+the caller either way.
+
+**What the notice must not do**, which is the whole design:
+
+- **No code and no link.** Someone who does not control the address caused it to
+  be sent. Anything actionable is a capability handed to them if that mailbox is
+  ever compromised, and this recipient has nothing to DO.
+- **It does not say who tried.** We do not know - the attempt carries an address
+  and a name the attacker typed, and no verified identity.
+- **It does not echo the attacker's `name`.** Reflecting it would let anyone
+  send arbitrary text to any address in the system, in an email from us. The
+  greeting uses the name on the EXISTING account; the only attacker-controlled
+  value in the message is the address, which the recipient already knows.
+
+### I INVERTED THE ORACLE BEFORE I CLOSED IT
+
+The first version made only the NOTICE fire-and-forget and left the OTP path
+awaiting its send, rolling back and answering 500 on failure.
+
+**That did not close the oracle - it turned it around.** With mail degraded, an
+address that HAS an account answers 200 and one that does not answers 500, which
+distinguishes them perfectly. Worse than before, because the 500 looks like an
+infrastructure problem rather than a disclosure.
+
+**The asymmetry was in the branch I was not editing.** My own comment at that
+site anticipated the shape and named the wrong branch. The test caught it on the
+first run; reading the code did not.
+
+`/signup/resend-otp` had already been made fire-and-forget for exactly this
+reason, **in the same file, three functions away.** A precedent that close and
+still not applied is the argument for running the thing rather than reasoning
+about it.
+
+### THE COST, STATED
+
+A user whose address genuinely bounces is told "check your email" and receives
+nothing. That is inherent to a uniform response and it is the price SEC-08 asks.
+The pending row is now KEPT rather than rolled back, so `/signup/resend-otp` is
+a real recovery path, and the 24-hour sweep removes it if nobody uses it.
+
+### One field is excluded from the byte-comparison, with an argument
+
+`email` differs between the two responses because each **echoes the address the
+caller sent**. That is definitionally not a disclosure - the attacker chose the
+value. Every other field must match byte for byte, and the test additionally
+asserts that the excluded field IS a pure echo and that both bodies carry the
+same KEYS, so it cannot quietly become a carrier later.
+
+**An exclusion with an argument is different from a comparison that never
+looked**, which is the distinction AP1 is actually about.
+
+### What is NOT closed
+
+**A TIMING difference.** The new-account path hashes a password and writes a
+row; the existing-account path does neither. That is a far weaker signal than a
+distinct message, and closing it means constant-time signup - a different piece
+of work. Recorded here rather than left implied by the absence of a comment.
+
+---
+
 ## AW1 - A TEST THAT ENCODED A HARM AS A REQUIREMENT, AND THEN PROTECTED IT
 
 **Its own class. The three neighbours are all about CONTROLS; this one is about

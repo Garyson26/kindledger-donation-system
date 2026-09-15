@@ -505,9 +505,16 @@ test('SEC-02 / SEC-08 RESOLVED: the cap is byte-identical either way (CHANGED IN
   );
 });
 
-test('SEC-08: the one remaining oracle is /signup, and it is deliberate', async () => {
-  // Recorded as a test so the deferral cannot be forgotten: if someone closes
-  // it, this fails and they update it on purpose.
+test('SEC-08 FULLY CLOSED: /signup answers identically either way (CHANGED IN 3.5a)', async () => {
+  // THIS TEST PINNED THE LAST ORACLE and said that if it ever started failing,
+  // the oracle had been closed and it should be updated on purpose. Package
+  // 3.5a closed it - the second email template, which is the only reason that
+  // package existed.
+  //
+  //   WAS: assert.notDeepEqual(known.body, unknown.body)   <- the oracle
+  //   NOW: assert.deepEqual(known.body, unknown.body)
+  //
+  // AP1: the ENTIRE body, deepEqual, and the status. Not the status alone.
   await store.reset();
   const email = uniqEmail('signupleak');
   await store.createUser({ email });
@@ -519,14 +526,64 @@ test('SEC-08: the one remaining oracle is /signup, and it is deliberate', async 
     password: 'ValidPassword1!',
   });
 
-  assert.notDeepEqual(
-    known.body,
-    unknown.body,
-    'STILL AN ORACLE, deliberately: closing it needs a second email template in ' +
-      'config/email.js, which package 3.2 does not own. If this assertion starts ' +
-      'failing, the oracle was closed and this test should be updated to assert that.'
+  assert.equal(known.status, unknown.status, 'same status');
+  assert.equal(known.status, 200, 'and both are accepted rather than both refused');
+
+  // ONE FIELD IS EXCLUDED, AND THE EXCLUSION IS ARGUED RATHER THAN ASSUMED.
+  //
+  // `email` differs because each response ECHOES THE ADDRESS THE CALLER SENT.
+  // That is definitionally not a disclosure: the attacker chose the value, so
+  // reading it back tells them nothing they did not already have. Every other
+  // field must match byte for byte.
+  //
+  // AP1 says compare the whole body, and this is not a weakening of it - an
+  // exclusion with a reason is different from a comparison that never looked.
+  // The two assertions below are what make it safe: the field is excluded AND
+  // proven to be a pure echo, so it cannot become a carrier later.
+  assert.deepEqual(
+    { ...known.body, email: null },
+    { ...unknown.body, email: null },
+    'every field except the echoed address must be identical'
   );
-  assert.match(known.body.error, /already exists/i);
+  assert.equal(known.body.email, email, 'the excluded field is a pure echo of the input');
+  assert.equal(
+    Object.keys(known.body).sort().join(','),
+    Object.keys(unknown.body).sort().join(','),
+    'and the two bodies carry the same KEYS, so nothing extra appears on one path'
+  );
+
+  // AND THE ACCOUNT MUST BE UNTOUCHED. A signup attempt against an existing
+  // address must not create a pending signup that could later be verified into
+  // a second account, or overwrite anything on the first.
+  const after = await store.readUser(email);
+  assert.ok(after, 'the existing account survives');
+  assert.equal(after.email, email.toLowerCase());
+
+  // The attacker's name must NOT have replaced the account holder's.
+  assert.notEqual(after.name, 'x', "the attacker's `name` field did not overwrite anything");
+});
+
+test('3.5a: a signup attempt on a known address creates NO pending signup', async () => {
+  // The uniform response must not be paid for by leaving a row an attacker can
+  // then verify. `/signup/verify-otp` would otherwise be a second route to the
+  // same oracle - and worse, a route to an account.
+  await store.reset();
+  const email = uniqEmail('nopending');
+  await store.createUser({ email });
+
+  await post('/api/auth/signup', { name: 'attacker', email, password: 'ValidPassword1!' });
+
+  const pending = await getPrisma().pendingSignup.findFirst({
+    where: { email: email.toLowerCase() },
+  });
+  assert.equal(pending, null, 'no pending signup row was created for an address that has an account');
+
+  // And a resend for that address still answers uniformly, so the absence of a
+  // row is not observable through the other endpoint either (AP1).
+  const resendKnown = await post('/api/auth/signup/resend-otp', { email });
+  const resendUnknown = await post('/api/auth/signup/resend-otp', { email: uniqEmail('nobody2') });
+  assert.equal(resendKnown.status, resendUnknown.status);
+  assert.deepEqual(resendKnown.body, resendUnknown.body);
 });
 
 test('SEC-08: the reset and resend paths no longer leak existence (CHANGED IN 3.2)', async () => {

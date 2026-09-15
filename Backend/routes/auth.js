@@ -39,7 +39,12 @@ const jwt = require("jsonwebtoken");
 const { refuse, failed } = require("../utils/respond");
 const authMiddleware = require("../middleware/authMiddleware");
 const { JWT_SECRET } = require("../config/jwt");
-const { sendVerificationEmail, sendLoginOTP, sendSignupOTP } = require("../config/email");
+const {
+  sendVerificationEmail,
+  sendLoginOTP,
+  sendSignupOTP,
+  sendSignupAttemptNotice,
+} = require("../config/email");
 
 // SEC-04. THIS IMPORT IS WHAT CLOSES THE FINDING. Phase 2 built
 // config/rateLimiters.js with a Redis store and nothing imported it; the
@@ -155,40 +160,74 @@ router.post("/signup", authLimiter, async (req, res) => {
       assignedRole = "admin";
     }
 
+    // =========================================================================
+    // SEC-08's LAST ORACLE, CLOSED (package 3.5a)
+    // =========================================================================
+    // This answered `400 "User already exists with this email"`, which told an
+    // attacker the address holds an account. It answers identically now,
+    // whether or not it does.
+    //
+    // BOTH HALVES ARE REQUIRED. A uniform response with no email behind it is a
+    // lie to the attacker and a SILENCE TO THE VICTIM - the person whose
+    // address was used would never learn it happened. So the existing-account
+    // path sends a notice instead of an OTP, and says the same thing to the
+    // caller either way.
+    //
+    // BOTH SENDS ARE FIRE-AND-FORGET, AND GETTING THAT WRONG FIRST IS WHY THE
+    // COMMENT SAYS SO.
+    //
+    // My first version made only the NOTICE best-effort and left the OTP path
+    // awaiting its send with a rollback and a 500. That did not close the
+    // oracle - IT INVERTED IT. With mail degraded, an address that HAS an
+    // account answers 200 and one that does not answers 500, which distinguishes
+    // them perfectly. The test caught it immediately; reading the code did not,
+    // because the asymmetry is in the branch I was not editing.
+    //
+    // So neither branch signals mail delivery. `/signup/resend-otp` already
+    // worked this way for exactly this reason, in this file - the precedent was
+    // three functions away and I did not apply it.
+    //
+    // THE COST, STATED: a user whose address genuinely bounces is told "check
+    // your email" and receives nothing. That is inherent to a uniform response
+    // and it is the price SEC-08 asks. The pending row is KEPT rather than
+    // rolled back so `/signup/resend-otp` is a real recovery path, and the
+    // 24-hour sweep removes it if nobody uses it.
+    //
+    // WHAT REMAINS AND IS NOT CLOSED HERE: a TIMING difference. The new-account
+    // path hashes a password and writes a row; this one does neither. That is a
+    // far weaker signal than a distinct message and closing it means constant-
+    // time signup, which is a different piece of work. Recorded in the map
+    // rather than left implied by the absence of a comment.
     const existing = await users.findByEmail(email);
+
     if (existing) {
-      // SEC-08, THE ONE THAT IS DEFERRED AND WHY.
-      //
-      // This response tells an attacker the address holds an account. Removing
-      // it properly means always answering "check your email" and sending
-      // EITHER a verification code OR a "someone tried to register with your
-      // address" notice - which needs a second email template in
-      // config/email.js, a file this package does not own.
-      //
-      // The security review reaches the same conclusion ("harder to remove
-      // without hurting UX"). Deferred to the package that owns the email
-      // templates, and recorded in the map rather than left as an omission.
-      return refuse(res, 400, "User already exists with this email. Please login instead.");
+      sendSignupAttemptNotice(email, existing.name).catch((e) =>
+        console.error("[auth] signup-attempt notice failed:", e && e.message)
+      );
+    } else {
+      const otp = generateVerificationCode();
+      await pendingSignups.upsert({
+        name,
+        email,
+        password,
+        role: assignedRole,
+        otp,
+        otpExpiresAt: Date.now() + OTP_TTL_MS,
+      });
+
+      // The Mongoose version rolled back here on a mail failure, reasoning that
+      // "a pending signup whose OTP was never delivered is a row nobody can act
+      // on". That stopped being true when `/signup/resend-otp` was made uniform
+      // - the row IS actionable now, by the person who owns the address.
+      sendSignupOTP(email, otp, name).catch((e) =>
+        console.error("[auth] signup OTP send failed:", e && e.message)
+      );
     }
 
-    const otp = generateVerificationCode();
-    await pendingSignups.upsert({
-      name,
-      email,
-      password,
-      role: assignedRole,
-      otp,
-      otpExpiresAt: Date.now() + OTP_TTL_MS,
-    });
-
-    const emailResult = await sendSignupOTP(email, otp, name);
-    if (!emailResult.success) {
-      // Roll back, exactly as the Mongoose version did: a pending signup whose
-      // OTP was never delivered is a row nobody can act on.
-      await pendingSignups.remove(email);
-      return refuse(res, 500, "Failed to send verification email. Please try again.");
-    }
-
+    // ONE response object, constructed once, reached by both paths. Two
+    // `res.json` calls with the same literal would be two things somebody has
+    // to keep byte-identical - which is exactly how my first SEC-08 fix left a
+    // fourth endpoint differing (AP1).
     res.json({
       message: "Registration initiated. Please check your email for OTP verification.",
       email,
