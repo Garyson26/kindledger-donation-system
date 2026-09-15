@@ -31,6 +31,7 @@ const path = require('node:path');
 process.env.NODE_ENV = 'production';
 
 const migrationState = require('../config/migrationState');
+const destructiveJobs = require('../config/destructiveJobs');
 const scheduler = require('../services/scheduler');
 const donations = require('../repositories/donations');
 const categories = require('../repositories/categories');
@@ -82,7 +83,26 @@ function importersOf(modelName) {
     .sort();
 }
 
+/**
+ * AT1: this suite's subject is the SAFETY gate, so it authorises the jobs and
+ * then asserts that safety still refuses. Authorisation has its own suite -
+ * test/destructive-jobs.test.js - and keeping them apart is the point: if one
+ * file could assert both, the two questions would be one question again.
+ */
+function authoriseAll() {
+  for (const job of destructiveJobs.jobNames()) {
+    process.env[destructiveJobs.definitionOf(job).env] = 'true';
+  }
+}
+
+function deauthoriseAll() {
+  for (const job of destructiveJobs.jobNames()) {
+    delete process.env[destructiveJobs.definitionOf(job).env];
+  }
+}
+
 before(async () => {
+  authoriseAll();
   assert.ok(process.env.DATABASE_URL, 'DATABASE_URL is required');
   const probe = await require('../repositories').checkDatabase();
   assert.equal(probe.ok, true, `MySQL unreachable: ${probe.error}`);
@@ -100,6 +120,7 @@ before(async () => {
 });
 
 after(async () => {
+  deauthoriseAll();
   try {
     await donations.deleteByDonorEmailPrefix(TAG);
     await categories.deleteByNamePrefix(CAT_PREFIX);

@@ -179,6 +179,31 @@ jobs:
         working-directory: Backend
         run: npm run test:etl
 
+      - name: Admin characterisation (AS7)
+        working-directory: Backend
+        env:
+          TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_admin_ci
+        run: npm run test:admin
+
+      # AT4. THE IMPORT-LEVEL GATE. It walks the source tree and fails if any
+      # file imports the Mongoose model of an entity that config/migrationState
+      # declares MySQL-authoritative and does not allowlist.
+      #
+      # IT IS A GATE RATHER THAN A TEST BECAUSE OF WHAT IT CATCHES. The AR1
+      # audit enumerated CALL SITES, so a DEAD import was invisible to it by
+      # construction - and dead references to a superseded store are exactly
+      # what a later developer resurrects, because the binding is already in
+      # scope and looks sanctioned. This check found two on its first run.
+      - name: Migration-state declaration, checked against the source tree (AT4)
+        working-directory: Backend
+        run: npm run test:migration-state
+
+      # AT1. Destructive jobs need authorisation SEPARATE from migration state,
+      # so that migrating an entity cannot make a purge live as a side effect.
+      - name: Destructive-job authorisation (AT1)
+        working-directory: Backend
+        run: npm run test:destructive-jobs
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------

@@ -22,12 +22,22 @@
  * at cutover, and it would put a destructive job against live production data
  * into a phase that has no business touching it.
  *
- * GUARDED TWICE, AND THE TWO GUARDS ARE NOT THE SAME KIND OF THING (AS2).
+ * GUARDED THREE TIMES, AND NO TWO ARE THE SAME KIND OF THING (AS2, AT1).
  *
- *   1. `SCHEDULER_ENABLED` decides whether the jobs are REGISTERED. That is an
- *      OPERATIONAL choice and an operator may flip it.
- *   2. `config/migrationState` decides whether a job may DELETE. That is a
- *      CORRECTNESS one, and no environment variable can flip it.
+ *   1. `SCHEDULER_ENABLED` decides whether the jobs are REGISTERED. An
+ *      OPERATIONAL choice; an operator may flip it.
+ *   2. `config/destructiveJobs` decides whether a job is AUTHORISED to delete.
+ *      Per JOB, defaulting to off, and nothing but an operator turns one on.
+ *   3. `config/migrationState` decides whether deleting would be SAFE. A
+ *      CORRECTNESS question; no environment variable can flip it.
+ *
+ * **2 AND 3 ARE SEPARATE BECAUSE AS7 SHOWED WHAT HAPPENS WHEN THEY ARE NOT.**
+ * Migrating `routes/admin.js` moved `user` to `mysql`, and the inactive-account
+ * purge - which had been refused - became runnable as a SIDE EFFECT of a route
+ * migration. Nobody decided that. Package 3.4 would have done the same for
+ * donations, authorising two destructive jobs at once on a single transition.
+ *
+ * Migration state is a SAFETY PRECONDITION, NOT AN AUTHORISATION.
  *
  * THE SECOND GUARD EXISTS BECAUSE THE FIRST WAS NOT A CONTROL. Until AS2, the
  * only thing preventing the retention purge from running mid-migration was that
@@ -51,9 +61,12 @@ const cron = require('node-cron');
 const donations = require('../repositories/donations');
 const users = require('../repositories/users');
 const pendingSignups = require('../repositories/pendingSignups');
-// AS2: the single declaration of which store is authoritative per entity.
-// Every DELETE below is gated on it.
+// AS2: the single declaration of which store is authoritative per entity - a
+// SAFETY precondition for every DELETE below.
 const migrationState = require('../config/migrationState');
+// AT1: per-job AUTHORISATION, which is a different question and is never
+// implied by migration state. Both must say yes.
+const destructiveJobs = require('../config/destructiveJobs');
 
 // SPEC-1A section 9: donations are retained for ten years.
 const RETENTION_YEARS = 10;
@@ -91,6 +104,20 @@ function tenYearsAgo(now = new Date()) {
 const PLAUSIBLE_FLOOR = new Date('2000-01-01T00:00:00.000Z');
 
 async function purgeOldDonations({ dryRun = false, now = new Date() } = {}) {
+  // THE GATES RUN BEFORE THE JOB DOES ANYTHING (AT1).
+  //
+  // They used to sit after the candidate count, which short-circuits on zero -
+  // so a job with nothing to delete never revealed that it was unauthorised,
+  // and would begin refusing the day a row first qualified. An operator would
+  // have read months of clean logs and then a sudden refusal.
+  //
+  // A DRY RUN SKIPS BOTH, deliberately: counting is not destructive, and the
+  // preview is how an operator decides whether to authorise at all. Requiring
+  // authorisation to see what a job WOULD do makes that decision unmakeable.
+  if (!dryRun) {
+    destructiveJobs.assertRunnable('retention-purge', 'the retention purge');
+  }
+
   const cutoff = tenYearsAgo(now);
 
   // Counted FIRST and reported whatever happens next. An implausible date is
@@ -124,9 +151,6 @@ async function purgeOldDonations({ dryRun = false, now = new Date() } = {}) {
     };
   }
 
-  // AS2. Gated on the DECLARATION, not on an environment variable.
-  migrationState.assertDeletable('donation', 'the retention purge');
-
   const deleted = await donations.deleteOlderThan(cutoff, PLAUSIBLE_FLOOR);
   return { ...base, deleted, dryRun: false };
 }
@@ -148,6 +172,11 @@ async function purgeOldDonations({ dryRun = false, now = new Date() } = {}) {
  * anybody asked for.
  */
 async function purgeInactiveUsers({ dryRun = false, now = new Date() } = {}) {
+  // See purgeOldDonations: gates first, dry runs exempt (AT1).
+  if (!dryRun) {
+    destructiveJobs.assertRunnable('inactive-account-purge', 'the inactive-account purge');
+  }
+
   const cutoff = tenYearsAgo(now);
   const candidates = await users.countInactiveOlderThan(cutoff);
   const base = { cutoff: cutoff.toISOString(), candidates };
@@ -161,10 +190,6 @@ async function purgeInactiveUsers({ dryRun = false, now = new Date() } = {}) {
     };
   }
 
-  // AS2. `user` is currently `split` - admin.js still writes MongoDB - so this
-  // refuses today, and that is the correct answer rather than a limitation.
-  migrationState.assertDeletable('user', 'the inactive-account purge');
-
   const deleted = await users.deleteInactiveOlderThan(cutoff);
   return { ...base, deleted, dryRun: false };
 }
@@ -177,6 +202,14 @@ async function purgeInactiveUsers({ dryRun = false, now = new Date() } = {}) {
  * never runs is a retention problem, not a disk-space one.
  */
 async function sweepExpiredSignups({ dryRun = false, now = new Date() } = {}) {
+  // See purgeOldDonations: gates first, dry runs exempt (AT1). The SAFETY gate
+  // has never stood in this job's way - `pendingSignup` has always been
+  // MySQL-only - but authorisation still applies, and leaving it off has a real
+  // cost: see costOfLeavingItOff in config/destructiveJobs.js.
+  if (!dryRun) {
+    destructiveJobs.assertRunnable('pending-signup-sweep', 'the pending-signup sweep');
+  }
+
   const candidates = await pendingSignups.countExpired(now);
   if (dryRun || candidates === 0) {
     return {
@@ -186,11 +219,6 @@ async function sweepExpiredSignups({ dryRun = false, now = new Date() } = {}) {
       authoritativeStore: migrationState.storeFor('pendingSignup'),
     };
   }
-
-  // AS2. Gated identically, and it PASSES - `pendingSignup` is MySQL-only. That
-  // is why the gate is per-entity rather than a blanket "is the migration
-  // finished": this job is safe today and blocking it would be theatre.
-  migrationState.assertDeletable('pendingSignup', 'the pending-signup sweep');
 
   const deleted = await pendingSignups.deleteExpired(now);
   return { candidates, deleted, dryRun: false };
@@ -233,7 +261,17 @@ function initializeScheduler() {
           // "Refused because the entity has not migrated" and "crashed partway
           // through deleting" are opposite facts about the data, and the second
           // message would send someone looking for damage that does not exist.
+          if (err && err.code === 'ERR_JOB_NOT_AUTHORISED') {
+            // THE SYSTEM IS WORKING AS CONFIGURED. Logged at info, not warn:
+            // an unauthorised job is a decision someone made, and warning about
+            // it nightly trains an operator to ignore this channel.
+            // eslint-disable-next-line no-console
+            console.log(`[scheduler] ${err.job} is not authorised; nothing deleted.`);
+            return;
+          }
           if (err && err.code === 'ERR_NOT_AUTHORITATIVE') {
+            // THE CONFIGURATION WOULD HAVE DESTROYED DATA. A different fact
+            // from the one above, and it warrants a warning.
             // eslint-disable-next-line no-console
             console.warn(`[scheduler] retention purge REFUSED, nothing deleted: ${err.message}`);
             return;
@@ -268,6 +306,17 @@ function initializeScheduler() {
           }
         } catch (err) {
           // eslint-disable-next-line no-console
+          if (err && err.code === 'ERR_JOB_NOT_AUTHORISED') {
+            // eslint-disable-next-line no-console
+            console.log(`[scheduler] ${err.job} is not authorised; nothing deleted.`);
+            return;
+          }
+          if (err && err.code === 'ERR_NOT_AUTHORITATIVE') {
+            // eslint-disable-next-line no-console
+            console.warn(`[scheduler] pending-signup sweep REFUSED: ${err.message}`);
+            return;
+          }
+          // eslint-disable-next-line no-console
           console.error('[scheduler] pending-signup sweep failed:', err && err.message);
         }
       },
@@ -284,13 +333,30 @@ function initializeScheduler() {
   const pending = migrationState.pendingMigration();
   // eslint-disable-next-line no-console
   console.log(`[scheduler] migration state: ${migrationState.summary()}`);
+  // eslint-disable-next-line no-console
+  console.log(`[scheduler] job authorisation: ${destructiveJobs.summary()}`);
+
   if (pending.length > 0) {
     // eslint-disable-next-line no-console
     console.warn(
-      `[scheduler] DESTRUCTIVE JOBS WILL REFUSE for: ${pending.join(', ')}. ` +
-        'MySQL is not authoritative for them yet, so a purge would delete ' +
-        'migrated history while live rows accumulate in MongoDB. Dry runs still ' +
-        'work. See config/migrationState.js.'
+      `[scheduler] UNSAFE TO PURGE for: ${pending.join(', ')}. MySQL is not ` +
+        'authoritative for them yet, so a purge would delete migrated history ' +
+        'while live rows accumulate in MongoDB. Dry runs still work. See ' +
+        'config/migrationState.js.'
+    );
+  }
+
+  const unauthorised = destructiveJobs.unauthorisedJobs();
+  if (unauthorised.length > 0) {
+    // AT1: said separately from the line above, because "unsafe" and
+    // "not asked for" are different facts and an operator acts on them
+    // differently. Conflating them is what let a purge go live unnoticed.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[scheduler] NOT AUTHORISED, so they will not delete: ${unauthorised.join(', ')}. ` +
+        'Each is enabled by its OWN variable - see config/destructiveJobs.js, ' +
+        'which also records what leaving each one off costs. Migrating an ' +
+        'entity does NOT authorise its job.'
     );
   }
   return { registered: true, jobs: ['retention-purge', 'pending-signup-sweep'] };

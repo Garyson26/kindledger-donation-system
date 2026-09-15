@@ -421,6 +421,16 @@ router.post("/cleanup/trigger", async (req, res) => {
     // entity yet, nothing was touched" and "the delete crashed partway" are
     // opposite facts about the data, and answering 500 to the first would send
     // an admin looking for damage that does not exist.
+    // AT1: three outcomes, three answers. "Nobody authorised this job" is not
+    // "it would be unsafe" and neither is "it crashed partway through
+    // deleting" - and an admin acts differently on each.
+    if (err && err.code === "ERR_JOB_NOT_AUTHORISED") {
+      return refuse(res, 409, `Cleanup not authorised: ${err.message}`, {
+        deleted: 0,
+        job: err.job,
+        enableWith: err.env,
+      });
+    }
     if (err && err.code === "ERR_NOT_AUTHORITATIVE") {
       return refuse(res, 409, `Cleanup refused: ${err.message}`, {
         deleted: 0,

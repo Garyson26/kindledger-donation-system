@@ -694,11 +694,59 @@ test('the pending-signup sweep deletes expired rows and spares live ones', async
   assert.equal(dry.deleted, 0, 'a dry run must delete nothing');
   assert.ok(await repos.pendingSignups.findByEmail(expiredEmail), 'still present after dry run');
 
-  const real = await scheduler.sweepExpiredSignups();
+  // AT1: authorisation is a declared precondition now. `pendingSignup` has
+  // always been MySQL-only, so only the authorisation gate applies here - which
+  // is exactly why the gate is per-job rather than keyed off migration state.
+  const destructiveJobs = require('../config/destructiveJobs');
+  const sweepEnv = destructiveJobs.definitionOf('pending-signup-sweep').env;
+  process.env[sweepEnv] = 'true';
+  let real;
+  try {
+    real = await scheduler.sweepExpiredSignups();
+  } finally {
+    delete process.env[sweepEnv];
+  }
   assert.ok(real.deleted >= 1);
   assert.equal(await repos.pendingSignups.findByEmail(expiredEmail), null, 'expired row swept');
   assert.ok(await repos.pendingSignups.findByEmail(liveEmail), 'live row must survive');
 });
+
+/**
+ * Open both gates for a test whose subject is the RETENTION LOGIC (AT1).
+ *
+ * These tests used to need nothing, because `purgeOldDonations` short-circuited
+ * on a zero candidate count BEFORE reaching any gate - so with no ancient rows
+ * present they never touched one. AT1 moved the gates ahead of the work, on
+ * purpose: a job that reveals it is unauthorised only once a row first
+ * qualifies is a job an operator discovers at the worst moment.
+ *
+ * So the preconditions are now DECLARED here rather than inherited from an
+ * ordering accident:
+ *
+ *   - `JOB_RETENTION_PURGE=true`  - authorisation (config/destructiveJobs)
+ *   - `donation` as `mysql`       - safety (config/migrationState)
+ *
+ * The second is simulated because `donation` is still `split` until package
+ * 3.4; these tests are about whether the purge computes the right window and
+ * spares the right rows, which is a question that outlives the migration.
+ */
+async function withPurgeAllowed(fn) {
+  const destructiveJobs = require('../config/destructiveJobs');
+  const migrationState = require('../config/migrationState');
+  const env = destructiveJobs.definitionOf('retention-purge').env;
+  const previousEnv = process.env[env];
+  const previousStore = migrationState.ENTITIES.donation.store;
+
+  process.env[env] = 'true';
+  migrationState.ENTITIES.donation.store = migrationState.MYSQL;
+  try {
+    return await fn();
+  } finally {
+    migrationState.ENTITIES.donation.store = previousStore;
+    if (previousEnv === undefined) delete process.env[env];
+    else process.env[env] = previousEnv;
+  }
+}
 
 test('AG1a: a donation with an IMPLAUSIBLE date is excluded from the purge, not swept by it', async () => {
   // THE FAILURE THIS PREVENTS. The ten-year bound is what makes the cleanup
@@ -732,7 +780,7 @@ test('AG1a: a donation with an IMPLAUSIBLE date is excluded from the purge, not 
 
   // The real run must leave it alone. A zero-epoch date is evidence of a
   // migration defect, and deleting the evidence is the worst response.
-  await scheduler.purgeOldDonations();
+  await withPurgeAllowed(() => scheduler.purgeOldDonations());
   assert.ok(
     await repos.donations.findById(zeroEpoch.id),
     'a donation dated 1970 must SURVIVE - it is a data defect, not an old donation'
@@ -773,7 +821,14 @@ test('the retention purge spares recent donations and reports its cutoff', async
   assert.equal(cutoffYear, new Date().getFullYear() - scheduler.RETENTION_YEARS);
   assert.equal(result.deleted, 0);
 
-  const real = await scheduler.purgeOldDonations();
+  const real = await withPurgeAllowed(() => scheduler.purgeOldDonations());
   assert.ok(await repos.donations.findById(recent.id), 'a recent donation must survive the purge');
   assert.equal(typeof real.deleted, 'number');
+
+  // CHANGED BY AT1: and WITHOUT the gates it does not run at all, which is the
+  // property this test would otherwise silently stop covering.
+  await assert.rejects(
+    () => scheduler.purgeOldDonations(),
+    (err) => err.code === 'ERR_JOB_NOT_AUTHORISED'
+  );
 });

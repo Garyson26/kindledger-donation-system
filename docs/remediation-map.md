@@ -80,7 +80,7 @@ Every entry in both tables above sat in that gap.
 
 ## The characterisation-test rule (AC1, SPEC-3 section 1 amendment)
 
-**Every refusal path asserted in packages 3.1 through 3.5 must assert the
+**Every refusal path asserted in every Phase 3 package must assert the
 MECHANISM as well as the outcome.** Concretely, three things:
 
 1. the **status code**,
@@ -161,7 +161,7 @@ them in would make them look like ordinary work items.
 | | Finding | Assigned to | Blocks |
 |---|---|---|---|
 | U-1 | Licence (DEF-01) | **Gary.** Recommendation: Apache-2.0 | Phase 6 |
-| U-2 | `verify_payment` reconciliation | **3.5, DESIGN ONLY** - the call itself is a later package | nothing |
+| U-2 | `verify_payment` reconciliation | **3.4, DESIGN ONLY (re-homed by AT2)** - was 3.5, which no longer exists. The call itself is a later package | nothing |
 | U-3 | The `Cancelled` state | **Code to 3.2; the data question to the J3 session** | nothing |
 | U-4 | BUG-05 redirect URLs | **Gary, production session** | nothing |
 | U-5 | `for_ocean_security_review.md` at HEAD | **Done in package 3.0** - see below | nothing |
@@ -198,14 +198,25 @@ callback's signed `status` at all, but calls PayU server-to-server with the
 `txnid` and marks the donation from PayU's own answer. Its status line reads
 "recorded as a **Phase 3 candidate**". SPEC-3 does not assign it.
 
-**ASSIGNED TO 3.5, DESIGN ONLY. The outbound call is a separate post-Phase-3
-package, gated on sandbox credentials. 3.5 must not block on it.**
+**RE-HOMED TO 3.4 BY AT2, DESIGN ONLY. The outbound call is a separate
+post-Phase-3 package, gated on sandbox credentials. 3.4 must not block on it.**
 
-What 3.5 owes is that the handler **records enough to reconcile later**:
+**IT WAS ASSIGNED TO 3.5, AND 3.5 CEASED TO EXIST.** Collapsing a package
+orphans everything parked against it, and an orphaned deferral is precisely the
+U-2-through-U-6 pattern this map already names: a defensible deferral with no
+owner. **The pattern recurred on U-2 itself**, which is as clear a demonstration
+as the map is going to get that the failure is structural rather than a lapse of
+attention.
+
+Found by AL3's grep - the rule that the sequence is stated ONCE, and that every
+statement of it must be checked before the order changes. It exists because this
+document has contradicted itself before, and it earned its keep here.
+
+What 3.4 owes is that the handler **records enough to reconcile later**:
 `mihpayid`, `txnid`, the signed `amount`, and the raw `status` verbatim. All
 four already have columns (`db/schema.sql`, `donation_payment_details`) and
 `gateway_status` is deliberately stored verbatim rather than as an ENUM, so this
-is a constraint on 3.5's handler rather than new schema.
+is a constraint on 3.4's handler rather than new schema.
 
 The distinction matters: designing for reconciliation is cheap now and
 expensive to retrofit, because a donation whose raw gateway status was never
@@ -875,6 +886,215 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## AT1 - destructive jobs need AUTHORISATION, separate from migration state
+
+**`config/destructiveJobs.js`.** A job runs only when its own gate is on AND
+migration state says deleting is safe. Neither implies the other.
+
+| | Decides | Changed by |
+|---|---|---|
+| `SCHEDULER_ENABLED` | whether jobs are **registered** | an operator |
+| `config/destructiveJobs` | whether a job may **delete** | an operator, per job |
+| `config/migrationState` | whether deleting would be **safe** | a code change, verified against the source tree |
+
+### The finding
+
+AS7 migrated `routes/admin.js`. That moved `user` to `mysql`. **That made the
+inactive-account purge runnable** - a change in what gets deleted, falling out of
+a change to an admin console, decided by nobody.
+
+**It would have recurred and doubled.** Package 3.4 moves `donation` to `mysql`,
+which under the old arrangement authorises the donation retention purge on the
+same transition - two destructive jobs going live at once, on a commit whose
+subject is a payment route.
+
+**MIGRATION STATE IS A SAFETY PRECONDITION, NOT AN AUTHORISATION.** It says the
+rows are all in one place. It says nothing about whether anyone wants them gone.
+
+### Per-job, not one flag
+
+A single "destructive jobs enabled" switch reproduces the problem one level up:
+enabling the harmless-sounding pending-signup sweep would authorise the donation
+retention purge in the same keystroke.
+
+### Every job states what leaving it OFF costs
+
+Asserted by a test, because otherwise "off" reads as the cautious choice
+everywhere and one of these is a retention obligation going unmet:
+
+| Job | Off means |
+|---|---|
+| `JOB_RETENTION_PURGE` | donations retained past the stated ten years - a documented policy not enforced is its own finding |
+| `JOB_INACTIVE_ACCOUNT_PURGE` | personal data kept for accounts nobody has used in a decade |
+| `JOB_PENDING_SIGNUP_SWEEP` | **turn this one on first.** Name, email and bcrypt hash per row, replacing a TTL index that used to expire them continuously |
+
+### The gates run BEFORE the job does anything, and that was a finding of its own
+
+They sat after the candidate count, which short-circuits on zero - **so a job
+with nothing to delete never revealed that it was unauthorised, and would begin
+refusing the day a row first qualified.** An operator would have read months of
+clean logs and then a sudden refusal.
+
+Found by a test failing with "Missing expected rejection" on the pending-signup
+sweep. Dry runs still skip both gates: counting is not destructive, and the
+preview is how an operator decides whether to authorise at all.
+
+### Three outcomes, three answers
+
+`ERR_JOB_NOT_AUTHORISED` is logged at INFO and answered `409` with the variable
+that enables it. `ERR_NOT_AUTHORITATIVE` is logged at WARN. A genuine failure is
+logged at ERROR and says rows may have been partially deleted. **Nobody asked for
+this, this would destroy data, and this crashed partway are three different facts
+and an operator acts differently on each** - warning nightly about the first
+trains them to ignore the channel the third arrives on.
+
+### Asserted, as AT1 required
+
+`test/destructive-jobs.test.js`, in its own file because putting it beside the
+migration-state suite would quietly assert the two questions are one:
+
+- **moving `donation` to `mysql` does NOT make its purge runnable** - simulated,
+  because waiting for 3.4 to find out is the sequence that produced the finding
+- the same for `user`, which needs no simulation: AS7 already moved it
+- authorisation alone is not enough; safety alone is not enough; **both open and
+  it actually deletes** - the control without which the refusals prove only that
+  the job never runs
+- authorising one job does not authorise another
+
+---
+
+## AT3 - A FIX CAN INSTANTIATE THE SHAPE IT WAS WRITTEN TO PREVENT
+
+**Twice, in two consecutive packages, and both times only execution caught it.**
+
+| The rule | The fix | What the fix turned out to be |
+|---|---|---|
+| ETL-01: an option that can only make things worse is worse than no option | narrow the override so it does not apply to loader-refused findings | **a documented flag applying to NOTHING** - the same defect one level up |
+| ETL-01, honoured: report the declaration drifting ahead of the data | make the new finding BLOCKING | **a gate that prevents its own remedy** - blocking stops the load, and running the load is what fixes that finding |
+
+### Why review does not catch these
+
+**The fix reads as compliant, because it was written by someone holding the rule
+in mind.** A reviewer checks the fix against the rule and finds agreement - which
+is exactly what the author checked. Both of these would have passed any review,
+including a hostile one, because the defect is not in the relationship between
+the fix and the rule. It is in the relationship between the fix and the system,
+and that only appears when the code runs.
+
+The first was found by running the ETL and watching a flag apply to nothing. The
+second by running the pre-flight and watching a load refuse to perform its own
+remedy. Neither was found by reading.
+
+### The consequence: THE INJECTION-PROOF STANDARD APPLIES TO FIXES, NOT ONLY GATES
+
+This project already proves gates by injection - break the thing, watch the gate
+fail, restore it, watch it pass. The standard was applied to *controls*: the
+drift gate, the IPv6 keying, `set_real_ip_from`, the AK3 ordering, the LIKE
+escaping.
+
+**Extend it to fixes.** For a fix to a finding of the form "X is a bad shape",
+demonstrate that the fixed code does not exhibit X - by running it, not by
+reading it. Concretely:
+
+- If the fix REMOVES an option, show the removal is observable: passing the old
+  flag must fail loudly, because an operator pasting it from a runbook and
+  seeing a clean run concludes it worked.
+- If the fix ADDS a gate, show the gate's remedy is REACHABLE from the state the
+  gate creates. A gate whose remedy it blocks is a deadlock that looks like
+  caution.
+- If the fix NARROWS something, enumerate what remains in scope. "Applies to
+  nothing" and "applies to exactly the right thing" are indistinguishable in a
+  diff and obvious in a run.
+
+**And a third instance, from AS7, that fits the pattern from the other side:** a
+control that names a specific violation EXPIRES when that violation is fixed.
+`migration-state`'s control used `user`/`routes/admin.js` as its example; AS7
+migrated that file and the control had to move to `donation`/`routes/payment.js`.
+It failed loudly when its subject disappeared, which is the behaviour to build
+in - a control nobody notices has expired is worse than none, because it still
+reports success.
+
+---
+
+## AT4 - AN AUDIT ORGANISED AROUND USAGE CANNOT SEE UNUSED DECLARATIONS
+
+**The AR1 entity audit enumerated CALL SITES. A dead import has none, so it was
+invisible to the method by construction** - not overlooked, unreachable.
+
+`routes/admin.js` and `routes/payment.js` both still imported `models/Category`
+after package 3.1 replaced every USE with the bridge. The audit checked every
+place Category was used and correctly found them all going through MySQL. The
+bindings sat above, unexamined, because the method had no step that would look
+at them.
+
+**The `migrationState` self-check found both on its first run**, because it asks
+a different question: not "where is this used" but "who has this in scope".
+
+### The generalisation
+
+> **An audit organised around USAGE cannot see DECLARATIONS that are never used.
+> Dead references to a superseded store are exactly the thing a later developer
+> resurrects, because the binding is already there and looks sanctioned.**
+
+A dead import is not a crossing today. It is the SEED of one, and it is the
+cheapest kind to plant: the next person editing `admin.js` had `Category` in
+scope, already imported, apparently blessed by whoever wrote the file.
+
+### The gate
+
+`test/migration-state.test.js` asserts that **no file may import the Mongoose
+model of an entity whose authoritative store is MySQL**, outside that entity's
+`mongooseAllowed` list - the ETL, which reads the old store by definition, and
+the bridges, which read it as a fallback. **Wired into CI (AT4)** rather than
+left as a suite someone runs locally.
+
+The asymmetry is the right way round: forgetting to update the declaration after
+migrating a file leaves it UNDERSTATED, which is safe. Updating the declaration
+without migrating the file leaves it OVERSTATED - a purge would then be
+permitted - and that is the direction the gate catches.
+
+---
+
+## AT5 - SEC-10 IS THE NINTH INHERITED CLAIM, AND THE THIRD THAT IS MINE
+
+| # | Claim | Source |
+|---|---|---|
+| 7 | the auto-verify branch is "narrowed to accounts that predate the OTP flow" | **my comment, 3.2** |
+| 8 | BUG-03's counter is "always 0" | the review, restated in the map |
+| 9 | **SEC-10 is closed - "one shared validator across all five paths"** | **my claim, 3.2** |
+
+**Two of the last three were my own claims rather than the review's, and that is
+the more useful half of the pattern.** The rule was built to catch claims
+inherited from documents written by other people. It bites hardest on what one
+asserts IN PASSING WHILE DOING SOMETHING ELSE - a sentence written to close a
+finding, in a commit about something larger, never re-read because the author
+knows what they meant.
+
+SEC-10's mechanism was "one shared validator across ALL FIVE PATHS". Package 3.2
+built it as a function local to `routes/auth.js`, which made it one validator
+across the five paths IN THAT FILE. The claim was true of what was checked and
+false of what was claimed, and nothing in the phrasing revealed the difference.
+
+### A validator disagreeing with its own error text is a THIRD kind of defect
+
+```js
+if (!newPassword || newPassword.length < 10) {
+  return res.status(400).json({ error: "Password must be at least 6 characters long" });
+}
+```
+
+**Neither half is wrong.** The check is the correct policy. The message is a
+clear sentence. **The defect is the pair**, and it has a specific victim: an
+admin who reads the message, chooses a 7-character password, and is refused by
+an error stating that it should have worked. They will try again with 8, then 9,
+learning nothing each time.
+
+It is not a policy bug and not a copy bug - it is the consequence of the rule and
+its statement being two separate literals. `utils/password.js` interpolates the
+constant into the message, so they cannot disagree again.
+
+---
+
 ## AS7 - admin.js migrated. ADMIN-01 CLOSED. And package 3.5 no longer exists.
 
 `routes/admin.js` imports no Mongoose. `user` is now `mysql` in
@@ -1107,7 +1327,9 @@ Four of the seven new crossings AR1 found are not in route files:
 `services/scheduler.js`, `scripts/seedDatabase.js` twice, and `checkOrder.js`.
 **The entire Phase 3 sequence is organised around `routes/`** - 3.1 categories,
 3.2 auth/users/middleware, 3.3 donations, 3.4 payment, 3.5 admin, 3.6 Mongoose
-removal. Every package is named for a route file.
+removal. Every package is named for a route file. (That was the sequence AS WRITTEN;
+AT2 later collapsed 3.5 into AS7. The point stands either way - and the collapse
+orphaned U-2, which is the same shape one level up.)
 
 **So no amount of careful reading of the sequence could have surfaced them.**
 They are not omissions from a list; they are outside the space the list
@@ -1306,7 +1528,7 @@ database never sees.
 succeeded, and access is not revoked.**
 
 **Why it was not caught.** Every one of these paths is untested: `admin.js` is
-package 3.5 and has no characterisation suite yet, which is exactly the coverage
+package 3.5 and had no characterisation suite (it has one as of AS7), which is exactly the coverage
 rule's point ("no route file is migrated until it has characterisation tests")
 seen from the other side - **a file that has not been migrated has no tests
 either, so a change in a DIFFERENT file can break it silently.** Package 3.2
@@ -1375,7 +1597,8 @@ Both are about tests that assert too little.
 
 **ADMIN-01 was not caught by a weak test. It was not caught because THERE IS NO
 TEST AT ALL in `admin.js`** - the file has no characterisation suite, because it
-is package 3.5 and its suite is written when it migrates.
+was package 3.5 and its suite was written when it migrated - in AS7, and the
+suite is what made ADMIN-01 executable rather than described.
 
 So the rule has a blind spot it cannot see from the inside:
 
@@ -1461,8 +1684,9 @@ and `:232` call `bcrypt.hash(password, 10)` DIRECTLY - they do not go through
 
 **That second consequence is the finding.** It is not about a cost parameter; it
 is a security control silently skipped by the one code path most likely to be
-used after an account compromise. Recorded against `admin.js` (3.5), and it is
-more important than the number that led to it.
+used after an account compromise. **CLOSED IN AS7** - `admin.js` now calls
+`users.setPassword`, which increments `token_version`. It was more important
+than the number that led to it.
 
 ### RESTATED: SEC-21 is not about `isVerified` being false
 
@@ -1741,7 +1965,7 @@ Neither was a behaviour change, and neither assertion was wrong about the CODE -
 they were wrong about owning the table. Both now assert the RULE (`reported
 statuses == statuses with rows`; `each is max+1`) which is what the finding
 actually says and is true regardless of what shares the database. **Expect more
-of these in 3.4 and 3.5**: the app user is scoped to one database by design, so
+of these in 3.4**: the app user is scoped to one database by design, so
 per-suite databases would need root, and that is a bigger change than a route
 package should make.
 
@@ -2044,10 +2268,18 @@ verification** - it is how the claim propagated in the first place.
 | 6 | `scheduler.js` "already implements the same retention rules" | the BUG-10 mechanism | **TWO OF THREE** - the inactive-account purge had no replacement |
 | 7 | The auto-verify branch is "narrowed to accounts that predate the OTP flow" | **my own comment, 3.2** | **NEVER IMPLEMENTED** - it applies to everyone |
 | 8 | BUG-03's counter is "always 0" | the review, restated in the map | **WRONG** - it counts the lowercase subset; measured 1 of 2 (AR1) |
+| 9 | SEC-10 is closed: "one shared validator across all five paths" | **my own claim, package 3.2** | **TRUE OF ONE FILE.** It was local to routes/auth.js; admin.js had a sixth, whose check said 10 and whose message said 6 (AT5) |
 
-**Eight now.** Number 8 arrived during the audit that was commissioned because of
-number 7, which is the clearest possible argument for the gate: the claims do not
-run out, and each pass that looks for them finds one.
+**Nine now.** Number 8 arrived during the audit commissioned because of number 7,
+and number 9 during the package commissioned because of number 8. The claims do
+not run out, and each pass that looks for them finds one.
+
+**THREE OF THE NINE ARE MINE, AND TWO OF THE LAST THREE.** That is the shift
+worth naming: the rule was built for claims inherited from other people's
+documents, and it now catches mostly my own - sentences written to close a
+finding, inside a commit about something larger, never re-read because I knew
+what I meant. A claim does not need age to be inherited. It needs only to be
+asserted once and relied on afterwards.
 
 ### The pattern that predicts them
 
@@ -2277,7 +2509,14 @@ The original table is kept below as the record of what the package was given.
 | ADR-041 | - | `distinct()` must keep data semantics, not enum semantics | `donations.listStatusesInUse()` | Already tested in `test:data-layer`; route test asserts the endpoint's shape | **R** |
 | ADR-003 | - | Deleting a user preserves their donations - **behaviour change** | FK `ON DELETE SET NULL`; `donor.isGuest` distinguishes | Test: delete a donor, donation survives and stays attributable | **R** |
 
-### `routes/admin.js`  *(trigger: LAST reader of every bridged entity; currently 3.5)*
+### `routes/admin.js`  *(MIGRATED in AS7 - see "AS7" above)*
+
+**All closed except BUG-04's dead Vercel cron declaration, which is a deployment
+change rather than a route change.** SEC-08's admin half is NOT APPLICABLE - both
+endpoints that name an address are behind `adminAuth`, and the same caller can
+list every account with a GET one request later.
+
+The original table is kept below as the record of what the package was given.
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
@@ -2405,10 +2644,15 @@ silently reconciled.
 
 | State | Count | Rows |
 |---|---|---|
-| Closed | 15 | 6 closed in package 3.1 |
-| Open, assigned to a Phase 3 package | 36 | 3.1: 1 (non-atomic reorder), 3.2: 8, 3.3: 7, 3.4: 11, 3.5: 8, 3.6: 1 |
+| Closed | 38 | 6 in 3.1, 8 in 3.2, 15 in 3.3 (incl. BUG-10/11/12, ETL-01), 9 in AS7 (incl. ADMIN-01, SEC-10's sixth copy) |
+| Open, assigned to a Phase 3 package | 13 | 3.1: 1 (non-atomic reorder), **3.4: 12** (incl. PAY-01, U-2's design half, and BUG-04's cron), 3.5a: 1, 3.6: 1 |
 | Open, assigned to Phase 4 / 5 / 6 | 14 | P4: 7, P5: 6, P6: 1 |
-| **Open and unassigned** | **6** | U-1 .. U-6 |
+| **Open and unassigned** | **5** | U-1, U-3 .. U-6. **U-2 was re-homed to 3.4 by AT2** after the package holding it ceased to exist |
+
+**3.5 IS GONE FROM THIS TABLE, and that is the change worth noticing.** Its eight
+rows did not move - they closed, except BUG-04's cron declaration which is a
+deployment change. A package disappearing from a count is normally a sign rows
+were dropped; here the AL3 grep is what proves they were not.
 
 These are ROW counts, not distinct findings. An item like SEC-19 that spans five
 route files appears five times, once per owning package - deliberate, because

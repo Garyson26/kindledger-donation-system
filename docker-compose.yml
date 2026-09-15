@@ -132,6 +132,11 @@ services:
       # Phase 2 runtime. SCHEDULER_ENABLED defaults to off so a deployment
       # cannot start deleting rows before the Phase 4 migration has run.
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-false}
+      # AT1: per-job authorisation, separate from registration above and from
+      # migration state. All default off; nothing but an operator turns one on.
+      JOB_RETENTION_PURGE: ${JOB_RETENTION_PURGE:-false}
+      JOB_INACTIVE_ACCOUNT_PURGE: ${JOB_INACTIVE_ACCOUNT_PURGE:-false}
+      JOB_PENDING_SIGNUP_SWEEP: ${JOB_PENDING_SIGNUP_SWEEP:-false}
       PRISMA_CONNECTION_LIMIT: ${PRISMA_CONNECTION_LIMIT:-10}
       HEALTH_DIAGNOSTIC_SECRET: ${HEALTH_DIAGNOSTIC_SECRET:-}
       # MONGODB_URI is still passed: the additive model keeps Mongoose
