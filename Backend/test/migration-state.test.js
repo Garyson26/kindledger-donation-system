@@ -177,38 +177,43 @@ test('THE SELF-CHECK: no file outside the allowlist imports a migrated model', (
 test('CONTROL: the self-check FAILS when the declaration overstates reality', () => {
   // Without this, the test above passes whether or not it can detect anything.
   //
-  // `user` is `split` - routes/admin.js still writes MongoDB. Declaring it
-  // `mysql` is exactly the dangerous edit, so simulate it and assert the check
-  // catches routes/admin.js.
-  const state = migrationState.stateFor('user');
-  assert.equal(state.store, migrationState.SPLIT, 'precondition: user is split');
+  // CHANGED IN AS7. The control used to use `user`/`routes/admin.js`, and AS7
+  // migrated that file - so the example it relied on stopped existing. THE
+  // CONTROL HAD TO MOVE WITH THE MIGRATION, which is worth noting: a control
+  // that names a specific violation expires when that violation is fixed, and a
+  // control nobody notices has expired is worse than none.
+  //
+  // `donation` is the remaining `split` - routes/payment.js still writes
+  // MongoDB. Declaring it `mysql` is the dangerous edit now.
+  const state = migrationState.stateFor('donation');
+  assert.equal(state.store, migrationState.SPLIT, 'precondition: donation is split');
 
   const importers = importersOf(state.model);
   assert.ok(
-    importers.includes('routes/admin.js'),
-    'CONTROL FAILED: routes/admin.js does not import models/User, so the scan ' +
-      'is not finding what it claims to find'
+    importers.includes('routes/payment.js'),
+    'CONTROL FAILED: routes/payment.js does not import models/Donation, so the ' +
+      'scan is not finding what it claims to find'
   );
 
-  // Now the check the previous test would run, with `user` pretended to be mysql
-  // and admin.js NOT allowlisted.
-  const allowlistWithoutAdmin = state.mongooseAllowed.filter((p) => p !== 'routes/admin.js');
-  const wouldViolate = importers.filter(
-    (f) => !allowlistWithoutAdmin.some((prefix) => f.startsWith(prefix))
-  );
+  // The check the previous test would run, with `donation` pretended to be
+  // mysql and payment.js NOT allowlisted.
+  const without = state.mongooseAllowed.filter((p) => p !== 'routes/payment.js');
+  const wouldViolate = importers.filter((f) => !without.some((prefix) => f.startsWith(prefix)));
 
   assert.ok(
-    wouldViolate.includes('routes/admin.js'),
-    'CONTROL FAILED: declaring `user` mysql would NOT be caught, so the ' +
+    wouldViolate.includes('routes/payment.js'),
+    'CONTROL FAILED: declaring `donation` mysql would NOT be caught, so the ' +
       'self-check above proves nothing'
   );
 });
 
 test('`split` is not `mysql`: an entity with a live MongoDB writer is not migrated', () => {
   // A binary migrated/not-migrated cannot express the condition that causes
-  // harm. Both of these are part-migrated and both must refuse deletion.
-  assert.equal(migrationState.isMysqlAuthoritative('user'), false);
+  // harm. CHANGED IN AS7: `user` left this list when routes/admin.js migrated
+  // and ADMIN-01 closed. `donation` remains, because routes/payment.js is still
+  // the only live creator of donations and it still writes MongoDB.
   assert.equal(migrationState.isMysqlAuthoritative('donation'), false);
+  assert.equal(migrationState.isMysqlAuthoritative('user'), true, 'CHANGED IN AS7');
   assert.equal(migrationState.isMysqlAuthoritative('pendingSignup'), true);
   assert.equal(migrationState.isMysqlAuthoritative('category'), true);
 
@@ -306,18 +311,39 @@ test('AS2: a DRY RUN is still allowed in the same state', async () => {
   );
 });
 
-test('AS2: the inactive-account purge refuses too - user is split (ADMIN-01)', async () => {
-  const result = await scheduler.purgeInactiveUsers({ dryRun: true });
-  assert.equal(result.authoritativeStore, 'split');
+test('AS7 MADE THE INACTIVE-ACCOUNT PURGE LIVE (CHANGED IN AS7)', async () => {
+  // WAS: refused, because `user` was `split` - routes/admin.js still wrote
+  // MongoDB (ADMIN-01), so purging from MySQL would have deleted migrated
+  // history while live accounts accumulated in the other store.
+  //
+  // STATE THIS LOUDLY RATHER THAN LETTING IT PASS AS A GREEN TEST. Closing
+  // ADMIN-01 did not only fix the admin console: it PERMITTED A DESTRUCTIVE JOB
+  // THAT WAS PREVIOUSLY REFUSED. An operator who sets SCHEDULER_ENABLED=true
+  // after this package will delete accounts that the same setting would have
+  // spared before it. That is correct - MySQL is now authoritative - and it is
+  // a change in blast radius that nobody asked for as a feature, which is
+  // exactly the kind of consequence a migration hides.
+  //
+  // The purge remains bounded by its own guards: admins are never deleted, and
+  // an account with ANY donation is never deleted (repositories/users
+  // .countInactiveOlderThan).
+  assert.equal(migrationState.isMysqlAuthoritative('user'), true);
 
-  // Only assert the refusal when there is something to delete; with zero
-  // candidates the job short-circuits before the gate, which is correct.
-  if (result.candidates > 0) {
-    await assert.rejects(
-      () => scheduler.purgeInactiveUsers({ dryRun: false }),
-      (err) => err.code === 'ERR_NOT_AUTHORITATIVE' && err.entity === 'user'
-    );
-  }
+  const result = await scheduler.purgeInactiveUsers({ dryRun: true });
+  assert.equal(result.authoritativeStore, 'mysql');
+  assert.equal(result.deleted, 0, 'a dry run still deletes nothing');
+
+  // It no longer refuses. Asserted through the gate directly rather than by
+  // running a real purge, because this suite has no business deleting accounts
+  // it did not create.
+  assert.doesNotThrow(() => migrationState.assertDeletable('user', 'the inactive-account purge'));
+
+  // And `donation` still refuses, so the gate is still doing its job per-entity
+  // rather than having been switched off wholesale.
+  assert.throws(
+    () => migrationState.assertDeletable('donation', 'the retention purge'),
+    (err) => err.code === 'ERR_NOT_AUTHORITATIVE'
+  );
 });
 
 test('AS2: the pending-signup sweep is ALLOWED - the gate is per-entity', async () => {

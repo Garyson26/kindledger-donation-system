@@ -875,6 +875,104 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## AS7 - admin.js migrated. ADMIN-01 CLOSED. And package 3.5 no longer exists.
+
+`routes/admin.js` imports no Mongoose. `user` is now `mysql` in
+`config/migrationState.js`; `donation` is the only entity left `split`.
+
+### THE SCOPE FACT, reported rather than taken quietly (AR3)
+
+AS7 authorised "admin.js's user operations plus the two /stats counts". **That is
+the entire file.** Nine routes: two cleanup (migrated in 3.3), six user
+operations, one `/stats`. There was no "rest of admin.js" to leave for 3.5.
+
+**So package 3.5 ceases to exist as a file migration**, and the findings parked
+against it need re-homing. What happened to each:
+
+| Finding | Outcome |
+|---|---|
+| ADMIN-01 | **CLOSED.** All five false successes now act |
+| BUG-03 | **CLOSED** by the `/stats` counts, and it was worse than recorded |
+| BUG-08 | **CLOSED** - the user list is clamped, NaN refused |
+| SEC-18 | **CLOSED by construction** - the route no longer chooses a cost |
+| SEC-18b | **CLOSED** - `setPassword` revokes sessions |
+| SEC-19 | **CLOSED** - `failed()`, and malformed ids are 404 |
+| SEC-21 | **CLOSED** - `isVerified: true` set explicitly at creation |
+| SEC-10 | **CLOSED** - the sixth password rule is gone; see below |
+| SEC-08 (admin half) | **NOT APPLICABLE**, decided not deferred - see below |
+| BUG-04's dead cron | **STILL OPEN.** A deployment change, not a route change |
+
+### SEC-10 had a SIXTH copy, and its check and its message disagreed
+
+The finding's mechanism was "one shared validator across all five paths".
+Package 3.2 implemented it - **as a function local to `routes/auth.js`**, which
+made it one validator across the five paths IN THAT FILE. `admin.js` had a
+sixth:
+
+```js
+if (!newPassword || newPassword.length < 10) {
+  return res.status(400).json({ error: "Password must be at least 6 characters long" });
+}
+```
+
+**The check says 10 and the message says 6.** An admin choosing a 7-character
+password was refused by an error telling them it should have worked. The length
+was right; the defect was having a second copy at all, which is what SEC-10 was
+about. Moved to `utils/password.js` so there is nowhere else to put one, and the
+message quotes the constant so they cannot disagree again.
+
+`POST /admin/users` had **no** password rule, so an admin could create an
+account with a one-character password whose owner could then never change it to
+anything under ten.
+
+### SEC-08's admin half is NOT APPLICABLE, and that is the outcome rule again
+
+The finding is account enumeration. Both admin endpoints that name an address
+are behind `adminAuth`, and **the same caller can list every account with a GET
+one request later.** A generic response withholds nothing from an attacker and
+withholds from an admin the only useful thing the failure could say. The
+mechanism is present; the outcome it prevents is not.
+
+### AS7 MADE A DESTRUCTIVE JOB LIVE, and that is worth saying separately
+
+Closing ADMIN-01 moved `user` from `split` to `mysql`. **The inactive-account
+purge was refused by AS2's gate and is now permitted.** An operator who sets
+`SCHEDULER_ENABLED=true` after this package deletes accounts that the same
+setting would have spared before it.
+
+That is correct - MySQL is authoritative now - and it is **a change in blast
+radius that nobody asked for as a feature**, which is exactly the kind of
+consequence a migration hides. Asserted explicitly in
+`test/migration-state.test.js` rather than left to pass as a green test. The
+purge remains bounded: admins are never deleted, and an account with ANY
+donation is never deleted.
+
+### A control that names a specific violation EXPIRES when that violation is fixed
+
+`test/migration-state.test.js`'s control proved the self-check could detect an
+overstated declaration, using `user`/`routes/admin.js` as its example. **AS7
+migrated that file, so the example stopped existing and the control had to move
+to `donation`/`routes/payment.js`.**
+
+Worth recording as a maintenance property: a control built on a named defect has
+a lifetime, and **a control nobody notices has expired is worse than no control**,
+because it still reports success. This one failed loudly when its subject was
+fixed, which is the behaviour to preserve when the next one is written.
+
+### The SMTP trap, again
+
+The test asserting that an admin-created account can log in initially failed with
+`500 "Failed to send OTP email"`. **The credential check had passed** - `/login`
+verifies the password and THEN sends an OTP, and there is no SMTP in the test
+environment.
+
+Reading that 500 as a refusal is exactly what hid SEC-03 for a full package. The
+assertion now discriminates on the MESSAGE - a caller with the wrong password is
+stopped at `400 Invalid credentials` and never reaches the mail step - with the
+wrong password as the control.
+
+---
+
 ## AS2 - the destructive crossings, closed by a declaration rather than a default
 
 **`config/migrationState.js` is the single statement of which store is
@@ -2038,7 +2136,7 @@ specific.
 > and the admin console reading the other. The work stays split; the merge does
 > not. See "Package 3.3" above.
 | **3.5a** | **`config/email.js`** (AQ2) | none - it was unowned |
-| **3.5** | `admin.js` - last reader of every bridged entity | all bridged entities migrated |
+| ~~**3.5**~~ | ~~`admin.js`~~ **DONE IN AS7.** Migrating its user operations and the two `/stats` counts was the whole file - there was no remainder. BUG-04's dead Vercel cron declaration is all that is left, and it is a deployment change | - |
 | **3.6** | Mongoose removal | no file imports Mongoose; `fallbackCount()` zero (AE3) |
 | **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
 

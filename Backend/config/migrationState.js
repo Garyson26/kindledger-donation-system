@@ -84,15 +84,20 @@ const ENTITIES = {
   },
 
   user: {
-    store: SPLIT,
+    // WAS `split` until AS7 closed ADMIN-01. routes/admin.js was the last
+    // MongoDB writer: it created, updated, disabled and deleted accounts in a
+    // store authentication had stopped reading at package 3.2, and reported
+    // success for every one of them.
+    store: MYSQL,
     model: 'User',
     etlMigrates: true,
     reason:
-      'ADMIN-01. routes/auth.js, routes/users.js and both middlewares write ' +
-      'MySQL (package 3.2); routes/admin.js:143,182,234,270 still write ' +
-      'MongoDB. An admin disabling or deleting an account writes a store ' +
-      'authentication does not read, and is told it succeeded.',
-    mongooseAllowed: ['etl/', 'services/userBridge.js', 'routes/admin.js', 'scripts/seedDatabase.js', 'test/'],
+      'Migrated across packages 3.2 and AS7. routes/auth.js, routes/users.js, ' +
+      'both middlewares and routes/admin.js all write MySQL. ' +
+      'scripts/seedDatabase.js still creates MongoDB users, but it is a ' +
+      'development seeder behind NODE_ENV!=production AND ALLOW_SEED=true, so ' +
+      'it cannot write a deployed store.',
+    mongooseAllowed: ['etl/', 'services/userBridge.js', 'scripts/seedDatabase.js', 'test/'],
   },
 
   donation: {

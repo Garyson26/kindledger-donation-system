@@ -5,9 +5,13 @@
  *   docker compose up -d          (MongoDB and MySQL both required)
  *   npm run test:admin
  *
- * These capture what this route file does TODAY, before the migration. Where
- * the current behaviour is wrong, the WRONG behaviour is asserted and marked
- * `QUIRK`, cross-referenced to the finding that will change it.
+ * Written against the Mongoose implementation BEFORE the migration, and now
+ * asserted against the MySQL one. TWELVE assertions changed; each is marked
+ * `CHANGED IN AS7` with the finding that caused it.
+ *
+ * ELEVEN OF THE TWELVE ARE QUIRKS BEING CLOSED - ADMIN-01 in five places,
+ * BUG-03, BUG-08, SEC-18, SEC-18b, SEC-19 and the password message. They were
+ * pinned as WRONG behaviour on purpose, so fixing them HAD to break this file.
  *
  * THIS FILE EXISTS BECAUSE ITS ABSENCE CAUSED ADMIN-01. `admin.js` was package
  * 3.5, so it had no suite; package 3.2 moved users to MySQL; nothing was
@@ -293,7 +297,7 @@ test('every admin route refuses anonymous and non-admin callers', async () => {
 // GET /stats
 // =============================================================================
 
-test('QUIRK (D-X2, BUG-03): /stats counts donations in MONGODB, not MySQL', async () => {
+test('D-X2 CLOSED: /stats counts donations in MySQL (CHANGED IN AS7)', async () => {
   // The two tiles read a store that stopped being authoritative for donations at
   // package 3.3. Pinned as a DIVERGENCE rather than as a number, because the
   // numbers agree until something writes - which is what makes it dangerous.
@@ -320,46 +324,65 @@ test('QUIRK (D-X2, BUG-03): /stats counts donations in MONGODB, not MySQL', asyn
   assert.equal(res.status, 200);
   assert.deepEqual(Object.keys(res.body).sort(), ['approved', 'categories', 'donations', 'users']);
 
-  assert.equal(
-    res.body.donations,
-    mongoTotal,
-    'CURRENT: the tile reports the MongoDB count'
-  );
+  // WAS: the tile reported `mongoTotal`. It AGREED with MySQL until something
+  // wrote - the ETL had copied one store to the other - so it was correct in
+  // every test and wrong only under real traffic. That is why the fixture above
+  // creates a donation in MySQL ONLY: it forces the divergence the tile used to
+  // hide.
+  assert.equal(res.body.donations, mysqlTotal, 'the tile reports the MySQL count');
   assert.notEqual(
-    res.body.donations,
     mysqlTotal,
-    'and that differs from MySQL, which is where donations actually live since 3.3'
+    mongoTotal,
+    'CONTROL: the two stores genuinely differ, so the assertion above is not ' +
+      'passing by coincidence'
   );
 });
 
-test('QUIRK (BUG-03): the "approved" tile counts only the LOWERCASE subset', async () => {
+test('BUG-03 CLOSED: the "approved" tile counts APPROVAL, not casing (CHANGED IN AS7)', async () => {
   // NOT "always 0", which is what the map said until the AR1 audit measured it.
   // It matches `status: "approved"` exactly, so it counts whatever fraction was
   // written by PATCH /:id/status and misses everything the payment callbacks
   // wrote as `Approved`. A tile showing 0 is visibly broken; a tile showing a
   // fraction is believed.
-  const doc = await MongoDonation.create({
-    donorName: 'ZZZ AdminChar',
-    donorEmail: `${TAG}-approved@invalid.test`,
-    category: new mongoose.Types.ObjectId(),
-    quantity: 1,
-    amount: 1500,
-    status: 'Approved', // canonical - what the callbacks write
-    paymentStatus: 'Paid',
-    date: new Date(),
-  });
-
+  // WAS: `countDocuments({status: "approved"})` matched the lowercase subset,
+  // so lowercasing a donation made the tile count it and the tile measured
+  // CASING. MySQL stores one canonical casing, so both writers land in the same
+  // bucket and the count is simply the count.
   const before = (await get('/api/admin/stats', adminToken)).body.approved;
 
-  // The same donation, lowercased through the unvalidated update path.
-  await MongoDonation.findByIdAndUpdate(doc._id, { status: 'approved' }, { new: true });
-  const after = (await get('/api/admin/stats', adminToken)).body.approved;
+  await donations.create({
+    legacyId: mintObjectId(),
+    donorName: 'ZZZ AdminChar',
+    donorEmail: `${TAG}-approved@invalid.test`,
+    categoryId,
+    quantity: 1,
+    baseAmountMinor: 150000,
+    extraAmountMinor: 0,
+    amountMinor: 150000,
+    status: 'Approved',
+  });
+  const afterCanonical = (await get('/api/admin/stats', adminToken)).body.approved;
+  assert.equal(afterCanonical, before + 1, 'a canonically-approved donation is counted');
 
+  // And one approved through the OTHER writer, in the casing that endpoint
+  // accepts. Both must land in the same count - that is the whole finding.
+  const lower = await donations.create({
+    legacyId: mintObjectId(),
+    donorName: 'ZZZ AdminChar',
+    donorEmail: `${TAG}-approved2@invalid.test`,
+    categoryId,
+    quantity: 1,
+    baseAmountMinor: 150000,
+    extraAmountMinor: 0,
+    amountMinor: 150000,
+  });
+  await donations.setStatus(lower.id, 'approved');
+  const afterLower = (await get('/api/admin/stats', adminToken)).body.approved;
   assert.equal(
-    after,
-    before + 1,
-    'CURRENT: lowercasing a donation makes the tile count it - so the tile ' +
-      'measures casing, not approval'
+    afterLower,
+    before + 2,
+    'a donation approved in lowercase through PATCH /:id/status is counted TOO ' +
+      '- the two writers no longer disagree'
   );
 });
 
@@ -367,7 +390,9 @@ test('QUIRK (BUG-03): the "approved" tile counts only the LOWERCASE subset', asy
 // GET /users
 // =============================================================================
 
-test('QUIRK (ADMIN-01): the user list reads MONGODB, so a MySQL account is absent', async () => {
+test('ADMIN-01 CLOSED: the user list shows accounts that can log in (CHANGED IN AS7)', async () => {
+  // WAS: the list read MongoDB, so an account created through the API since
+  // package 3.2 - one that can actually authenticate - did not appear at all.
   const email = uniqEmail('mysqlonly');
   await store.mysql.createUser({ email });
 
@@ -378,8 +403,8 @@ test('QUIRK (ADMIN-01): the user list reads MONGODB, so a MySQL account is absen
 
   assert.equal(
     res.body.users.some((u) => u.email === email),
-    false,
-    'CURRENT: an account that can log in does not appear in the admin list'
+    true,
+    'an account that can log in appears in the admin list'
   );
 });
 
@@ -391,27 +416,43 @@ test('the listed user never carries the password hash', async () => {
   }
 });
 
-test('QUIRK (BUG-08): the user list limit is uncapped and NaN passes through', async () => {
+test('BUG-08 CLOSED: the list limit is CAPPED and NaN is REFUSED (CHANGED IN AS7)', async () => {
+  // WAS: `limit=100000` loaded a hundred thousand accounts, and `limit=abc`
+  // produced NaN which reached the query and came back as `"limit": null`
+  // inside a 200 - a caller could not tell an empty page from a request the
+  // server had failed to parse.
   const big = await get('/api/admin/users?page=1&limit=100000', adminToken);
   assert.equal(big.status, 200);
-  assert.equal(big.body.pagination.limit, 100000, 'CURRENT: used verbatim');
+  assert.equal(big.body.pagination.limit, 100, 'clamped to MAX_PAGE_SIZE');
+  assert.ok(big.body.users.length <= 100, 'and the page obeys the clamp');
 
-  const nan = await get('/api/admin/users?page=abc&limit=abc', adminToken);
-  assert.notEqual(Math.floor(nan.status / 100), 5, `must not 500: ${nan.raw.slice(0, 160)}`);
-  assert.equal(nan.status, 200);
-  assert.equal(nan.body.pagination.limit, null, 'CURRENT: NaN serialises as null');
+  assertRefused(await get('/api/admin/users?page=abc&limit=abc', adminToken), 400);
 });
 
 test('the user search escapes regex metacharacters rather than executing them', async () => {
   // BE-HIGH-08 was fixed here and must stay fixed through the migration - and
   // the SQL form has its own metacharacters, so this is not automatic.
   await store.createMigratedUser({ tag: 'regex' });
-  const res = await get('/api/admin/users?page=1&limit=100&search=.*', adminToken);
-  assert.equal(res.status, 200);
-  assert.equal(
-    res.body.users.filter((u) => u.email && u.email.startsWith(TAG)).length,
-    0,
-    '`.*` is a literal, not a wildcard'
+  for (const term of ['.*', '%', '_', '%%']) {
+    const res = await get(
+      `/api/admin/users?page=1&limit=100&search=${encodeURIComponent(term)}`,
+      adminToken
+    );
+    assert.equal(res.status, 200, `${term}: ${res.raw.slice(0, 160)}`);
+    assert.equal(
+      res.body.users.filter((u) => u.email && u.email.startsWith(TAG)).length,
+      0,
+      `'${term}' must be matched literally, not as a pattern`
+    );
+  }
+
+  // CHANGED IN AS7: `%` and `_` are new. They are LIKE's metacharacters, and a
+  // parameterised query does not neutralise them - the finding was renamed by
+  // the store swap, not retired by it.
+  const hit = await get('/api/admin/users?page=1&limit=100&search=regex', adminToken);
+  assert.ok(
+    hit.body.users.length >= 1,
+    'CONTROL FAILED: literal search matches nothing either, so nothing above is proven'
   );
 });
 
@@ -419,9 +460,10 @@ test('the user search escapes regex metacharacters rather than executing them', 
 // POST /users
 // =============================================================================
 
-test('QUIRK (ADMIN-01): an admin-created account CANNOT LOG IN', async () => {
-  // The single most direct statement of the finding. The admin is told the
-  // account was created; auth.js reads MySQL and there is no row there.
+test('ADMIN-01 CLOSED: an admin-created account CAN log in (CHANGED IN AS7)', async () => {
+  // WAS the single most direct statement of the finding: the admin was told the
+  // account had been created, and it could not authenticate, because auth.js
+  // reads MySQL and the row had gone to MongoDB.
   const email = uniqEmail('created');
   const res = await post(
     '/api/admin/users',
@@ -431,35 +473,61 @@ test('QUIRK (ADMIN-01): an admin-created account CANNOT LOG IN', async () => {
   assert.equal(res.status, 201, res.raw.slice(0, 200));
   assert.equal(res.body.message, 'User created successfully');
 
-  assert.ok(await store.mongo.read(email), 'it went to MongoDB');
-  assert.equal(await store.mysql.read(email), null, 'CURRENT: and not to MySQL');
+  assert.ok(await store.mysql.read(email), 'it went to MySQL');
+  assert.equal(await store.mongo.read(email), null, 'and NOT to MongoDB');
 
+  // THE ASSERTION IS "DID THE CREDENTIAL CHECK PASS", NOT "DID THE REQUEST
+  // SUCCEED", and the difference is a finding this project has already paid for.
+  //
+  // `/login` verifies the password and THEN sends an OTP email. With no SMTP in
+  // the test environment the send fails and the request answers 500 - AFTER the
+  // credential check passed. Reading that 500 as a refusal is exactly what hid
+  // SEC-03 for a full package: an injected login returned 500 and was recorded
+  // as "refused" when the attacker was already past the password.
+  //
+  // So the discriminator is the MESSAGE, not the status. A caller whose password
+  // is wrong is stopped at `400 Invalid credentials` and never reaches the mail
+  // step at all.
   const login = await post('/api/auth/login', { email, password: PASSWORD });
-  assertRefused(login, 400);
-  assert.equal(
-    login.body.error,
+  assert.notEqual(
+    login.body && login.body.error,
     'Invalid credentials',
-    'CURRENT: the account the admin just created cannot authenticate'
+    `the new account must get PAST the credential check: ${login.raw.slice(0, 200)}`
   );
+
+  // The control: a WRONG password IS stopped there, so the assertion above is
+  // about this account's credentials and not about /login being permissive.
+  const bad = await post('/api/auth/login', { email, password: 'WrongPassword123!' });
+  assertRefused(bad, 400);
+  assert.equal(bad.body.error, 'Invalid credentials');
 });
 
-test('QUIRK (SEC-18, SEC-21): cost 10, and isVerified is never set', async () => {
+test('SEC-18 and SEC-21 CLOSED: cost 12, and verified at creation (CHANGED IN AS7)', async () => {
+  // WAS: `bcrypt.hash(password, 10)` called DIRECTLY in the route, bypassing
+  // repositories/users entirely - which is how there came to be two password
+  // hashing implementations with only one governed by policy, and is the
+  // observation that led to ADMIN-01. And `isVerified` was left at its default
+  // for auth.js to quietly flip on first login.
   const email = uniqEmail('hash');
   await post(
     '/api/admin/users',
     { name: 'ZZZ AdminChar', email, password: PASSWORD },
     adminToken
   );
-  const doc = await store.mongo.read(email);
   assert.equal(
-    Number(doc.password.split('$')[2]),
-    10,
-    'CURRENT: cost 10, bypassing BCRYPT_COST=12 in repositories/users'
+    Number((await store.mysql.passwordHash(email)).split('$')[2]),
+    12,
+    'hashed at BCRYPT_COST, because the route no longer chooses a cost at all'
   );
-  assert.equal(doc.isVerified, false, 'CURRENT: created unverified');
+  assert.equal((await store.mysql.read(email)).isVerified, true, 'verified at creation');
 });
 
-test('QUIRK (SEC-08): creating a duplicate names the reason', async () => {
+test('SEC-08 is NOT APPLICABLE here, and the duplicate message stays (AS7)', async () => {
+  // DELIBERATELY UNCHANGED, and the reasoning is the outcome-not-mechanism rule.
+  // SEC-08 is account enumeration. This endpoint is behind `adminAuth`, and the
+  // same caller can list every account with a GET one request later. A generic
+  // response would withhold nothing from an attacker and would withhold from an
+  // admin the only useful thing the failure could tell them.
   const user = await store.createMigratedUser({ tag: 'dupe' });
   const res = await post(
     '/api/admin/users',
@@ -470,15 +538,30 @@ test('QUIRK (SEC-08): creating a duplicate names the reason', async () => {
   assert.equal(res.body.error, 'User with this email already exists');
 });
 
-test('POST /users requires name, email and password', async () => {
+test('POST /users requires name, email and password, and ONE password rule (CHANGED IN AS7)', async () => {
   assertRefused(await post('/api/admin/users', { email: uniqEmail('x') }, adminToken), 400);
+
+  // SEC-10: this endpoint had NO password rule at all, so an admin could create
+  // an account with a one-character password that its owner could then never
+  // change to anything shorter than ten. The policy is one module now.
+  const short = await post(
+    '/api/admin/users',
+    { name: 'ZZZ AdminChar', email: uniqEmail('shortcreate'), password: 'short' },
+    adminToken
+  );
+  assertRefused(short, 400);
+  assert.match(short.body.error, /at least 10 characters/);
 });
 
 // =============================================================================
 // PATCH /users/:id/toggle-status - THE FINDING
 // =============================================================================
 
-test('QUIRK (ADMIN-01): disabling an account reports success and does NOTHING', async () => {
+test('ADMIN-01 CLOSED: disabling an account actually disables it (CHANGED IN AS7)', async () => {
+  // WAS: `200 "User disabled successfully"`, `isActive` set in MongoDB, MySQL
+  // untouched - and THE DISABLED ACCOUNT KEPT AUTHENTICATING. The admin was
+  // told it was disabled, the record said disabled, and access was never
+  // revoked. This is the headline case of the finding.
   const user = await store.createMigratedUser({ tag: 'disable' });
   assert.equal(await stillAuthenticates(user), true, 'precondition: the token works');
 
@@ -486,26 +569,62 @@ test('QUIRK (ADMIN-01): disabling an account reports success and does NOTHING', 
   assert.equal(res.status, 200, res.raw.slice(0, 200));
   assert.equal(res.body.message, 'User disabled successfully');
 
-  assert.equal((await store.mongo.readById(user.externalId)).isActive, false, 'MongoDB changed');
   assert.equal(
     (await store.mysql.read(user.email)).isActive,
-    true,
-    'CURRENT: MySQL is untouched, and MySQL is what authMiddleware enforces'
+    false,
+    'MySQL changed - and MySQL is what authMiddleware enforces'
   );
-
   assert.equal(
     await stillAuthenticates(user),
-    true,
-    'CURRENT: THE DISABLED ACCOUNT STILL AUTHENTICATES. The admin was told it ' +
-      'was disabled, the record says disabled, and access was never revoked.'
+    false,
+    'THE DISABLED ACCOUNT NO LONGER AUTHENTICATES'
   );
+
+  // And re-enabling restores access, so the control is a toggle rather than a
+  // one-way door.
+  const back = await patch(`/api/admin/users/${user.externalId}/toggle-status`, undefined, adminToken);
+  assert.equal(back.body.message, 'User enabled successfully');
+  assert.equal(
+    await stillAuthenticates({ ...user, tokenVersion: (await store.mysql.read(user.email)).tokenVersion }),
+    true,
+    're-enabling restores access to a freshly issued token'
+  );
+});
+
+test('AS7: disabling REVOKES live sessions, not just future ones', async () => {
+  // `users.setActive` increments token_version when disabling, so a token
+  // issued before the disable stops verifying immediately rather than surviving
+  // for up to an hour. That lives in the data layer precisely so a call site
+  // cannot forget it.
+  const user = await store.createMigratedUser({ tag: 'revokedisable' });
+  const tokenIssuedBefore = tokenFor(user);
+
+  await patch(`/api/admin/users/${user.externalId}/toggle-status`, undefined, adminToken);
+  const after = await store.mysql.read(user.email);
+  assert.equal(after.tokenVersion, user.tokenVersion + 1, 'token_version incremented');
+
+  const res = await get('/api/auth/me', tokenIssuedBefore);
+  assert.notEqual(Math.floor(res.status / 100), 5, `must not 500: ${res.raw.slice(0, 160)}`);
+  assert.notEqual(res.status, 200, 'the token issued before the disable is refused');
+});
+
+test('AS7: an admin cannot disable their own account mid-request', async () => {
+  // The Mongoose version allowed it - an admin could lock themselves out and
+  // then be unable to undo it. Extends BE-MED-06's reasoning to the flag that
+  // now actually takes effect.
+  const res = await patch(`/api/admin/users/${adminExternalId}/toggle-status`, undefined, adminToken);
+  assertRefused(res, 400);
 });
 
 // =============================================================================
 // PATCH /users/:id/change-password
 // =============================================================================
 
-test('QUIRK (ADMIN-01): changing a password reports success and the OLD one still works', async () => {
+test('ADMIN-01 CLOSED: a password change actually changes the password (CHANGED IN AS7)', async () => {
+  // WAS: `200 "Password changed successfully"`, the hash written to MongoDB
+  // while login verified against MySQL - so THE OLD PASSWORD STILL WORKED AND
+  // THE NEW ONE DID NOT. An admin resetting a compromised account's password
+  // changed nothing, and was told they had.
   const user = await store.createMigratedUser({ tag: 'chpw' });
   const before = await store.mysql.passwordHash(user.email);
 
@@ -517,25 +636,31 @@ test('QUIRK (ADMIN-01): changing a password reports success and the OLD one stil
   assert.equal(res.status, 200, res.raw.slice(0, 200));
   assert.equal(res.body.message, 'Password changed successfully');
 
-  assert.equal(
+  assert.notEqual(
     await store.mysql.passwordHash(user.email),
     before,
-    'CURRENT: the MySQL hash - the one login verifies against - is unchanged'
-  );
-  assert.equal(
-    await store.mysql.verifyPassword(user.email, PASSWORD),
-    true,
-    'CURRENT: the OLD password still works'
+    'the MySQL hash - the one login verifies against - changed'
   );
   assert.equal(
     await store.mysql.verifyPassword(user.email, 'AdminSetThis123!'),
+    true,
+    'the NEW password works'
+  );
+  assert.equal(
+    await store.mysql.verifyPassword(user.email, PASSWORD),
     false,
-    'CURRENT: and the NEW one does not'
+    'and the OLD one does not'
   );
 });
 
-test('QUIRK (SEC-18b): an admin password change does not revoke sessions', async () => {
+test('SEC-18b CLOSED: an admin password change REVOKES sessions (CHANGED IN AS7)', async () => {
+  // WAS: `token_version` untouched, so every issued token stayed valid for its
+  // full hour. The worst possible moment for that control to be missing is
+  // exactly when it is used - an admin resetting the password of an account
+  // they believe is compromised.
   const user = await store.createMigratedUser({ tag: 'revoke' });
+  const tokenIssuedBefore = tokenFor(user);
+
   await patch(
     `/api/admin/users/${user.externalId}/change-password`,
     { newPassword: 'AdminSetThis123!' },
@@ -543,14 +668,23 @@ test('QUIRK (SEC-18b): an admin password change does not revoke sessions', async
   );
   assert.equal(
     (await store.mysql.read(user.email)).tokenVersion,
-    user.tokenVersion,
-    'CURRENT: token_version is untouched, so every issued token stays valid - ' +
-      'repositories/users.setPassword would have incremented it'
+    user.tokenVersion + 1,
+    'token_version incremented by repositories/users.setPassword'
   );
-  assert.equal(await stillAuthenticates(user), true, 'CURRENT: the old session survives');
+
+  const res = await get('/api/auth/me', tokenIssuedBefore);
+  assert.notEqual(Math.floor(res.status / 100), 5, `must not 500: ${res.raw.slice(0, 160)}`);
+  assert.notEqual(res.status, 200, 'the session issued before the reset is dead');
 });
 
-test('the password length check rejects short passwords - and misstates its own rule', async () => {
+test('SEC-10 CLOSED: the password message matches the rule it enforces (CHANGED IN AS7)', async () => {
+  // WAS: `length < 10` behind a message that said "at least 6 characters". An
+  // admin reading it and choosing a 7-character password was refused by an
+  // error telling them it should have worked.
+  //
+  // That is not a policy defect - the length was right - it is the defect of
+  // having a SECOND COPY of the policy, which is what SEC-10 was about. "One
+  // validator" has to mean one MODULE, or the next file writes a seventh.
   const user = await store.createMigratedUser({ tag: 'shortpw' });
   const res = await patch(
     `/api/admin/users/${user.externalId}/change-password`,
@@ -558,10 +692,24 @@ test('the password length check rejects short passwords - and misstates its own 
     adminToken
   );
   assertRefused(res, 400);
-  assert.match(
-    res.body.error,
-    /at least 6 characters/,
-    'CURRENT: the check is `length < 10` and the message says 6'
+  assert.match(res.body.error, /at least 10 characters/, 'the message states the rule enforced');
+
+  // The boundary itself, so the shared constant cannot drift unnoticed.
+  assertRefused(
+    await patch(
+      `/api/admin/users/${user.externalId}/change-password`,
+      { newPassword: '123456789' },
+      adminToken
+    ),
+    400
+  );
+  assert.equal(
+    (await patch(
+      `/api/admin/users/${user.externalId}/change-password`,
+      { newPassword: '1234567890' },
+      adminToken
+    )).status,
+    200
   );
 });
 
@@ -569,20 +717,27 @@ test('the password length check rejects short passwords - and misstates its own 
 // DELETE /users/:id
 // =============================================================================
 
-test('QUIRK (ADMIN-01): deleting an account reports success and it keeps working', async () => {
+test('ADMIN-01 CLOSED: deleting an account actually deletes it (CHANGED IN AS7)', async () => {
+  // WAS: `200 "User deleted successfully"`, the MongoDB row removed, the MySQL
+  // account surviving - AND STILL AUTHENTICATING. The most alarming of the
+  // four, because deletion is the action an admin takes when they most need it
+  // to have happened.
   const user = await store.createMigratedUser({ tag: 'delete' });
+  assert.equal(await stillAuthenticates(user), true, 'precondition');
 
   const res = await del(`/api/admin/users/${user.externalId}`, adminToken);
   assert.equal(res.status, 200, res.raw.slice(0, 200));
   assert.equal(res.body.message, 'User deleted successfully');
 
-  assert.equal(await store.mongo.readById(user.externalId), null, 'MongoDB row is gone');
-  assert.ok(await store.mysql.read(user.email), 'CURRENT: the MySQL account survives');
+  assert.equal(await store.mysql.read(user.email), null, 'the MySQL account is gone');
   assert.equal(
     await stillAuthenticates(user),
-    true,
-    'CURRENT: THE DELETED ACCOUNT STILL AUTHENTICATES'
+    false,
+    'THE DELETED ACCOUNT NO LONGER AUTHENTICATES'
   );
+
+  // And deleting it again is a clean 404 rather than a second success.
+  assertRefused(await del(`/api/admin/users/${user.externalId}`, adminToken), 404);
 });
 
 test('DELETE refuses self-deletion and the last admin', async () => {
@@ -600,21 +755,32 @@ test('DELETE refuses self-deletion and the last admin', async () => {
 // SEC-19
 // =============================================================================
 
-test('QUIRK (SEC-19): a malformed id leaks the internal error', async () => {
-  const res = await patch(
+test('SEC-19 CLOSED: a malformed id leaks nothing, and is a 404 (CHANGED IN AS7)', async () => {
+  // WAS: `500` carrying `Cast to ObjectId failed for value "not-an-objectid"`,
+  // which told a caller the store, the driver and the column. A syntactically
+  // impossible id names nothing, which is what "not found" means.
+  for (const path of [
     '/api/admin/users/not-an-objectid/toggle-status',
-    undefined,
-    adminToken
-  );
-  assert.equal(res.status, 500);
-  assert.match(res.body.error, /Cast to ObjectId failed/, 'CURRENT: the driver error is returned');
+    '/api/admin/users/not-an-objectid/change-password',
+    '/api/admin/users/not-an-objectid',
+  ]) {
+    const res = path.endsWith('change-password')
+      ? await patch(path, { newPassword: 'AdminSetThis123!' }, adminToken)
+      : path.endsWith('toggle-status')
+        ? await patch(path, undefined, adminToken)
+        : await del(path, adminToken);
+    assertRefused(res, 404);
+    assert.doesNotMatch(res.raw, /Cast to ObjectId|prisma|Invalid `|mongo/i, `${path}: no internals`);
+  }
 });
 
 // =============================================================================
 // PUT /users/:id
 // =============================================================================
 
-test('QUIRK (ADMIN-01): a profile update writes MongoDB only', async () => {
+test('ADMIN-01 CLOSED: a profile update reaches the store /auth/me reads (CHANGED IN AS7)', async () => {
+  // WAS: the write went to MongoDB, so MySQL kept the old name and every
+  // authenticated endpoint kept returning it.
   const user = await store.createMigratedUser({ tag: 'update' });
   const res = await put(
     `/api/admin/users/${user.externalId}`,
@@ -622,13 +788,13 @@ test('QUIRK (ADMIN-01): a profile update writes MongoDB only', async () => {
     adminToken
   );
   assert.equal(res.status, 200, res.raw.slice(0, 200));
+  assert.equal((await store.mysql.read(user.email)).name, 'Renamed By Admin');
 
-  assert.equal((await store.mongo.readById(user.externalId)).name, 'Renamed By Admin');
-  assert.equal(
-    (await store.mysql.read(user.email)).name,
-    'ZZZ AdminChar',
-    'CURRENT: MySQL keeps the old name, and MySQL is what /auth/me returns'
-  );
+  // Read back through the user's OWN session, which is the thing that was
+  // wrong: the admin changed a name and the user never saw it.
+  const me = await get('/api/auth/me', tokenFor(user));
+  assert.equal(me.status, 200, me.raw.slice(0, 160));
+  assert.equal(me.body.name || (me.body.user && me.body.user.name), 'Renamed By Admin');
 });
 
 test('PUT refuses an admin demoting themselves', async () => {

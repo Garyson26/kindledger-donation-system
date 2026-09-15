@@ -1,281 +1,376 @@
+/**
+ * =============================================================================
+ * Admin - MIGRATED TO MySQL (AS7, completing package 3.5's user half)
+ * =============================================================================
+ * NO MONGOOSE. Every user operation and both donation counts go through the
+ * repositories.
+ *
+ * WHY THIS FILE MOVED EARLY. It was package 3.5, two packages away, and package
+ * 3.2 moved users to MySQL while this file kept writing MongoDB. Every admin
+ * revocation - disable, delete, password change - reported success and did
+ * nothing, for three packages, because authentication no longer read the store
+ * these handlers wrote (ADMIN-01). A control that reports success without
+ * acting is worse than one that visibly fails, because nobody returns to
+ * verify.
+ *
+ * THE FAILURE WAS INVERTED RELATIVE TO THE RISK. Accounts that exist only in
+ * MySQL - anything created since 3.2 - got a loud `404`. Accounts present in
+ * BOTH stores, which is every ETL-migrated account and therefore every real
+ * user after cutover, got the silent `200`. Loud for the accounts that did not
+ * matter, silent for the ones that would.
+ *
+ * WHAT IS DELIBERATELY NOT CHANGED HERE is listed at the foot of the file.
+ * =============================================================================
+ */
+
 const express = require("express");
 const router = express.Router();
-const User = require("../models/User");
-const Donation = require("../models/Donation");
-// models/Category IS DELIBERATELY NOT IMPORTED (AS2). Package 3.1 replaced
-// every use in this file with services/categoryBridge and left the import
-// behind; it was dead, and a dead Mongoose import is the seed of the next
-// crossing - the next person editing this file has `Category` in scope.
-// Found by test/migration-state.test.js, which the AR1 audit could not have
-// found because that audit enumerated CALL SITES and a dead import has none.
-// TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
-// this file is not migrated until a later package, so category reads go through
-// the bridge, which tries MySQL first and falls back to MongoDB with a warning.
+
+const { users, donations } = require("../repositories");
+// TEMPORARY (ADR-050, deleted in package 3.6). The category count still goes
+// through the bridge: categories are MySQL, but a category created before the
+// 3.1 cutover may still be MongoDB-only, and the bridge is what covers that.
 const categoryBridge = require("../services/categoryBridge");
+const scheduler = require("../services/scheduler");
 
 const adminAuth = require("../middleware/adminAuth");
-const bcrypt = require("bcryptjs");
-// services/dataCleanupService.js is DELETED (package 3.3). It targeted MongoDB,
-// and services/scheduler.js implements the same three retention rules against
-// MySQL with a dry-run mode and counts that come back to the caller.
-const scheduler = require("../services/scheduler");
 const { refuse, failed } = require("../utils/respond");
+// SEC-10: ONE password policy, in one module. This file used to carry a sixth
+// copy whose check said 10 and whose message said 6.
+const { passwordProblem } = require("../utils/password");
 
 // Protect all admin routes
 router.use(adminAuth);
 
-// Escape user input for use in MongoDB regex (BE-HIGH-08)
-const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** BUG-08. The repository enforces it too; stated here for the 400. */
+const MAX_PAGE_SIZE = users.MAX_PAGE_SIZE;
 
+/**
+ * The wire shape for a user.
+ *
+ * `_id` is the external identifier (ADR-051), and the hash is not omitted here
+ * - `repositories/users` never selects it at all. The Mongoose version did
+ * `user.toObject()` then `delete obj.password`, which fetched the hash across
+ * the wire in order to throw it away.
+ */
+function present(u) {
+  if (!u) return null;
+  return {
+    _id: u.legacyId || u.id,
+    uuid: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    phone: u.phone,
+    address: u.address,
+    isActive: u.isActive,
+    isVerified: u.isVerified,
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+  };
+}
+
+/**
+ * Paging, with a ceiling (BUG-08).
+ *
+ * The Mongoose version used `parseInt(limit)` verbatim: `limit=100000` loaded a
+ * hundred thousand accounts, and `limit=abc` produced NaN, which reached the
+ * query and came back as `"limit": null` inside a 200.
+ */
+function parsePaging(query) {
+  const page = Number.parseInt(query.page ?? "1", 10);
+  const limit = Number.parseInt(query.limit ?? "10", 10);
+  if (!Number.isInteger(page) || !Number.isInteger(limit) || page < 1 || limit < 1) {
+    return { invalid: true };
+  }
+  return { page, limit: Math.min(limit, MAX_PAGE_SIZE) };
+}
+
+function endOfDay(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+const startOfDay = (value) => {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+/**
+ * The dashboard tiles.
+ *
+ * D-X2: the donation counts read MongoDB until AS7. The `donations` tile agreed
+ * with MySQL right up until something wrote - the ETL had copied one to the
+ * other - so it was correct in every test and wrong only under real traffic.
+ *
+ * BUG-03 closes here, and it was not what the map said. The map recorded the
+ * "approved" tile as "always 0"; measured, it returned 1 when the true figure
+ * was 2. `countDocuments({status: "approved"})` matched the LOWERCASE subset,
+ * so it counted whatever fraction `PATCH /:id/status` had written and missed
+ * everything the payment callbacks wrote as `Approved`. IT MEASURED CASING, NOT
+ * APPROVAL - and a tile showing 0 is visibly broken while a tile showing 1 of 2
+ * is believed. MySQL stores one canonical casing, so the count is now simply
+ * the count.
+ */
 router.get("/stats", async (req, res) => {
-  const users = await User.countDocuments();
-  const donations = await Donation.countDocuments();
-  // Via the bridge (ADR-050). Note this now counts ACTIVE categories only,
-  // because ADR-004 made deletion a soft delete - an archived category is gone
-  // as far as an admin is concerned, which is what this tile reports.
-  const categories = await categoryBridge.countCategories();
-  const approved = await Donation.countDocuments({ status: "approved" });
-  res.json({ users, donations, categories, approved });
+  try {
+    const [userCount, donationCount, categoryCount, approvedCount] = await Promise.all([
+      users.count(),
+      donations.count(),
+      // Via the bridge (ADR-050). Counts ACTIVE categories only, because
+      // ADR-004 made deletion a soft delete - an archived category is gone as
+      // far as an admin is concerned, which is what this tile reports.
+      categoryBridge.countCategories(),
+      donations.count({ status: "Approved" }),
+    ]);
+    res.json({
+      users: userCount,
+      donations: donationCount,
+      categories: categoryCount,
+      approved: approvedCount,
+    });
+  } catch (err) {
+    // The Mongoose version had NO try/catch at all: a database blip rejected
+    // the promise and the request hung until the client timed out.
+    return failed(res, "Failed to load dashboard statistics", err, { tag: "admin" });
+  }
 });
 
 // View all users with filters and pagination
+/**
+ * The user list.
+ *
+ * ADMIN-01: this read MongoDB, so an account created through the API since
+ * package 3.2 - one that can actually log in - did not appear in the admin list
+ * at all.
+ *
+ * BE-HIGH-08 SURVIVES THE STORE SWAP RATHER THAN BEING RETIRED BY IT. The
+ * finding was `$regex` executing the caller's metacharacters; `LIKE` has `%`
+ * and `_`, and a parameterised query does not neutralise them. The escaping
+ * lives in the repository, where the query is built.
+ */
 router.get("/users", async (req, res) => {
   try {
-    const {
-      search,
-      role,
-      status,
-      joinDateFrom,
-      joinDateTo,
-      page = 1,
-      limit = 10
-    } = req.query;
-
-    console.log('GET /admin/users - Query params:', req.query);
-
-    // Build filter query
-    const filter = {};
-
-    // Search filter (name, email, or phone) — escaped to prevent ReDoS (BE-HIGH-08)
-    if (search) {
-      const safe = escapeRegex(search);
-      filter.$or = [
-        { name: { $regex: safe, $options: 'i' } },
-        { email: { $regex: safe, $options: 'i' } },
-        { phone: { $regex: safe, $options: 'i' } }
-      ];
+    const paging = parsePaging(req.query);
+    if (paging.invalid) {
+      return refuse(res, 400, "page and limit must be positive integers");
     }
 
-    // Role filter
-    if (role) {
-      filter.role = role;
-    }
+    const { search, role, status, joinDateFrom, joinDateTo } = req.query;
 
-    // Status filter (active/disabled)
-    if (status) {
-      filter.isActive = status === 'active';
-    }
+    // Named scalars, never a filter object assembled from req.query.
+    const { rows, total } = await users.list(
+      {
+        search,
+        role,
+        status,
+        from: joinDateFrom ? startOfDay(joinDateFrom) : undefined,
+        to: joinDateTo ? endOfDay(joinDateTo) : undefined,
+      },
+      paging
+    );
 
-    // Join date range filter
-    if (joinDateFrom || joinDateTo) {
-      filter.createdAt = {};
-      if (joinDateFrom) {
-        filter.createdAt.$gte = new Date(joinDateFrom);
-      }
-      if (joinDateTo) {
-        // Set to end of day
-        const endDate = new Date(joinDateTo);
-        endDate.setHours(23, 59, 59, 999);
-        filter.createdAt.$lte = endDate;
-      }
-    }
-
-    console.log('MongoDB filter:', JSON.stringify(filter, null, 2));
-
-    // Calculate pagination
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-
-    // Get total count for pagination
-    const total = await User.countDocuments(filter);
-
-    // Fetch users with pagination
-    const users = await User.find(filter)
-      .select("-password")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limitNum);
-
-    console.log('Found users:', users.length, 'of', total);
-
-    // Return paginated response
     res.json({
-      users,
+      users: rows.map(present),
       pagination: {
         total,
-        page: pageNum,
-        pages: Math.ceil(total / limitNum),
-        limit: limitNum
-      }
+        page: paging.page,
+        pages: Math.ceil(total / paging.limit),
+        limit: paging.limit,
+      },
     });
   } catch (err) {
-    console.error('Error in GET /admin/users:', err);
-    res.status(500).json({ error: err.message });
+    // The Mongoose version logged the query and the filter on every request -
+    // an admin search term and the emails it matched, into the application log
+    // (SEC-09). Both console.log calls are gone with it.
+    return failed(res, "Failed to list users", err, { tag: "admin" });
   }
 });
 
-// Create new user (Admin)
+/**
+ * Create a user.
+ *
+ * ADMIN-01, the clearest case: this wrote MongoDB, so the account the admin was
+ * told had been created COULD NOT LOG IN. auth.js reads MySQL and there was no
+ * row there.
+ *
+ * SEC-18 closes by construction - `users.create` hashes at `BCRYPT_COST` (12),
+ * so there is no cost parameter here to get wrong. SEC-21 closes by setting
+ * `isVerified` explicitly rather than leaving the default and relying on
+ * auth.js to quietly repair it at first login.
+ *
+ * SEC-08 IS NOT APPLICABLE HERE, and that is a decision rather than an
+ * oversight. The finding is account enumeration; this endpoint is behind
+ * `adminAuth`, and the same caller can list every account with a GET. A generic
+ * response would withhold from an admin something they can read one request
+ * later, at the cost of telling them nothing about why their request failed.
+ * The mechanism is present; the outcome it prevents is not.
+ */
 router.post("/users", async (req, res) => {
   try {
-    const { name, email, password, role, phone, address } = req.body;
+    const { name, email, password, role, phone, address } = req.body || {};
 
-    // Validate required fields
     if (!name || !email || !password) {
-      return res.status(400).json({ error: "Name, email, and password are required" });
+      return refuse(res, 400, "Name, email, and password are required");
+    }
+    const problem = passwordProblem(password);
+    if (problem) return refuse(res, 400, problem);
+
+    if (await users.findByEmail(email)) {
+      return refuse(res, 400, "User with this email already exists");
     }
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ error: "User with this email already exists" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create user
-    const user = new User({
+    const created = await users.create({
       name,
       email,
-      password: hashedPassword,
+      password,
       role: role || "user",
       phone: phone || "",
       address: address || "",
-      isActive: true
+      isActive: true,
+      // SEC-21. An account an admin created is verified by the act of an admin
+      // creating it; leaving it false left auth.js to flip it on first login,
+      // which made `isVerified` a field nothing could ever refuse.
+      isVerified: true,
     });
 
-    await user.save();
-
-    // Return user without password
-    const userResponse = user.toObject();
-    delete userResponse.password;
-
-    res.status(201).json({ message: "User created successfully", user: userResponse });
+    res.status(201).json({ message: "User created successfully", user: present(created) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return failed(res, "Failed to create user", err, { tag: "admin" });
   }
 });
 
-// Update user (Admin)
+/** Update profile fields. Never isActive, isVerified, password or tokenVersion. */
 router.put("/users/:id", async (req, res) => {
   try {
-    const { name, email, role, phone, address } = req.body;
+    const { name, email, role, phone, address } = req.body || {};
 
-    // Prevent admin from demoting themselves (BE-MED-06)
-    if (role && role !== 'admin' && req.user.id === req.params.id) {
-      return res.status(400).json({ error: "Cannot demote your own account" });
+    // BE-MED-06: an admin may not demote themselves.
+    if (role && role !== "admin" && req.user.id === req.params.id) {
+      return refuse(res, 400, "Cannot demote your own account");
     }
 
-    const updateFields = {};
-    if (name !== undefined) updateFields.name = name;
-    if (email !== undefined) updateFields.email = email;
-    if (role !== undefined) updateFields.role = role;
-    if (phone !== undefined) updateFields.phone = phone;
-    if (address !== undefined) updateFields.address = address;
-
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { $set: updateFields },
-      { new: true }
-    ).select("-password");
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    res.json({ message: "User updated successfully", user });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Toggle user active status (Disable/Enable)
-router.patch("/users/:id/toggle-status", async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Toggle isActive status
-    user.isActive = !user.isActive;
-    await user.save();
-
-    const userResponse = user.toObject();
-    delete userResponse.password;
-
-    res.json({
-      message: `User ${user.isActive ? 'enabled' : 'disabled'} successfully`,
-      user: userResponse
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Change user password (Admin)
-router.patch("/users/:id/change-password", async (req, res) => {
-  try {
-    const { newPassword } = req.body;
-
-    if (!newPassword || newPassword.length < 10) {
-      return res.status(400).json({ error: "Password must be at least 6 characters long" });
-    }
-
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { $set: { password: hashedPassword } },
-      { new: true }
-    ).select("-password");
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    res.json({ message: "Password changed successfully", user });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Delete user (Admin)
-router.delete("/users/:id", async (req, res) => {
-  try {
-    // Prevent self-deletion (BE-MED-06)
-    if (req.user.id === req.params.id) {
-      return res.status(400).json({ error: "Cannot delete your own account" });
-    }
-
-    // Prevent deleting the last admin (BE-MED-06)
-    const targetUser = await User.findById(req.params.id);
-    if (!targetUser) {
-      return res.status(404).json({ error: "User not found" });
-    }
-    if (targetUser.role === 'admin') {
-      const adminCount = await User.countDocuments({ role: 'admin' });
-      if (adminCount <= 1) {
-        return res.status(400).json({ error: "Cannot delete the last admin account" });
+    if (email !== undefined) {
+      const clash = await users.findByEmail(email);
+      const target = await users.findByExternalId(req.params.id);
+      if (clash && target && clash.id !== target.id) {
+        // The Mongoose version had no check: the write hit the unique index and
+        // returned a 500 carrying the index name (SEC-19).
+        return refuse(res, 400, "User with this email already exists");
       }
     }
 
-    await User.findByIdAndDelete(req.params.id);
+    const updated = await users.adminUpdate(req.params.id, {
+      name,
+      email,
+      role,
+      phone,
+      address,
+    });
+    if (!updated) return refuse(res, 404, "User not found");
+
+    res.json({ message: "User updated successfully", user: present(updated) });
+  } catch (err) {
+    return failed(res, "Failed to update user", err, { tag: "admin" });
+  }
+});
+
+/**
+ * Enable or disable an account.
+ *
+ * ADMIN-01's headline case. This answered `200 "User disabled successfully"`
+ * and set `isActive` in MongoDB; `authMiddleware` enforces the MySQL value, so
+ * THE DISABLED ACCOUNT KEPT AUTHENTICATING. The admin was told it was disabled,
+ * the record said disabled, and access was never revoked.
+ *
+ * `users.setActive` also increments `token_version` when disabling, so live
+ * sessions die with the account instead of surviving for up to an hour. That is
+ * in the data layer rather than here precisely so a call site cannot forget it.
+ */
+router.patch("/users/:id/toggle-status", async (req, res) => {
+  try {
+    const target = await users.findByExternalId(req.params.id);
+    if (!target) return refuse(res, 404, "User not found");
+
+    // BE-MED-06's reasoning, extended: an admin who disables their own account
+    // locks themselves out mid-request. The Mongoose version allowed it.
+    if (req.user.id === req.params.id && target.isActive) {
+      return refuse(res, 400, "Cannot disable your own account");
+    }
+
+    const updated = await users.setActive(target.id, !target.isActive);
+    res.json({
+      message: `User ${updated.isActive ? "enabled" : "disabled"} successfully`,
+      user: present(updated),
+    });
+  } catch (err) {
+    return failed(res, "Failed to change account status", err, { tag: "admin" });
+  }
+});
+
+/**
+ * Set a user's password.
+ *
+ * ADMIN-01 again, and SEC-18b with it. This wrote the hash to MongoDB while
+ * login verified against MySQL, so THE OLD PASSWORD STILL WORKED AND THE NEW
+ * ONE DID NOT - after a `200 "Password changed successfully"`.
+ *
+ * `users.setPassword` hashes at cost 12 and increments `token_version`, so an
+ * admin resetting a compromised account's password now actually revokes its
+ * sessions. It did not before, which is the worst possible moment for that
+ * control to be missing.
+ *
+ * SEC-10: the length rule comes from `utils/password`. The rule here used to be
+ * `length < 10` behind a message that said 6.
+ */
+router.patch("/users/:id/change-password", async (req, res) => {
+  try {
+    const { newPassword } = req.body || {};
+    const problem = passwordProblem(newPassword);
+    if (problem) return refuse(res, 400, problem);
+
+    const target = await users.findByExternalId(req.params.id);
+    if (!target) return refuse(res, 404, "User not found");
+
+    const updated = await users.setPassword(target.id, newPassword);
+    res.json({ message: "Password changed successfully", user: present(updated) });
+  } catch (err) {
+    return failed(res, "Failed to change password", err, { tag: "admin" });
+  }
+});
+
+/**
+ * Delete a user.
+ *
+ * ADMIN-01: this deleted the MongoDB row and answered `200 "User deleted
+ * successfully"` while the MySQL account survived AND KEPT AUTHENTICATING.
+ *
+ * Both BE-MED-06 guards are preserved deliberately - they were correct, and a
+ * migration is the easiest place to drop a guard nobody is testing. The
+ * donations of a deleted donor survive with `user_id` NULL (ADR-003), so the
+ * record stays attributable through `donor_name` and `donor_email`.
+ */
+router.delete("/users/:id", async (req, res) => {
+  try {
+    if (req.user.id === req.params.id) {
+      return refuse(res, 400, "Cannot delete your own account");
+    }
+
+    const target = await users.findByExternalId(req.params.id);
+    if (!target) return refuse(res, 404, "User not found");
+
+    if (target.role === "admin" && (await users.countAdmins()) <= 1) {
+      return refuse(res, 400, "Cannot delete the last admin account");
+    }
+
+    const deleted = await users.deleteByExternalId(req.params.id);
+    if (!deleted) return refuse(res, 404, "User not found");
+
     res.json({ message: "User deleted successfully" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return failed(res, "Failed to delete user", err, { tag: "admin" });
   }
 });
 
@@ -380,3 +475,32 @@ router.get("/cleanup/preview", async (req, res) => {
 
 module.exports = router;
 
+
+/**
+ * -----------------------------------------------------------------------------
+ * WHAT AS7 DELIBERATELY DID NOT CHANGE
+ * -----------------------------------------------------------------------------
+ * Stated rather than left to be inferred from the diff, because a migration is
+ * the easiest place for a deferral to become an omission.
+ *
+ * 1. SEC-08 on `POST /users`. NOT APPLICABLE rather than deferred - see the
+ *    handler. The endpoint is behind `adminAuth`, and the same caller can list
+ *    every account with a GET, so a generic response withholds nothing from an
+ *    attacker and withholds a reason from an admin.
+ *
+ * 2. BUG-04's dead Vercel cron declaration. `Backend/vercel.json` still points
+ *    a cron at `POST /api/admin/cleanup/trigger`, which sits behind `adminAuth`
+ *    and has therefore received a 401 every night since it was written. The
+ *    endpoint is migrated; REMOVING THE CRON DECLARATION IS A DEPLOYMENT
+ *    CHANGE, not a route change, and it belongs with the Vercel teardown.
+ *
+ * 3. The `users` count on `/stats` counts EVERY account including admins and
+ *    disabled ones, exactly as it did before. That is pre-existing behaviour
+ *    and nobody has said which number the tile is supposed to show; changing it
+ *    silently alongside a store swap is how a dashboard starts lying.
+ *
+ * 4. `isVerified` still gates nothing (AJ3's restatement of SEC-21). This file
+ *    now sets it TRUE explicitly at creation, which is the half SEC-21 asked
+ *    for. Whether the flag should REFUSE anything is a product decision, and
+ *    making a dead field load-bearing is not a migration's job.
+ */

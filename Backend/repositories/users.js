@@ -378,6 +378,132 @@ async function deleteByEmailPrefix(prefix, tx) {
 }
 
 // -----------------------------------------------------------------------------
+// The admin management surface (AS7)
+// -----------------------------------------------------------------------------
+
+/** BUG-08. One ceiling across the project, not one per route file. */
+const MAX_PAGE_SIZE = 100;
+
+/**
+ * Make a search term a LITERAL.
+ *
+ * BE-HIGH-08 escaped regex metacharacters on the Mongo side. Moving to SQL does
+ * not retire that - it RENAMES it: `LIKE` has `%` and `_`, and Prisma's
+ * `contains` binds the value without neutralising them, so `search=%` would
+ * return every account. Identical reasoning to `repositories/donations.js`, and
+ * the duplication is deliberate: one line copied is better than an import that
+ * couples the two repositories, and both are covered by their own tests.
+ */
+function escapeLike(term) {
+  return String(term).replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Resolve an external identifier in EITHER form.
+ *
+ * ADR-051 keeps the 24-hex ObjectId as the external id for the rest of Phase 3,
+ * so that is what an admin URL carries; `uuid` is what the repository speaks.
+ */
+async function findByExternalId(externalId, tx) {
+  if (typeof externalId !== 'string' || !externalId.trim()) return null;
+  const value = externalId.trim();
+  const row = await client(tx).user.findFirst({
+    where: { OR: [{ uuid: value }, { legacyId: value }] },
+    select: SELECT,
+  });
+  return normalise(row);
+}
+
+/**
+ * The admin user list.
+ *
+ * NAMED SCALARS, NOT A QUERY OBJECT - the same boundary `donations.list` draws,
+ * and for the same reason: the Mongoose version assembled a filter object in the
+ * route from `req.query`, which is SEC-03's shape one layer up.
+ */
+function buildWhere(filters = {}) {
+  const where = {};
+
+  if (filters.role) where.role = String(filters.role);
+
+  // `status` is 'active' or anything else. Preserved exactly: the Mongoose
+  // version did `filter.isActive = status === 'active'`, so 'disabled',
+  // 'banana' and '' all meant inactive. Only an ABSENT status means "either".
+  if (filters.status !== undefined && filters.status !== null && filters.status !== '') {
+    where.isActive = filters.status === 'active';
+  }
+
+  if (filters.from || filters.to) {
+    where.createdAt = {};
+    if (filters.from) where.createdAt.gte = new Date(filters.from);
+    if (filters.to) where.createdAt.lte = new Date(filters.to);
+  }
+
+  if (filters.search && String(filters.search).trim()) {
+    const term = escapeLike(String(filters.search).trim());
+    where.OR = [
+      { name: { contains: term } },
+      { email: { contains: term } },
+      { phone: { contains: term } },
+    ];
+  }
+
+  return where;
+}
+
+async function list(filters = {}, paging = {}, tx) {
+  const db = client(tx);
+  const where = buildWhere(filters);
+  const take = Math.min(Math.max(1, paging.limit || 10), MAX_PAGE_SIZE);
+  const skip = Math.max(0, ((paging.page || 1) - 1) * take);
+
+  const [total, rows] = await Promise.all([
+    db.user.count({ where }),
+    db.user.findMany({ where, select: SELECT, orderBy: { createdAt: 'desc' }, skip, take }),
+  ]);
+
+  return { rows: rows.map(normalise), total };
+}
+
+async function count(filters = {}, tx) {
+  return client(tx).user.count({ where: buildWhere(filters) });
+}
+
+/**
+ * Admin-editable profile fields.
+ *
+ * DELIBERATELY NOT `isActive`, `isVerified`, `password` or `tokenVersion`. Each
+ * of those has its own function because each carries a consequence the caller
+ * must not be able to trigger by accident: disabling revokes tokens, setting a
+ * password revokes tokens and re-hashes at BCRYPT_COST. A single "update
+ * whatever was sent" is how ADMIN-01's siblings get written.
+ */
+async function adminUpdate(externalId, fields, tx) {
+  const target = await findByExternalId(externalId, tx);
+  if (!target) return null;
+
+  const data = {};
+  if (fields.name !== undefined) data.name = fields.name;
+  if (fields.email !== undefined) data.email = String(fields.email).trim().toLowerCase();
+  if (fields.role !== undefined) data.role = fields.role;
+  if (fields.phone !== undefined) data.phone = fields.phone;
+  if (fields.address !== undefined) data.address = fields.address;
+
+  if (Object.keys(data).length === 0) return target;
+
+  await client(tx).user.update({ where: { uuid: target.id }, data });
+  return findById(target.id, tx);
+}
+
+/** Returns false when there was nothing to delete, so the caller can 404. */
+async function deleteByExternalId(externalId, tx) {
+  const target = await findByExternalId(externalId, tx);
+  if (!target) return false;
+  await client(tx).user.delete({ where: { uuid: target.id } });
+  return true;
+}
+
+// -----------------------------------------------------------------------------
 // Inactive-account retention (package 3.3)
 // -----------------------------------------------------------------------------
 /**
@@ -443,6 +569,15 @@ module.exports = {
   setActive,
   countAdmins,
   deleteByEmailPrefix,
+
+  // The admin management surface (AS7).
+  findByExternalId,
+  list,
+  count,
+  adminUpdate,
+  deleteByExternalId,
+  MAX_PAGE_SIZE,
+
   // Inactive-account retention (package 3.3), carried across from the retired
   // dataCleanupService rather than dropped with it.
   countInactiveOlderThan,

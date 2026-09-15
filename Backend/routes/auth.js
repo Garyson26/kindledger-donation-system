@@ -88,21 +88,13 @@ router.use((req, res, next) => {
 });
 
 // -----------------------------------------------------------------------------
-// SEC-10 - ONE password policy
+// SEC-10 - ONE password policy, and it now lives in ONE MODULE.
 // -----------------------------------------------------------------------------
-// There were three rules before: `/forgot-password/reset` required 10
-// characters, `/signup` required nothing beyond Mongoose's `required`, and
-// `/change-password` accepted a single character. A policy that differs by
-// entry point is the weakest of its variants, because an attacker picks.
-const MIN_PASSWORD_LENGTH = 10;
-
-function passwordProblem(value) {
-  if (typeof value !== "string" || value.length === 0) return "Password is required";
-  if (value.length < MIN_PASSWORD_LENGTH) {
-    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`;
-  }
-  return null;
-}
+// It was defined here in package 3.2, which made it one validator across the
+// five paths IN THIS FILE. routes/admin.js had a sixth, whose check said 10 and
+// whose message said 6. "One validator" has to mean one module or the next file
+// that needs it writes a seventh. See utils/password.js.
+const { passwordProblem } = require("../utils/password");
 
 /**
  * The session token.
