@@ -63,11 +63,19 @@ const bridge = createBridge({
 // holding a stale token exactly why it stopped working, and whether an admin
 // has noticed them. Asserted by `test/user-bridge.test.js`, not merely written
 // here - the AI4 pattern.
-const AUTH_ALLOWED = ['id', 'name', 'role', 'isActive', 'tokenVersion'];
+const AUTH_ALLOWED = ['id', 'uuid', 'name', 'role', 'isActive', 'tokenVersion'];
 
-function projectAuth(id, row, source) {
+function projectAuth(id, row, source, uuid) {
   return {
+    // The EXTERNAL identifier - an ObjectId (ADR-051). Used for comparisons
+    // against client-supplied ids and in responses.
     id,
+    // The MySQL uuid, for repository lookups. NULL for a user still in
+    // MongoDB, which is what makes a half-migrated account visibly
+    // half-migrated rather than silently broken: a handler that needs the
+    // repository gets null and answers 404, instead of looking up an ObjectId
+    // as if it were a uuid and finding nothing for a reason nobody can see.
+    uuid,
     name: row.name || '',
     role: row.role || 'user',
     // Mongo's User schema has isActive; it has NO tokenVersion, so a user still
@@ -93,7 +101,7 @@ async function resolveAuthUser(id) {
 
   const users = require('../repositories/users');
   const row = shape === 'objectid' ? await users.findByLegacyId(value) : await users.findById(value);
-  if (row) return projectAuth(row.legacyId || row.id, row, 'mysql');
+  if (row) return projectAuth(row.legacyId || row.id, row, 'mysql', row.id);
 
   if (shape === 'uuid') return null;
 
@@ -123,7 +131,7 @@ async function resolveAuthUser(id) {
       'decision was just made from MongoDB. Expected during package 3.2; ' +
       `investigate if seen afterwards (AJ1b). Fallbacks so far: ${total}.`
   );
-  return projectAuth(doc._id.toString(), doc, 'mongo');
+  return projectAuth(doc._id.toString(), doc, 'mongo', null);
 }
 
 module.exports = {

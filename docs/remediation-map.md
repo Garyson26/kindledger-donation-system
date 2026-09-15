@@ -840,6 +840,94 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## Package 3.2 - COMPLETE. SEC-04 CLOSED, SEC-03 closed on the branch.
+
+`auth.js`, `users.js` and both middlewares are migrated to MySQL and import no
+Mongoose.
+
+### SEC-04 IS CLOSED - reversing the Phase 2 report
+
+Phase 2 reported it OPEN, and correctly: ADR-042 recorded that
+`config/rateLimiters.js` existed and nothing imported it, and that "the store
+existing and the store being used are different claims". **This package supplies
+the second claim.** `routes/auth.js` imports the factory, and the running
+container announces:
+
+    [rateLimiters] store=redis
+
+Same 5-per-minute budget, so the wiring changed the STORE and nothing else - a
+package that silently tightened the limit would be indistinguishable from one
+that broke something.
+
+### SEC-03 - closed on the branch, NOT YET IN PRODUCTION
+
+Three different claims, kept apart deliberately because they are not the same
+thing:
+
+| Claim | Status |
+|---|---|
+| Closed on `phase-2-data-layer` | **YES.** Parameterised SQL closes the class, asserted including that no login OTP is issued |
+| Hotfixed on `hotfix/sec-03-auth-bypass` | **YES.** 11/11 against current `main` |
+| Merged **and deployed** | **NO, as of this package.** Until the hotfix merges AND deploys, production carries the bypass |
+
+### Also closed here
+
+| ID | What changed |
+|---|---|
+| SEC-05 | `isActive` enforced in both middlewares and at login; `tokenVersion` revokes tokens on a password change. Both had existed as columns nothing read |
+| SEC-08 | `/login/resend-otp`, `/forgot-password/verify` and `/forgot-password/reset` answer identically for known and unknown addresses |
+| SEC-10 | ONE validator on every path that sets a password. There were three rules and two paths with none |
+| SEC-13 | OTPs and reset codes stored as sha256 hashes rather than readable digits |
+| SEC-18 | bcrypt cost 12 |
+| SEC-19 | `failed()` on every handler |
+| SEC-09 | the profile-load PII log removed |
+
+### Deferred, with the reason stated
+
+**SEC-08 on `/signup`.** "User already exists with this email" is an account
+oracle. Removing it properly means always answering "check your email" and
+sending EITHER a verification code OR a "someone tried to register with your
+address" notice - a second template in `config/email.js`, which this package does
+not own. The security review reaches the same conclusion. Assigned to the package
+that owns the email templates.
+
+### Two corrections found by running it
+
+**SEC-08's `/login` row in the review is WRONG.** It lists the
+`needsSignupVerification` disclosure as enumeration. That branch is reached only
+after `bcrypt.compare` SUCCEEDS, so a caller who does not already hold the
+password gets the same `Invalid credentials` as any other failure. Verified by
+reading the branch rather than inherited from the review (AN3) - the third such
+correction.
+
+**My first SEC-08 fix was incomplete, and a test caught it.** A known address
+with no reset code answered "No verification code found" while an unknown one
+answered "Invalid verification code", so the oracle SURVIVED the change meant to
+remove it. Found because the test asserted BYTE-IDENTICAL BODIES rather than
+identical statuses. Asserting the status alone would have passed.
+
+### One defect the wiring introduced
+
+Wiring the Redis limiter made every process that imports `app.js` hang on exit,
+because the client held the event loop open - the auth suites passed and then
+never terminated, which reads as a broken test rather than as a held socket.
+Fixed with `unref()`: in production the HTTP server keeps the process alive, and
+a rate limiter has no business doing it.
+
+### The identifier split this package forced
+
+`req.user` now carries BOTH ids: `id` is the external ObjectId, used for
+comparisons against client-supplied values, and `uuid` is the MySQL key used for
+repository lookups. Conflating them made `/auth/me` answer 404 for a valid token,
+because an ObjectId was being looked up as a uuid.
+
+`uuid` is NULL for an account still in MongoDB, which makes a half-migrated
+account VISIBLY half-migrated: a handler that needs the repository gets null and
+answers 404, rather than searching for an id that cannot match and failing for a
+reason nobody can see.
+
+---
+
 ## The three ordering constraints, in order of precedence (AK2)
 
 Each was found by hitting it. None was found by planning.

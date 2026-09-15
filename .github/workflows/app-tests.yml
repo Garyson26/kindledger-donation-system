@@ -164,10 +164,6 @@ jobs:
 
       - name: Auth characterisation (SPEC-3 package 3.2)
         working-directory: Backend
-        # NOTE: 12/14 while ADR-056 is open. The two failures are symptoms of
-        # that finding, not flakiness - see the map. This step is expected to be
-        # RED until 4a lands and 3.2 completes.
-        continue-on-error: true
         run: npm run test:auth-char
 
       - name: ETL (Phase 4a)

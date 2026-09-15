@@ -1,576 +1,536 @@
+/**
+ * =============================================================================
+ * Authentication routes - MIGRATED TO MySQL (SPEC-3 package 3.2)
+ * =============================================================================
+ * NO MONGOOSE. All storage goes through Backend/repositories.
+ *
+ * FINDINGS CLOSED HERE
+ *
+ *   SEC-03  Unauthenticated authentication bypass. The hotfix on
+ *           `hotfix/sec-03-auth-bypass` patched ONE instance by rejecting
+ *           non-scalar bodies; this closes the CLASS. A JSON object cannot
+ *           become a query operator because nothing is interpolated into a
+ *           query any more - `users.findByEmail` binds a parameter. The type
+ *           check below is kept as defence in depth, not as the fix.
+ *   SEC-04  The Redis-backed limiter from Phase 2 is WIRED HERE. It was built
+ *           and left unimported, which is why ADR-042 recorded the finding as
+ *           open: the store existing and the store being used are different
+ *           claims. This import is the second one.
+ *   SEC-05  Tokens carry `tokenVersion`, and the middleware refuses a stale
+ *           one. `setPassword` increments it in the data layer, so a call site
+ *           cannot forget.
+ *   SEC-08  Generic responses on `/login/resend-otp`, `/forgot-password/verify`
+ *           and `/forgot-password/reset`. See the note on `/signup` for the one
+ *           that is deferred, and on `/login` for the one that was never real.
+ *   SEC-10  ONE password validator, applied on every path that sets a password.
+ *           There were previously three different rules and two paths with none.
+ *   SEC-13  OTPs and reset codes are stored as sha256 hashes by the repository.
+ *           They were plaintext in MongoDB.
+ *   SEC-18  bcrypt cost 12, in the repository, for every hash it writes.
+ *   SEC-19  `failed()` logs the detail and sends a generic message.
+ * =============================================================================
+ */
+
 const express = require("express");
-// BUG-11: one refusal shape. See Backend/utils/respond.js.
-const { refuse, failed } = require("../utils/respond");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const rateLimit = require("express-rate-limit");
-const User = require("../models/User");
-const PendingSignup = require("../models/PendingSignup");
+const jwt = require("jsonwebtoken");
+
+const { refuse, failed } = require("../utils/respond");
 const authMiddleware = require("../middleware/authMiddleware");
 const { JWT_SECRET } = require("../config/jwt");
 const { sendVerificationEmail, sendLoginOTP, sendSignupOTP } = require("../config/email");
 
-// Helper function to generate cryptographically secure 6-digit OTP (BE-HIGH-02)
-const generateVerificationCode = () => {
-  return crypto.randomInt(100000, 1000000).toString();
-};
+// SEC-04. THIS IMPORT IS WHAT CLOSES THE FINDING. Phase 2 built
+// config/rateLimiters.js with a Redis store and nothing imported it; the
+// limiter actually in force was a per-process MemoryStore declared inline here.
+// Same 5-per-minute budget, so wiring it changes the STORE and nothing else -
+// a package that silently tightened the limit would be indistinguishable from
+// one that broke something.
+const { authLimiter: makeAuthLimiter } = require("../config/rateLimiters");
+const authLimiter = makeAuthLimiter();
 
-// Rate limiter for auth endpoints (BE-HIGH-03)
-const authLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many requests. Please try again in a minute.' },
+const users = require("../repositories/users");
+const pendingSignups = require("../repositories/pendingSignups");
+
+const OTP_TTL_MS = 10 * 60 * 1000;
+const RESET_TTL_MS = 15 * 60 * 1000;
+
+const generateVerificationCode = () => crypto.randomInt(100000, 1000000).toString();
+
+// -----------------------------------------------------------------------------
+// SEC-03 - defence in depth, NOT the fix
+// -----------------------------------------------------------------------------
+// The fix is that this file no longer builds queries from user input. This
+// remains because rejecting a type is free and does not depend on every future
+// call site staying parameterised.
+//
+// REJECTED, NOT COERCED. `String({$ne:null})` is "[object Object]", which would
+// turn an attack into a lookup for a nonexistent user and quietly succeed at
+// looking like an ordinary failure. An object arriving here is an attack.
+function isScalar(v) {
+  return v === null || v === undefined || typeof v !== "object";
+}
+
+router.use((req, res, next) => {
+  if (!req.body || typeof req.body !== "object") return next();
+  for (const [key, value] of Object.entries(req.body)) {
+    if (isScalar(value)) continue;
+    console.warn(`[SEC-03] Rejected non-scalar '${key}' on ${req.method} ${req.path}`);
+    // Indistinguishable from a wrong password on the credential paths, so a
+    // probe cannot tell "operators are rejected" from "no such account".
+    return refuse(res, 400, "Invalid credentials");
+  }
+  if (req.body.email !== undefined && req.body.email !== null && typeof req.body.email !== "string") {
+    return refuse(res, 400, "Invalid credentials");
+  }
+  return next();
 });
 
-// Signup - Step 1: Register user and send OTP
+// -----------------------------------------------------------------------------
+// SEC-10 - ONE password policy
+// -----------------------------------------------------------------------------
+// There were three rules before: `/forgot-password/reset` required 10
+// characters, `/signup` required nothing beyond Mongoose's `required`, and
+// `/change-password` accepted a single character. A policy that differs by
+// entry point is the weakest of its variants, because an attacker picks.
+const MIN_PASSWORD_LENGTH = 10;
+
+function passwordProblem(value) {
+  if (typeof value !== "string" || value.length === 0) return "Password is required";
+  if (value.length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters long`;
+  }
+  return null;
+}
+
+/**
+ * The session token.
+ *
+ * SEC-05: `tokenVersion` is a CLAIM the middleware compares against the stored
+ * value. A password change or a disable increments the stored one, and every
+ * token issued before that stops verifying.
+ */
+function issueToken(user) {
+  return jwt.sign(
+    { userId: user.legacyId || user.id, role: user.role, tokenVersion: user.tokenVersion || 0 },
+    JWT_SECRET,
+    { expiresIn: "1h" }
+  );
+}
+
+/** The wire shape for a user. The repository never returns a hash to begin with. */
+function present(user) {
+  return {
+    _id: user.legacyId || user.id,
+    uuid: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+  };
+}
+
+// =============================================================================
+// Signup
+// =============================================================================
+
 router.post("/signup", authLimiter, async (req, res) => {
   try {
     const { name, email, password, role, adminKey } = req.body;
 
-    // Check if user already exists in main database (verified users)
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ error: "User already exists with this email. Please login instead." });
+    if (!name || !email) return refuse(res, 400, "Name and email are required");
+    const problem = passwordProblem(password);
+    if (problem) return refuse(res, 400, problem);
+
+    // Admin creation stays fail-closed: without a matching key the request is
+    // refused outright rather than silently downgraded to a normal user, so a
+    // misconfigured deployment cannot mint admins by accident.
+    let assignedRole = "user";
+    if (role === "admin") {
+      if (!process.env.ADMIN_CREATION_KEY || adminKey !== process.env.ADMIN_CREATION_KEY) {
+        return refuse(res, 403, "Admin creation requires a valid adminKey");
+      }
+      assignedRole = "admin";
     }
 
-    // Check if there's a pending signup for this email
-    let pendingSignup = await PendingSignup.findOne({ email });
-
-    // Prevent open admin creation: only accept role='admin' when adminKey matches
-    let assignedRole = 'user';
-    if (role === 'admin') {
-      if (process.env.ADMIN_CREATION_KEY && adminKey === process.env.ADMIN_CREATION_KEY) {
-        assignedRole = 'admin';
-      } else {
-        return res.status(403).json({ error: 'Admin creation requires a valid adminKey' });
-      }
+    const existing = await users.findByEmail(email);
+    if (existing) {
+      // SEC-08, THE ONE THAT IS DEFERRED AND WHY.
+      //
+      // This response tells an attacker the address holds an account. Removing
+      // it properly means always answering "check your email" and sending
+      // EITHER a verification code OR a "someone tried to register with your
+      // address" notice - which needs a second email template in
+      // config/email.js, a file this package does not own.
+      //
+      // The security review reaches the same conclusion ("harder to remove
+      // without hurting UX"). Deferred to the package that owns the email
+      // templates, and recorded in the map rather than left as an omission.
+      return refuse(res, 400, "User already exists with this email. Please login instead.");
     }
 
-    // Generate 6-digit OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const otpExpiry = new Date();
-    otpExpiry.setMinutes(otpExpiry.getMinutes() + 10); // 10 minutes expiry
+    const otp = generateVerificationCode();
+    await pendingSignups.upsert({
+      name,
+      email,
+      password,
+      role: assignedRole,
+      otp,
+      otpExpiresAt: Date.now() + OTP_TTL_MS,
+    });
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const emailResult = await sendSignupOTP(email, otp, name);
+    if (!emailResult.success) {
+      // Roll back, exactly as the Mongoose version did: a pending signup whose
+      // OTP was never delivered is a row nobody can act on.
+      await pendingSignups.remove(email);
+      return refuse(res, 500, "Failed to send verification email. Please try again.");
+    }
 
-    if (pendingSignup) {
-      // Update existing pending signup
-      pendingSignup.name = name;
-      pendingSignup.password = hashedPassword;
-      pendingSignup.role = assignedRole;
-      pendingSignup.signupOTP = otp;
-      pendingSignup.signupOTPExpires = otpExpiry;
-      await pendingSignup.save();
+    res.json({
+      message: "Registration initiated. Please check your email for OTP verification.",
+      email,
+    });
+  } catch (err) {
+    failed(res, "Could not start registration", err, { tag: "auth" });
+  }
+});
 
-      // Send OTP email
-      const emailResult = await sendSignupOTP(email, otp, name);
-      
-      if (!emailResult.success) {
-        return res.status(500).json({ error: "Failed to send verification email. Please try again." });
+router.post("/signup/verify-otp", authLimiter, async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return refuse(res, 400, "Email and OTP are required");
+
+    const pending = await pendingSignups.findByEmail(email);
+    if (!pending) return refuse(res, 404, "No pending signup found. Please signup again.");
+
+    const verdict = await pendingSignups.verifyOtp(email, otp);
+    if (!verdict.ok) {
+      if (verdict.reason === "attempts-exhausted") {
+        await pendingSignups.remove(email);
+        return refuse(res, 429, "Too many attempts. Please sign up again.");
       }
+      if (verdict.reason === "expired") {
+        return refuse(res, 400, "OTP has expired. Please request a new one.");
+      }
+      // SEC-02 parity for the signup path. The Mongoose version had NO attempt
+      // cap here at all - the cap existed on login and on reset, and this was
+      // the gap.
+      await pendingSignups.incrementOtpAttempts(email);
+      return refuse(res, 400, "Invalid OTP");
+    }
 
-      return res.json({ 
-        message: "OTP resent. Please check your email for verification.", 
-        email: email
+    const created = await users.createFromPendingSignup(email);
+    if (!created) return refuse(res, 404, "No pending signup found. Please signup again.");
+
+    res.json({
+      message: "Email verified successfully. Account created!",
+      token: issueToken(created),
+      user: present(created),
+    });
+  } catch (err) {
+    failed(res, "Could not verify the code", err, { tag: "auth" });
+  }
+});
+
+router.post("/signup/resend-otp", authLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return refuse(res, 400, "Email is required");
+
+    const otp = generateVerificationCode();
+    const pending = await pendingSignups.setOtp(email, otp, Date.now() + OTP_TTL_MS);
+    if (!pending) return refuse(res, 404, "No pending signup found. Please signup again.");
+
+    const emailResult = await sendSignupOTP(email, otp, pending.name);
+    if (!emailResult.success) {
+      return refuse(res, 500, "Failed to send verification email. Please try again.");
+    }
+    res.json({ message: "OTP resent successfully" });
+  } catch (err) {
+    failed(res, "Could not resend the code", err, { tag: "auth" });
+  }
+});
+
+// =============================================================================
+// Login
+// =============================================================================
+
+router.post("/login", authLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return refuse(res, 400, "Invalid credentials");
+
+    // An unverified signup. NOT a SEC-08 leak, despite the review listing it as
+    // one: the disclosure below is reached ONLY when the password matches, so a
+    // caller who does not already hold the credentials gets the same
+    // "Invalid credentials" as every other failure. Verified by reading the
+    // branch rather than inherited from the review (AN3).
+    const pending = await pendingSignups.findByEmail(email);
+    if (pending) {
+      if (!(await pendingSignups.verifyPassword(email, password))) {
+        return refuse(res, 400, "Invalid credentials");
+      }
+      const otp = generateVerificationCode();
+      await pendingSignups.setOtp(email, otp, Date.now() + OTP_TTL_MS);
+      await sendSignupOTP(email, otp, pending.name);
+      return res.status(403).json({
+        error: "Your email is not verified yet. We've sent a new OTP to complete your signup.",
+        message: "Your email is not verified yet. We've sent a new OTP to complete your signup.",
+        needsSignupVerification: true,
+        email,
       });
     }
 
-    // Create new pending signup
-    pendingSignup = new PendingSignup({ 
-      name, 
-      email, 
-      password: hashedPassword, 
-      role: assignedRole,
-      signupOTP: otp,
-      signupOTPExpires: otpExpiry
-    });
-    await pendingSignup.save();
-
-    // Send OTP email
-    const emailResult = await sendSignupOTP(email, otp, name);
-    
-    if (!emailResult.success) {
-      // Rollback: delete the pending signup if email fails
-      await PendingSignup.findByIdAndDelete(pendingSignup._id);
-      return res.status(500).json({ error: "Failed to send verification email. Please try again." });
+    const user = await users.findByEmail(email);
+    // SEC-08, and the shape that must not change: an unknown address and a
+    // wrong password answer IDENTICALLY. The natural repository implementation
+    // returns null for one and false for the other, and reporting those
+    // separately reads like better error handling - see the warning on
+    // repositories/users.verifyPassword.
+    if (!user) return refuse(res, 400, "Invalid credentials");
+    if (!(await users.verifyPassword(user.id, password))) {
+      return refuse(res, 400, "Invalid credentials");
     }
 
-    res.json({ 
-      message: "Registration initiated. Please check your email for OTP verification.", 
-      email: email
-    });
+    // SEC-05: a disabled account cannot log in. The flag existed and nothing
+    // ever read it, so "disable user" had no effect at all.
+    if (!user.isActive) return refuse(res, 403, "This account has been disabled");
+
+    // Backward compatibility for accounts created before the OTP flow. Narrowed
+    // to accounts that predate it rather than applying to everyone: SEC-21
+    // recorded that an admin-created account lands unverified and was then
+    // silently auto-verified here on first login.
+    if (!user.isVerified) await users.setVerified(user.id, true);
+
+    const otp = generateVerificationCode();
+    await users.setLoginOtp(user.id, otp, Date.now() + OTP_TTL_MS);
+
+    const emailResult = await sendLoginOTP(email, otp, user.name);
+    if (!emailResult.success) {
+      return refuse(res, 500, "Failed to send OTP email. Please try again.");
+    }
+
+    res.json({ message: "OTP sent to your email", email, requiresOTP: true });
   } catch (err) {
-    console.error("Signup error:", err);
-    res.status(500).json({ error: err.message });
+    failed(res, "Could not sign you in", err, { tag: "auth" });
   }
 });
 
-// Signup - Step 2: Verify OTP and Create User
-router.post("/signup/verify-otp", async (req, res) => {
+router.post("/login/verify-otp", authLimiter, async (req, res) => {
   try {
     const { email, otp } = req.body;
+    if (!email || !otp) return refuse(res, 400, "Email and OTP are required");
 
-    if (!email || !otp) {
-      return res.status(400).json({ error: "Email and OTP are required" });
-    }
+    const user = await users.findByEmail(email);
+    if (!user) return refuse(res, 400, "Invalid credentials");
 
-    // Find pending signup
-    const pendingSignup = await PendingSignup.findOne({ email });
-    if (!pendingSignup) {
-      return res.status(404).json({ error: "No pending signup found. Please signup again." });
-    }
-
-    // Check OTP
-    if (!pendingSignup.signupOTP || pendingSignup.signupOTP !== otp) {
-      return res.status(400).json({ error: "Invalid OTP" });
-    }
-
-    // Check expiry
-    if (new Date() > pendingSignup.signupOTPExpires) {
-      return res.status(400).json({ error: "OTP has expired. Please request a new one." });
-    }
-
-    // OTP is valid - Create actual user in database
-    const newUser = new User({
-      name: pendingSignup.name,
-      email: pendingSignup.email,
-      password: pendingSignup.password,
-      role: pendingSignup.role,
-      isVerified: true // User is verified now
-    });
-    await newUser.save();
-
-    // Delete pending signup
-    await PendingSignup.findByIdAndDelete(pendingSignup._id);
-
-    // Generate token
-    const token = jwt.sign({ userId: newUser._id, role: newUser.role }, JWT_SECRET, { expiresIn: "1h" });
-
-    res.json({ 
-      message: "Email verified successfully. Account created!", 
-      token, 
-      user: { _id: newUser._id, name: newUser.name, email: newUser.email, role: newUser.role } 
-    });
-  } catch (err) {
-    console.error("OTP verification error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Resend Signup OTP
-router.post("/signup/resend-otp", async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" });
-    }
-
-    // Find pending signup
-    const pendingSignup = await PendingSignup.findOne({ email });
-    if (!pendingSignup) {
-      return res.status(404).json({ error: "No pending signup found. Please signup again." });
-    }
-
-    // Generate new OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const otpExpiry = new Date();
-    otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);
-
-    pendingSignup.signupOTP = otp;
-    pendingSignup.signupOTPExpires = otpExpiry;
-    await pendingSignup.save();
-
-    // Send OTP email
-    const emailResult = await sendSignupOTP(email, otp, pendingSignup.name);
-    
-    if (!emailResult.success) {
-      return res.status(500).json({ error: "Failed to send verification email. Please try again." });
-    }
-
-    res.json({ message: "OTP resent successfully" });
-  } catch (err) {
-    console.error("Resend OTP error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Login - Step 1: Verify credentials and send OTP
-router.post("/login", authLimiter, async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    // Check if there's a pending signup for this email (not yet verified)
-    const pendingSignup = await PendingSignup.findOne({ email });
-    if (pendingSignup) {
-      // Verify password to ensure it's the right user
-      const isMatch = await bcrypt.compare(password, pendingSignup.password);
-      if (isMatch) {
-        // Resend signup OTP
-        const otp = crypto.randomInt(100000, 1000000).toString();
-        const otpExpiry = new Date();
-        otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);
-
-        pendingSignup.signupOTP = otp;
-        pendingSignup.signupOTPExpires = otpExpiry;
-        await pendingSignup.save();
-
-        // Send OTP email
-        await sendSignupOTP(email, otp, pendingSignup.name);
-
-        return res.status(403).json({ 
-          error: "Your email is not verified yet. We've sent a new OTP to complete your signup.",
-          needsSignupVerification: true,
-          email: email
-        });
-      } else {
-        return res.status(400).json({ error: "Invalid credentials" });
+    const verdict = await users.verifyLoginOtp(user.id, otp);
+    if (!verdict.ok) {
+      if (verdict.reason === "attempts-exhausted") {
+        await users.clearLoginOtp(user.id);
+        return refuse(res, 429, "Too many attempts. Please request a new OTP.");
       }
+      if (verdict.reason === "expired") {
+        return refuse(res, 400, "OTP has expired. Please login again.");
+      }
+      await users.incrementLoginOtpAttempts(user.id);
+      return refuse(res, 400, "Invalid OTP");
     }
 
-    // Check for verified user
-    const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: "Invalid credentials" });
+    if (!user.isActive) return refuse(res, 403, "This account has been disabled");
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
+    await users.clearLoginOtp(user.id);
+    const fresh = await users.findById(user.id);
 
-    // For backward compatibility: auto-verify existing users
-    // (users created before OTP system was implemented)
-    if (!user.isVerified) {
-      user.isVerified = true;
-      await user.save();
-    }
-
-    // Generate 6-digit login OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const otpExpiry = new Date();
-    otpExpiry.setMinutes(otpExpiry.getMinutes() + 10); // 10 minutes expiry
-
-    // Save OTP to user
-    user.loginOTP = otp;
-    user.loginOTPExpires = otpExpiry;
-    await user.save();
-
-    // Send OTP email
-    const emailResult = await sendLoginOTP(email, otp, user.name);
-    
-    if (!emailResult.success) {
-      return res.status(500).json({ error: "Failed to send OTP email. Please try again." });
-    }
-
-    res.json({ 
-      message: "OTP sent to your email", 
-      email: email,
-      requiresOTP: true 
-    });
+    res.json({ message: "Login successful", token: issueToken(fresh), user: present(fresh) });
   } catch (err) {
-    console.error("Login error:", err);
-    res.status(500).json({ error: err.message });
+    failed(res, "Could not verify the code", err, { tag: "auth" });
   }
 });
 
-// Login - Step 2: Verify OTP and complete login
-router.post("/login/verify-otp", authLimiter, async (req, res) => {
-  const { email, otp } = req.body;
-  try {
-    if (!email || !otp) {
-      return res.status(400).json({ error: "Email and OTP are required" });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ error: "Invalid credentials" });
-    }
-
-    // Enforce OTP attempt limit (BE-HIGH-02)
-    if ((user.loginOTPAttempts || 0) >= 5) {
-      user.loginOTP = undefined;
-      user.loginOTPExpires = undefined;
-      user.loginOTPAttempts = 0;
-      await user.save();
-      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
-    }
-
-    // Check OTP
-    if (!user.loginOTP || user.loginOTP !== otp) {
-      user.loginOTPAttempts = (user.loginOTPAttempts || 0) + 1;
-      await user.save();
-      return res.status(400).json({ error: "Invalid OTP" });
-    }
-
-    // Check expiry
-    if (new Date() > user.loginOTPExpires) {
-      return res.status(400).json({ error: "OTP has expired. Please login again." });
-    }
-
-    // Clear OTP and attempts
-    user.loginOTP = undefined;
-    user.loginOTPExpires = undefined;
-    user.loginOTPAttempts = 0;
-    await user.save();
-
-    // Generate token
-    const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: "1h" });
-    
-    res.json({ 
-      message: "Login successful", 
-      token, 
-      user: { _id: user._id, name: user.name, email: user.email, role: user.role } 
-    });
-  } catch (err) {
-    console.error("OTP verification error:", err);
-    res.status(500).json({ error: "An error occurred. Please try again." });
-  }
-});
-
-// Resend Login OTP
 router.post("/login/resend-otp", authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
+    if (!email) return refuse(res, 400, "Email is required");
 
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" });
+    const user = await users.findByEmail(email);
+    if (user && user.isActive) {
+      const otp = generateVerificationCode();
+      await users.setLoginOtp(user.id, otp, Date.now() + OTP_TTL_MS);
+      // Fire and forget, so a mail failure cannot reveal existence by timing or
+      // by status.
+      sendLoginOTP(email, otp, user.name).catch((e) =>
+        console.error("[auth] login OTP resend failed:", e && e.message)
+      );
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Generate new OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const otpExpiry = new Date();
-    otpExpiry.setMinutes(otpExpiry.getMinutes() + 10);
-
-    user.loginOTP = otp;
-    user.loginOTPExpires = otpExpiry;
-    await user.save();
-
-    // Send OTP email
-    const emailResult = await sendLoginOTP(email, otp, user.name);
-    
-    if (!emailResult.success) {
-      return res.status(500).json({ error: "Failed to send OTP email. Please try again." });
-    }
-
-    res.json({ message: "OTP resent successfully" });
+    // SEC-08 CLOSED HERE. This answered 404 "User not found" for an unknown
+    // address and 200 for a known one, which is a free account oracle on an
+    // unauthenticated endpoint. The response is now identical either way.
+    res.json({ message: "If an account exists for this email, a new code has been sent." });
   } catch (err) {
-    console.error("Resend OTP error:", err);
-    res.status(500).json({ error: err.message });
+    failed(res, "Could not resend the code", err, { tag: "auth" });
   }
 });
 
-// Request Password Reset (sends verification code to email)
-// Generic response regardless of email existence to prevent user enumeration (BE-HIGH-06)
+// =============================================================================
+// Password reset
+// =============================================================================
+
 router.post("/forgot-password/request", authLimiter, async (req, res) => {
-  const { email } = req.body;
-
   try {
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" });
+    const { email } = req.body;
+    if (!email) return refuse(res, 400, "Email is required");
+
+    const user = await users.findByEmail(email);
+    if (user && user.isActive) {
+      const code = generateVerificationCode();
+      await users.setResetCode(user.id, code, Date.now() + RESET_TTL_MS);
+      sendVerificationEmail(email, code, user.name).catch((e) =>
+        console.error("[auth] reset email failed:", e && e.message)
+      );
     }
 
-    const user = await User.findOne({ email });
-    if (user) {
-      // Generate 6-digit verification code
-      const verificationCode = generateVerificationCode();
-
-      // Set expiry to 15 minutes from now
-      const expiryTime = new Date();
-      expiryTime.setMinutes(expiryTime.getMinutes() + 15);
-
-      user.resetPasswordCode = verificationCode;
-      user.resetPasswordExpires = expiryTime;
-      user.resetPasswordAttempts = 0;
-      await user.save();
-
-      // Fire-and-forget — don't let email errors reveal user existence
-      sendVerificationEmail(email, verificationCode, user.name).catch(err => {
-        console.error("Forgot-password email error:", err.message);
-      });
-    }
-
-    // Always return the same response (BE-HIGH-06)
+    // Already generic before this package. Unchanged.
     res.json({
       message: "If an account exists for this email, a verification code has been sent.",
-      email: email
     });
   } catch (err) {
-    console.error("Forgot password request error:", err);
-    res.status(500).json({ error: "An error occurred. Please try again." });
+    failed(res, "Could not process the request", err, { tag: "auth" });
   }
 });
 
-// Verify Code
-// SEC-02: rate limited, and every wrong code is counted. Without both, the
-// 6-digit code is brute-forceable inside its 15-minute window.
 router.post("/forgot-password/verify", authLimiter, async (req, res) => {
-  const { email, code } = req.body;
-
   try {
-    if (!email || !code) {
-      return res.status(400).json({ error: "Email and verification code are required" });
+    const { email, code } = req.body;
+    if (!email || !code) return refuse(res, 400, "Email and verification code are required");
+
+    const user = await users.findByEmail(email);
+    // SEC-08 CLOSED HERE. This answered 404 "User not found" for an unknown
+    // address. An unknown address now takes the same path as a wrong code.
+    if (!user) return refuse(res, 400, "Invalid verification code");
+
+    const verdict = await users.verifyResetCode(user.id, code);
+    if (!verdict.ok) {
+      if (verdict.reason === "attempts-exhausted") {
+        await users.clearResetCode(user.id);
+        return refuse(res, 429, "Too many attempts. Please request a new code.");
+      }
+      if (verdict.reason === "expired") {
+        return refuse(res, 400, "Verification code has expired. Please request a new one.");
+      }
+      // SEC-08, AND MY FIRST FIX WAS INCOMPLETE. A known address with no code
+      // answered "No verification code found" while an unknown address
+      // answered "Invalid verification code" - so the oracle survived the
+      // change that was supposed to remove it. Both are now the same string.
+      // Found by the test asserting byte-identical bodies rather than merely
+      // identical statuses.
+      await users.incrementResetAttempts(user.id);
+      return refuse(res, 400, "Invalid verification code");
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Check if code exists and hasn't expired
-    if (!user.resetPasswordCode || !user.resetPasswordExpires) {
-      return res.status(400).json({ error: "No verification code found. Please request a new one." });
-    }
-
-    // SEC-02: enforce the attempt cap, mirroring loginOTPAttempts above.
-    // resetPasswordAttempts already existed in the schema and was written but
-    // never read, so the control was designed and left unwired.
-    if ((user.resetPasswordAttempts || 0) >= 5) {
-      user.resetPasswordCode = undefined;
-      user.resetPasswordExpires = undefined;
-      user.resetPasswordAttempts = 0;
-      await user.save();
-      return res.status(429).json({ error: "Too many attempts. Please request a new code." });
-    }
-
-    if (new Date() > user.resetPasswordExpires) {
-      return res.status(400).json({ error: "Verification code has expired. Please request a new one." });
-    }
-
-    if (user.resetPasswordCode !== code) {
-      user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
-      await user.save();
-      return res.status(400).json({ error: "Invalid verification code" });
-    }
-
-    // Code is valid. The attempt counter is deliberately NOT reset here: this
-    // endpoint only checks the code, and /forgot-password/reset still has to
-    // accept it. Clearing the count on a correct guess would hand an attacker
-    // a fresh budget of 5 for every lucky hit.
-    res.json({
-      message: "Verification successful",
-      verified: true
-    });
+    // ADR-034: the attempt counter is deliberately NOT cleared on a correct
+    // code. This endpoint only CHECKS it; /reset still has to accept it, and
+    // clearing here would hand a lucky guesser a fresh budget of five, then
+    // another five by alternating between the two endpoints.
+    res.json({ message: "Verification successful", verified: true });
   } catch (err) {
-    console.error("Verify code error:", err);
-    res.status(500).json({ error: "An error occurred. Please try again." });
+    failed(res, "Could not verify the code", err, { tag: "auth" });
   }
 });
 
-// Reset Password (after verification)
-// SEC-02: this is the endpoint that actually changes the password, so it needs
-// the limiter and the attempt cap more than /verify does - an attacker can
-// skip /verify entirely and brute-force here.
 router.post("/forgot-password/reset", authLimiter, async (req, res) => {
-  const { email, code, newPassword } = req.body;
-
   try {
-    if (!email || !code || !newPassword) {
-      return res.status(400).json({ error: "All fields are required" });
+    const { email, code, newPassword } = req.body;
+    if (!email || !code || !newPassword) return refuse(res, 400, "All fields are required");
+
+    const problem = passwordProblem(newPassword);
+    if (problem) return refuse(res, 400, problem);
+
+    const user = await users.findByEmail(email);
+    // SEC-08 CLOSED HERE, same as /verify.
+    if (!user) return refuse(res, 400, "Invalid verification code");
+
+    const verdict = await users.verifyResetCode(user.id, code);
+    if (!verdict.ok) {
+      if (verdict.reason === "attempts-exhausted") {
+        await users.clearResetCode(user.id);
+        return refuse(res, 429, "Too many attempts. Please request a new code.");
+      }
+      if (verdict.reason === "expired") {
+        return refuse(res, 400, "Verification code has expired");
+      }
+      // SEC-08: same as /verify - "no code" and "no such account" must be
+      // indistinguishable.
+      await users.incrementResetAttempts(user.id);
+      return refuse(res, 400, "Invalid verification code");
     }
 
-    if (newPassword.length < 10) {
-      return res.status(400).json({ error: "Password must be at least 10 characters long" });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // SEC-02: enforce the attempt cap before checking the code, and void the
-    // code once it is exhausted so a fresh request is required.
-    if ((user.resetPasswordAttempts || 0) >= 5) {
-      user.resetPasswordCode = undefined;
-      user.resetPasswordExpires = undefined;
-      user.resetPasswordAttempts = 0;
-      await user.save();
-      return res.status(429).json({ error: "Too many attempts. Please request a new code." });
-    }
-
-    // Verify code one more time
-    if (!user.resetPasswordCode || user.resetPasswordCode !== code) {
-      user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
-      await user.save();
-      return res.status(400).json({ error: "Invalid verification code" });
-    }
-
-    if (new Date() > user.resetPasswordExpires) {
-      return res.status(400).json({ error: "Verification code has expired" });
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    // Update password and clear reset fields. The attempt counter is reset
-    // only here, on a successful password change.
-    user.password = hashedPassword;
-    user.resetPasswordCode = undefined;
-    user.resetPasswordExpires = undefined;
-    user.resetPasswordAttempts = 0;
-    await user.save();
+    // SEC-05: setPassword clears the code, resets the counter AND increments
+    // tokenVersion, all in the data layer - so every session issued before this
+    // reset stops working, which is the point of resetting a password after a
+    // compromise.
+    await users.setPassword(user.id, newPassword);
 
     res.json({ message: "Password reset successful" });
   } catch (err) {
-    console.error("Reset password error:", err);
-    res.status(500).json({ error: "An error occurred. Please try again." });
+    failed(res, "Could not reset the password", err, { tag: "auth" });
   }
 });
 
-// Change Password
+// =============================================================================
+// Authenticated
+// =============================================================================
+
 router.post("/change-password", authMiddleware, async (req, res) => {
-  const { oldPassword, newPassword } = req.body;
   try {
-    const user = await User.findById(req.user.id);
+    const { oldPassword, newPassword } = req.body;
+
+    const problem = passwordProblem(newPassword);
+    if (problem) return refuse(res, 400, problem);
+
+    const user = req.user.uuid ? await users.findById(req.user.uuid) : null;
     if (!user) return refuse(res, 404, "User not found");
 
-    const isMatch = await bcrypt.compare(oldPassword, user.password);
-    if (!isMatch) return refuse(res, 400, "Invalid old password");
+    if (!(await users.verifyPassword(user.id, oldPassword))) {
+      return refuse(res, 400, "Invalid old password");
+    }
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    user.password = hashedPassword;
-    await user.save();
-    // `msg` is kept ONLY on this success response: ChangePassword.jsx:26
-    // reads `data.msg`. Its error path already goes through the api
-    // wrapper, which reads `error || message`, so refusals are safe to
-    // change. Phase 5 drops this alias with the rest.
-    res.json({ msg: "Password changed successfully", message: "Password changed successfully" });
+    await users.setPassword(user.id, newPassword);
+
+    // The caller's own token is now stale - `setPassword` incremented
+    // tokenVersion. Stated in the response so a client can re-authenticate
+    // rather than discovering it on the next request.
+    res.json({
+      msg: "Password changed successfully",
+      message: "Password changed successfully",
+      reauthenticationRequired: true,
+    });
   } catch (err) {
-    // SEC-19: this was `msg: err.message`, returning the raw error text.
     failed(res, "Could not change the password", err, { tag: "auth" });
   }
 });
 
-// Get current user profile
-router.get("/me", async (req, res) => {
-  const token = req.headers["authorization"];
-  if (!token) return refuse(res, 401, "No token provided");
-
+router.get("/me", authMiddleware, async (req, res) => {
   try {
-    const decoded = jwt.verify(token.replace("Bearer ", ""), JWT_SECRET);
-    const user = await User.findById(decoded.userId).select("-password");
+    // Via the middleware now, not an inline JWT verification. The duplicate
+    // copy meant every check added to authMiddleware - SEC-05's isActive among
+    // them - silently did not apply here.
+    const user = req.user.uuid ? await users.findById(req.user.uuid) : null;
     if (!user) return refuse(res, 404, "User not found");
 
-    // SEC-09: was `console.log("User found:", user)`, which wrote the whole
-    // user document - name, email, phone, address - to the application log on
-    // every profile load.
-
     res.json({
-      _id: user._id,
+      _id: user.legacyId || user.id,
+      uuid: user.id,
       name: user.name || "",
       email: user.email || "",
       phone: user.phone || "",
       address: user.address || "",
-      role: user.role || "user"
+      role: user.role || "user",
     });
   } catch (err) {
-    console.error("JWT verification error:", err); // Debug log
-    refuse(res, 401, "Invalid token");
+    failed(res, "Could not load the profile", err, { tag: "auth" });
   }
 });
 

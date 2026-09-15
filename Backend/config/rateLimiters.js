@@ -61,10 +61,27 @@ function buildStore() {
     console.error('[rateLimiters] redis error:', err && err.message ? err.message : err);
   });
 
-  redisClient.connect().catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error('[rateLimiters] redis connect failed, limiters degrade:', err && err.message);
-  });
+  redisClient
+    .connect()
+    .then(() => {
+      // UNREF, so this connection does not by itself keep the process alive.
+      //
+      // Without it, ANY process that imports app.js never exits - a test
+      // runner, a migration script, a one-off maintenance task. Package 3.2
+      // hit exactly that: wiring the limiter into routes/auth.js made the
+      // auth suites hang AFTER passing, which reads as a broken test rather
+      // than as a held socket.
+      //
+      // In production the HTTP server is what keeps the process alive; a rate
+      // limiter has no business doing it. Same reasoning as making the store
+      // lazy in the first place (ADR-042): infrastructure a module happens to
+      // open should not change the lifetime of the process that imported it.
+      if (typeof redisClient.unref === 'function') redisClient.unref();
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[rateLimiters] redis connect failed, limiters degrade:', err && err.message);
+    });
 
   storeKind = 'redis';
   return new RedisStore({

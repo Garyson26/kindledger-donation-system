@@ -45,7 +45,7 @@ const adminAuth = async (req, res, next) => {
 
     if (user.role !== "admin") return refuse(res, 403, "Access denied");
 
-    req.user = { id: user.id, name: user.name, role: user.role };
+    req.user = { id: user.id, uuid: user.uuid, name: user.name, role: user.role };
     next();
   } catch (err) {
     // SEC-19: detail to the log, not to the client.

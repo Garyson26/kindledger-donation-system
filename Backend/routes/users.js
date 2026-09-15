@@ -32,7 +32,12 @@ const users = require("../repositories/users");
  */
 router.put("/profile", authMiddleware, async (req, res) => {
   try {
-    const updated = await users.updateProfile(req.user.id, {
+    // A user still in MongoDB has no uuid, so there is no row to update. The
+    // ETL is the mechanism (ADR-056); answering 404 is honest about that
+    // rather than failing obscurely.
+    if (!req.user.uuid) return refuse(res, 404, "User not found");
+
+    const updated = await users.updateProfile(req.user.uuid, {
       name: req.body.name,
       phone: req.body.phone,
       address: req.body.address,

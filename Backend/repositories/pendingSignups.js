@@ -70,6 +70,68 @@ async function create(input, tx) {
   return normalise(row);
 }
 
+/**
+ * Create or replace the pending signup for an address.
+ *
+ * `email` is UNIQUE, so a second signup attempt for the same address must
+ * replace the row rather than insert beside it. The Mongoose version mutated
+ * the existing document; this is the same behaviour expressed as an upsert, and
+ * it deliberately resets the OTP attempt counter - a NEW code is a new budget.
+ * That is the opposite of the reset-code counter, which ADR-034 keeps across a
+ * correct guess, and the difference is that this path issues a fresh secret
+ * while that one re-checks an existing one.
+ */
+async function upsert(input, tx) {
+  const email = String(input.email).trim().toLowerCase();
+  const data = {
+    name: input.name,
+    passwordHash: await bcrypt.hash(input.password, BCRYPT_COST),
+    role: input.role || 'user',
+    signupOtpHash: hashCode(input.otp),
+    signupOtpExpiresAt: new Date(input.otpExpiresAt),
+    signupOtpAttempts: 0,
+    expiresAt: new Date(input.expiresAt || Date.now() + TWENTY_FOUR_HOURS),
+  };
+  const row = await client(tx).pendingSignup.upsert({
+    where: { email },
+    create: { uuid: input.uuid || newUuid(), email, ...data },
+    update: data,
+    select: SELECT,
+  });
+  return normalise(row);
+}
+
+/** Issue a new OTP for an existing pending signup. Returns null if there is none. */
+async function setOtp(email, otp, otpExpiresAt, tx) {
+  const normalised = String(email == null ? '' : email).trim().toLowerCase();
+  const existing = await client(tx).pendingSignup.findUnique({
+    where: { email: normalised },
+    select: { id: true },
+  });
+  if (!existing) return null;
+  const row = await client(tx).pendingSignup.update({
+    where: { id: existing.id },
+    data: {
+      signupOtpHash: hashCode(otp),
+      signupOtpExpiresAt: new Date(otpExpiresAt),
+      signupOtpAttempts: 0,
+    },
+    select: SELECT,
+  });
+  return normalise(row);
+}
+
+/** Compares in the data layer so the hash never leaves it. */
+async function verifyPassword(email, candidate, tx) {
+  const normalised = String(email == null ? '' : email).trim().toLowerCase();
+  const row = await client(tx).pendingSignup.findUnique({
+    where: { email: normalised },
+    select: { passwordHash: true },
+  });
+  if (!row) return false;
+  return bcrypt.compare(String(candidate), row.passwordHash);
+}
+
 async function findByEmail(email, tx) {
   const normalised = String(email == null ? '' : email).trim().toLowerCase();
   if (!normalised) return null;
@@ -140,6 +202,9 @@ async function deleteByEmailPrefix(prefix, tx) {
 
 module.exports = {
   create,
+  upsert,
+  setOtp,
+  verifyPassword,
   findByEmail,
   verifyOtp,
   incrementOtpAttempts,

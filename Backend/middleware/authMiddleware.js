@@ -57,7 +57,11 @@ const authMiddleware = async (req, res, next) => {
     }
 
     req.user = {
+      // EXTERNAL id (ObjectId). Routes compare it against client-supplied ids.
       id: user.id,
+      // MySQL uuid, for repository lookups. NULL while the account is still in
+      // MongoDB - a handler needing the repository must treat that as absent.
+      uuid: user.uuid,
       name: user.name,
       role: user.role || decoded.role || "user",
     };

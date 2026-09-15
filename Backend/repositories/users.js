@@ -18,6 +18,8 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('node:crypto');
 const { client, newUuid, iso } = require('./_shared');
+// For createFromPendingSignup: the account and the pending row must move together.
+const { withTransaction } = require('../config/prisma');
 
 // SEC-18 asks for cost 12 rather than the 10 used throughout the legacy code.
 const BCRYPT_COST = 12;
@@ -70,7 +72,12 @@ async function create(input, tx) {
   const row = await client(tx).user.create({
     data: {
       uuid: input.uuid || newUuid(),
-      legacyId: input.legacyId ?? null,
+      // ADR-051: MINTED when not supplied. A user created here with a null
+      // legacy_id would be addressed by uuid, and Donation.userId is a required
+      // Mongoose ObjectId ref until donations migrate - so that donation could
+      // not be attributed. The ETL supplies the real ObjectId and this branch
+      // is not taken for migrated rows.
+      legacyId: input.legacyId ?? mintObjectId(),
       name: input.name,
       // Lowercased on write. The unique index is case-insensitive
       // (utf8mb4_0900_as_ci) so this is defence in depth, not the only control.
@@ -207,6 +214,81 @@ async function setActive(id, isActive, tx) {
   return findById(id, tx);
 }
 
+/**
+ * Mint an ObjectId-shaped external identifier (ADR-051).
+ *
+ * A user created in MySQL has no MongoDB ObjectId, and `Donation.userId` is a
+ * required Mongoose ObjectId ref until donations migrate. Handing back a uuid
+ * would make it impossible to attribute a donation to an account created after
+ * this package.
+ *
+ * Generated here rather than by Mongoose so this file imports none. Layout is
+ * the documented one: 4-byte seconds, 5-byte random, 3-byte counter.
+ * `uq_users_legacy_id` turns a collision into a constraint violation rather
+ * than a silent overwrite.
+ *
+ * AE1(a): a minted value is distinguishable from a real one ONLY while MongoDB
+ * exists - look it up; no row means minted. Package 3.6 NULLs these BEFORE
+ * deleting Mongo, in that order, or the distinction is lost permanently.
+ */
+let objectIdCounter = crypto.randomBytes(3).readUIntBE(0, 3);
+function mintObjectId() {
+  const seconds = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
+  const random = crypto.randomBytes(5).toString('hex');
+  objectIdCounter = (objectIdCounter + 1) % 0xffffff;
+  return seconds + random + objectIdCounter.toString(16).padStart(6, '0');
+}
+
+/**
+ * Promote a verified pending signup into a real user, in ONE transaction.
+ *
+ * The Mongoose version did `new User(...).save()` and then
+ * `PendingSignup.findByIdAndDelete(...)` as two independent writes. A failure
+ * between them left the account created AND the pending row present, so the
+ * next signup attempt for that address hit "user already exists" while a stale
+ * pending row kept answering the resend endpoint. Transactions are available
+ * now (SPEC-2 section 4.4) and this is exactly what they are for.
+ *
+ * THE PASSWORD HASH IS MOVED, NOT RE-HASHED. It was hashed at cost 12 when the
+ * pending signup was created; re-hashing would need the plaintext, which this
+ * layer no longer has and should not want.
+ */
+async function createFromPendingSignup(email, tx) {
+  const normalised = String(email == null ? '' : email).trim().toLowerCase();
+
+  const run = async (db) => {
+    const pending = await db.pendingSignup.findUnique({
+      where: { email: normalised },
+      select: { id: true, name: true, email: true, passwordHash: true, role: true },
+    });
+    if (!pending) return null;
+
+    const row = await db.user.create({
+      data: {
+        uuid: newUuid(),
+        legacyId: mintObjectId(),
+        name: pending.name,
+        email: pending.email,
+        passwordHash: pending.passwordHash,
+        role: pending.role === 'admin' ? 'admin' : 'user',
+        // Verified by construction: this is only reached after the signup OTP
+        // was accepted. SEC-21's auto-verify branch exists because the admin
+        // creation path did NOT set this.
+        isVerified: true,
+        isActive: true,
+        tokenVersion: 0,
+      },
+      select: SELECT,
+    });
+
+    await db.pendingSignup.delete({ where: { id: pending.id } });
+    return normalise(row);
+  };
+
+  if (tx) return run(tx);
+  return withTransaction(run);
+}
+
 /** By the MongoDB ObjectId. The bridge's MySQL-first lookup (ADR-050). */
 async function findByLegacyId(legacyId, tx) {
   if (!legacyId) return null;
@@ -297,6 +379,8 @@ async function deleteByEmailPrefix(prefix, tx) {
 
 module.exports = {
   create,
+  createFromPendingSignup,
+  mintObjectId,
   findById,
   findByEmail,
   findByLegacyId,
