@@ -832,18 +832,197 @@ understated:**
 | SPEC-1A section 5.6: the `mihpayid` UNIQUE index is the SEC-01 replay defence | the spec, repeated in ADR-012 | `mihpayid` is unsigned and attacker-mutable. The index is integrity only (ADR-026) |
 | The package sequence | SPEC-3, then restated in the map | Two contradictory sequences in one document (AL3) |
 | SEC-08 lists `/login` as leaking via `needsSignupVerification` | the security review | **Wrong.** That branch is reached only after `bcrypt.compare` SUCCEEDS, so a caller without the password gets the same `Invalid credentials` as any other failure. Read the branch (AP3) |
+| AE1-b's trigger is `donations.js` | AE1, restated in the map, revised once by AK5 | **Wrong file.** The ObjectId ref is written by `payment.js:141`. Enumerate the WRITE sites (3.3) |
+| `services/scheduler.js` "already implements the same retention rules" | the BUG-10 mechanism | **Two of three.** The inactive-account purge had no MySQL equivalent, and retiring `dataCleanupService` would have dropped it (3.3) |
 
 Each was correct-looking, repeated, and load-bearing. That combination is the
 signature, and the countermeasure is cheap: **run it once.**
 
-**FOUR NOW, and the signature is holding as a predictor.** That is worth knowing
+**SIX NOW, and the signature is holding as a predictor.** That is worth knowing
 with three packages left: it means the remaining inherited claims are more
 likely to be wrong than a base rate would suggest, and AJ3's severity pass
 should be read as an application of this rule rather than a separate exercise.
-The four fell in four consecutive packages, each found by doing something else.
+They fell in five consecutive packages, each found by doing something else.
+
+**THE TWO FROM 3.3 SHARE A SHAPE WORTH NAMING: both were claims about WHICH FILE
+or WHICH COMPONENT does something, not about whether it is done.** "Donations
+migrate" and "the scheduler implements the retention rules" are both true
+sentences attached to the wrong subject. A claim of that form survives review
+because the reviewer checks the predicate, which is correct, and the countermeasure
+is to enumerate the call sites rather than reason about the name - which is how
+both were found, and is AD2's method applied to something other than ordering.
 
 **Applies to AJ3's severity pass**, which is the same rule aimed at one class of
 claim - a severity derived from a mechanism is an inherited guess at an outcome.
+
+---
+
+## Package 3.3 - COMPLETE, BUT IT MUST NOT MERGE ALONE
+
+`routes/donations.js` is migrated to MySQL and imports no Mongoose. Twelve
+findings closed. **One blocking ordering constraint and two inherited claims
+came out of it, and the first one decides how this package ships.**
+
+### THE BLOCKER: donations have a WRITER in a different package (ADR-057)
+
+**`donations.js` READS donations. `payment.js:141` WRITES them, and it migrates
+in 3.4.** So for as long as 3.3 is on `main` without 3.4, a donation created
+through `/api/payment/initiate` lands in MongoDB and is **invisible** to the
+admin list, the receipt, the filter options and the charts.
+
+This is ADR-056 applied to donations, and it is worse there than it was for
+categories:
+
+| | Categories (3.1) | Donations (3.3) |
+|---|---|---|
+| What goes missing | a category created after the cutover | **every donation taken after the cutover** |
+| Who notices | an admin, on the donation form | nobody, until the money is reconciled |
+| Path | configuration | **the live money path** |
+
+**It is symmetric, which is why swapping the order does not fix it.** Migrate the
+writer first and the readers are on MongoDB, so MySQL has everything and the
+admin console shows a stale subset. Migrate the readers first, as here, and
+MySQL has the ETL's history and none of today's donations. A bridge does not
+help either way - ADR-056 is precisely the finding that a read-through bridge
+covers single-record reads and not LISTS, and the admin console IS a list.
+
+**So 3.3 and 3.4 must reach `main` together.** Package 3.2 already has the
+precedent: `auth.js`, `users.js` and both middlewares shipped as one unit
+because they shared an entity. The work stays split for review; the MERGE does
+not. **The alternative - merging 3.3 alone - puts a window on production in
+which donations are taken and not shown.**
+
+Recorded as a DECISION FOR THE WORK ORDER rather than taken unilaterally: the
+smallest correct alternative is to move `payment.js`'s donation WRITE path into
+3.3 and leave the rest of `payment.js` (the PayU hash, SEC-21, AQ1's counter) in
+3.4. That splits a file across packages, which the sequence has so far avoided.
+
+### AE1-b's trigger DOES NOT FIRE HERE - the fifth inherited claim
+
+`mintObjectId()` STAYS in `categories.js` through 3.3.
+
+The trigger was recorded as "once `donations.js` has migrated", reasoning that
+`Donation.category` stays an ObjectId ref *until donations migrate*. The concept
+was right and the file was wrong: **the ref is written by `payment.js:141`, not
+by `donations.js`.** `donations.js:47`'s write is BUG-01 and has never once
+succeeded, so removing the minter at 3.3 would have broken the live donation
+write path on the first category created afterwards.
+
+It follows AP3's signature exactly - restated, load-bearing, correct-looking -
+with one addition worth noting: **it had already been revised once.** The
+ADR-055 swap moved its package number from 3.2 to 3.3 and did not re-examine its
+reasoning, so the revision carried the error forward while looking like a check.
+
+**Moved to 3.4, bound to `payment.js` rather than to a package number.**
+
+### The scheduler implemented TWO of the three retention rules - the sixth
+
+The map recorded that `services/scheduler.js` "already implements the same
+retention rules against MySQL". It implemented the donation purge and the
+pending-signup sweep. `dataCleanupService` also purged **inactive accounts**,
+and nothing had replaced that.
+
+Retiring the legacy service as written would have **dropped a data-retention
+control without anyone deciding to** - the quiet kind of loss that surfaces in
+an audit years later rather than in a test. `purgeInactiveUsers` is carried
+across, with the legacy guards kept deliberately: admins are never purged, and
+an account with ANY donation is never purged, because severing a donation from
+the person who made it is not a retention outcome anyone asked for.
+
+### Findings closed
+
+| ID | How |
+|---|---|
+| **BUG-10** | Dry run is the DEFAULT; a real delete needs `?confirm=delete`. Awaited, with counts in the response. No catch returns 0 - a failure is a 500 that says rows may have been partially deleted. Preview and trigger now run THE SAME CODE with `dryRun` flipped, which is the only way a preview can be trusted to describe the delete |
+| **BUG-12** | `PUT /:id` 404s a missing donation. It answered `200 {message:"Donation updated", donation:null}` |
+| **BUG-08** | Pagination clamped to 100, NaN refused with 400 - on BOTH listings, which had the same defect twice |
+| **BUG-02** | Casing decided in the repository, once. Both casings accepted, one stored |
+| **BUG-01** | **Endpoint REMOVED.** Decided, not deferred - see below |
+| **BUG-06** | Closed by deletion with its only caller |
+| **SEC-16** | MySQL ENUM plus repository canonicalisation; a refused write writes nothing |
+| **SEC-19** | `failed()` everywhere; no `err.message` reaches a client |
+| **ADR-041** | `distinct()` keeps DATA semantics - `groupBy` reports only groups that exist |
+| **ADR-003** | FK `ON DELETE SET NULL`; `donor.isGuest` distinguishes |
+| **ADR-050** | `donations.js`'s four `categoryBridge` call sites are GONE, not rewired - a migrated donation carries its category through the join |
+| **BE-HIGH-08** | **Renamed, not retired** - see below |
+
+### BUG-01: the endpoint is REMOVED
+
+The map asked for a decision. Deleting it, for two reasons:
+
+1. **Nothing can depend on it.** It built a document without the required
+   `donorEmail` and `amount`, so every request in its life failed validation. An
+   endpoint that has always refused has no client relying on success, and the
+   frontend's `DONATIONS.CREATE` constant is declared and never referenced.
+2. **Completing it would be the worse change.** It sat behind `optionalAuth`, so
+   making it work would create an **unauthenticated path that writes donation
+   records bypassing payment initiation entirely** - arbitrary amounts, no
+   gateway, any status the caller chose.
+
+BUG-06 goes with it: `optionalAuth` had no other caller, and a corrected
+fragment nothing reaches is code that looks tested and is not exercised.
+
+### BE-HIGH-08 was RENAMED by the store swap, not retired
+
+**A parameterised query stops SQL injection. It does not stop `%` from meaning
+"anything".**
+
+The finding was `$regex` executing the caller's metacharacters, and the fix
+escaped them. `LIKE` has its own metacharacters - `%` and `_` - and Prisma's
+`contains` binds the value without neutralising them, so `searchQuery=%` would
+have returned every donor. The same over-match, arriving through a different
+door, in the package that was supposed to have removed the class.
+
+Escaped in the repository, and **asserted by behaviour, then proved by
+injection**: removing the escaping fails that test and only that test. The test
+also pins the dependency the fix rests on - MySQL's `LIKE` treats backslash as
+the default escape character, which holds only while `NO_BACKSLASH_ESCAPES` is
+absent from `sql_mode`.
+
+### ETL-01 - the override turned a clean refusal into a PARTIAL LOAD
+
+**Severity** High, operational. **Provenance X** - found by running 4a's ETL for
+real against donation data, which is the first time any BLOCKING finding had
+actually been overridden.
+
+The pre-flight reported one implausible date. The operator passed
+`--i-have-reviewed-the-preflight`. The loader then wrote two categories, one
+user and **four of five donations**, and threw on exactly the row that had been
+reported - leaving MySQL part-populated.
+
+`migrate.js`'s comment said "the row still fails here", which is what its author
+intended and is not what a `throw` does: **it fails the RUN, not the ROW.**
+
+Checked rather than assumed: **all three BLOCKING pre-flight findings are ones
+the loader also refuses** - implausible dates, orphaned categories, and
+case-variant emails (the second insert hits the unique index). So overriding a
+BLOCKING finding was strictly worse than not overriding it, in every case the
+check can produce. The flag was offering a choice that did not exist.
+
+**Fixed**: findings carry `loaderRefuses`, and those are refused BEFORE anything
+is written, with the report saying why and pointing at the source data. Proved
+by re-running: the load now refuses with MySQL untouched at 0/0/0.
+
+It is AP4's class again - a control that is correct (refusing to guess a date)
+producing a symptom somewhere else (a half-migrated database).
+
+### Test isolation: the suites no longer own the store (worth knowing for 3.4)
+
+Two assertions broke on data they do not own, because every suite now shares one
+MySQL database with every other suite AND with whatever is loaded locally:
+
+- `filter-options` asserted `Cancelled` is absent. The ETL's fixtures include a
+  cancelled donation.
+- `displayOrder` asserted the first category gets `0`. The ETL's two categories
+  make it `max+1`.
+
+Neither was a behaviour change, and neither assertion was wrong about the CODE -
+they were wrong about owning the table. Both now assert the RULE (`reported
+statuses == statuses with rows`; `each is max+1`) which is what the finding
+actually says and is true regardless of what shares the database. **Expect more
+of these in 3.4 and 3.5**: the app user is scoped to one database by design, so
+per-suite databases would need root, and that is a bigger change than a route
+package should make.
 
 ---
 
@@ -1106,6 +1285,13 @@ trace that anyone had seen it.
 
 ## The three ordering constraints, in order of precedence (AK2)
 
+> **A FOURTH was added in package 3.3, and it sits BELOW these three because it
+> does not change the ORDER - it changes the GRANULARITY.** Where one entity's
+> WRITER and READERS are in different packages, those packages are ONE MERGE
+> (ADR-057). Donations are the case: `payment.js` writes them and `donations.js`
+> reads them, so either package alone leaves new donations in one store and the
+> admin console reading the other.
+
 Each was found by hitting it. None was found by planning.
 
 | # | Constraint | Found by | Governs |
@@ -1166,7 +1352,12 @@ specific.
 | **3.1r** | Categories data migrated locally; route re-verified; AK3 fixture added | 4a exists |
 | **3.2** | `auth.js` + `users.js` + `middleware/` - completing what is already built | users data migrated |
 | **3.3** | `donations.js` + retire `dataCleanupService` | donations data migrated; users migrated (FK) |
-| **3.4** | `payment.js` + **the per-address attempt counter** (AQ1) | donations data migrated |
+| **3.4** | `payment.js` + **the per-address attempt counter** (AQ1) + **AE1-b: remove `mintObjectId()` from `categories.js`** | donations data migrated |
+
+> **3.3 AND 3.4 MERGE TOGETHER (ADR-057).** `donations.js` reads donations;
+> `payment.js` writes them. Either one alone leaves new donations in one store
+> and the admin console reading the other. The work stays split; the merge does
+> not. See "Package 3.3" above.
 | **3.5a** | **`config/email.js`** (AQ2) | none - it was unowned |
 | **3.5** | `admin.js` - last reader of every bridged entity | all bridged entities migrated |
 | **3.6** | Mongoose removal | no file imports Mongoose; `fallbackCount()` zero (AE3) |
@@ -1254,7 +1445,7 @@ the control, not a preference.**
 | ID | Item | Owner |
 |---|---|---|
 | AE1-a | NULL every minted `legacy_id` before MongoDB is deleted, by lookup | 3.6, as criterion 1 above |
-| AE1-b | Remove `mintObjectId()` from `categories.js` once `donations.js` has migrated | **3.3** - the TRIGGER is `donations.js`, not a package number. It was written when donations was 3.2; the ADR-055 swap moved it to 3.3, so **minting must continue through 3.2**. Removing it earlier breaks the donation write path, because `Donation.category` stays an ObjectId ref until donations migrate. |
+| AE1-b | Remove `mintObjectId()` from `categories.js` once the donation WRITE PATH has migrated | **3.4 - CORRECTED IN 3.3 (fifth inherited claim).** The trigger was recorded as `donations.js`. The concept was right - "until the ObjectId ref stops being written" - and the FILE was wrong: the ref is written by `payment.js:141`, not by `donations.js`, whose own write is BUG-01 and has never succeeded. Removing the minter at 3.3 would have broken the live donation write path on the first category created afterwards. It had ALREADY been revised once - the ADR-055 swap moved its package number and never re-read its reasoning. |
 
 **SPEC-1A section 4.1 is temporarily false** and is corrected in ADR-051(c):
 its invariant that a non-NULL `legacy_id` means "migrated from MongoDB" does not
@@ -1288,7 +1479,15 @@ again and is marked so nobody trusts it.
 |---|---|---|---|---|---|
 | - | - | **All closed. See "Package 3.1 - COMPLETE" above.** The one item deliberately left open is the non-atomic reorder, which moves to the transaction work. | | | |
 
-### `routes/donations.js`  *(trigger: donations data migrated; currently 3.3)*
+### `routes/donations.js`  *(MIGRATED in package 3.3)*
+
+**All closed - see "Package 3.3" above.** The three items deliberately left open
+are AG4 (a guest cannot retrieve their own donation - a product question, pinned
+so it cannot change silently), the ADR-057 merge constraint, and the unbounded
+row count on `stats/charts` for a multi-year custom range, which is pre-existing
+and was not changed alongside the store swap.
+
+The original table is kept below as the record of what the package was given.
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|

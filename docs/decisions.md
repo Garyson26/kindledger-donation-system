@@ -2510,3 +2510,123 @@ and makes a blocked dependency (J3, production Mongo credentials) critical-path.
 - The data layer, both bridges, the repositories and all 150+ tests are
   unaffected by whichever option is taken. Only the three migrated route files
   are in question.
+
+---
+
+## ADR-057 — An entity whose WRITER and READERS are in different packages cannot be migrated by either package alone
+
+**Status** Accepted (package 3.3). **Supersedes nothing; it is ADR-056 taken one
+step further.**
+
+### Context
+
+ADR-056 established that a read-through bridge does not make a route migration
+additive, because a bridge covers reads BY ID and not LIST or WRITE paths. That
+was found on categories, where the same file both read and wrote the entity, so
+migrating the file kept reads and writes together and the constraint reduced to
+"migrate the data first".
+
+**Donations do not have that property.** The entity is written by
+`routes/payment.js` (3.4) and read by `routes/donations.js` (3.3) and
+`routes/admin.js` (3.5). Whichever migrates first, the store holding new rows
+and the store being read are different ones for as long as the gap is open.
+
+It is symmetric, and that is the part worth stating, because the instinct on
+finding it is to reorder:
+
+- **Readers first** (the 3.3 order): the ETL's history is in MySQL, today's
+  donations are in MongoDB, the admin console shows history and nothing else.
+- **Writer first**: MySQL has everything, `donations.js` reads MongoDB, the
+  admin console shows a subset that stops growing.
+
+Neither is better. A bridge fixes neither, for ADR-056's reason: the admin
+console is a LIST.
+
+### Decision
+
+**Packages that split one entity's writer from its readers MUST reach `main`
+together.** The work stays split for review; the merge does not.
+
+The precedent already exists: package 3.2 shipped `auth.js`, `users.js` and both
+middlewares as one unit, for this reason, before the reason had been named.
+
+### Consequences
+
+- 3.3 and 3.4 merge as a unit. 3.5 (`admin.js`) is a READER only, and its
+  donation reads are counts on a dashboard, so it does not join the unit - but
+  its dashboard tile is stale in the same way until it migrates, which is
+  BUG-03's existing territory rather than a new finding.
+- The smallest alternative considered and NOT taken: move `payment.js`'s
+  donation write path into 3.3 and leave the rest of the file in 3.4. It is
+  correct and it splits a file across packages, which the sequence has avoided
+  so far because a package boundary that does not match a file boundary makes
+  "what did this package change" unanswerable from `git show`.
+- **The ordering constraints in AK2 gain a fourth, below the other three:**
+  where an entity's writer and readers are in different packages, those packages
+  are one merge. It sits below the three because it does not change the ORDER,
+  it changes the GRANULARITY.
+
+### What this does not say
+
+It does not say the migration is riskier than assessed. It says one specific
+window - donations taken and not shown - must not be opened on production, and
+the cost of closing it is holding one branch for one more package.
+
+---
+
+## ADR-058 — A pre-flight finding the loader will also refuse must not be overridable
+
+**Status** Accepted (package 3.3). Amends the Phase 4a ETL.
+
+### Context
+
+The ETL's pre-flight classifies findings as FATAL (not overridable), BLOCKING
+(overridable with `--i-have-reviewed-the-preflight`) and RECORD. The override
+exists so an operator can knowingly accept a finding and proceed.
+
+Running the loader for real against donation data - the first time a BLOCKING
+finding had actually been overridden - produced this:
+
+    [BLOCKING] implausible-dates ... 1 donation(s)
+    (override supplied)
+    loaded: 2 categories, 1 user, 4 of 5 donations
+    ETL FAILED: donation ...: implausible date "1970-01-01T00:00:00.000Z"
+
+**MySQL was left part-populated.** `migrate.js` refuses an implausible date
+rather than inventing one, which is correct and deliberate (ADR-054), but a
+`throw` fails the RUN, not the ROW. The comment at that line said "the row still
+fails here", which is what the author intended and is not what the code does.
+
+Checked rather than assumed: **every BLOCKING finding is one the loader also
+refuses.** Implausible dates throw; an orphaned category reference throws; two
+case-variant emails collapse onto `uq_users_email` and the second insert throws.
+There is currently no BLOCKING finding the loader would accept.
+
+So overriding a BLOCKING finding could never load the rows it was overriding. It
+could only convert a clean refusal, with nothing written, into a partial load -
+strictly worse, in every case the check can produce. **The flag was offering a
+choice that did not exist.**
+
+### Decision
+
+A finding declares `loaderRefuses`. Findings carrying it are **refused before
+anything is written**, and the override does not apply to them. The report says
+so explicitly, names them, and directs the operator at the SOURCE data.
+
+The override is KEPT rather than deleted, because a BLOCKING-but-loadable
+finding is a coherent thing that may be added later. Today it correctly applies
+to none.
+
+### Consequences
+
+- The remedy is to fix the source data and re-run. The load is idempotent by
+  `legacy_id`, so a re-run resumes rather than duplicates - which is what makes
+  "refuse and re-run" cheap enough to be the only path.
+- **This does not make the loader transactional, and should not be read as
+  doing so.** An unexpected error mid-load still leaves partial state; the
+  recovery is the same re-run. Wrapping a multi-entity load of a production-sized
+  dataset in one transaction is not practical, and idempotency was chosen over it
+  deliberately in 4a.
+- It belongs to the class in AP4: a control that is correct - refusing to guess
+  a date - producing a symptom somewhere else, here a half-migrated database
+  that reads like a loader bug.

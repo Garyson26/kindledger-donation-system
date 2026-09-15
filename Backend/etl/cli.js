@@ -84,6 +84,23 @@ async function main() {
     return;
   }
 
+  // ETL-01. NOT OVERRIDABLE, and refused BEFORE anything is written.
+  //
+  // These are the findings whose rows `migrate.js` will also refuse. Overriding
+  // one does not load it: the loader writes every row up to it and then throws,
+  // which is how package 3.3's local donation load ended with two categories,
+  // one user and four of five donations in MySQL. A partial load is strictly
+  // worse than a refusal, so the flag does not reach this class.
+  if (result.refusedByLoader.length > 0) {
+    throw new Error(
+      `${result.refusedByLoader.length} pre-flight finding(s) that the LOADER also ` +
+        `refuses: ${result.refusedByLoader.map((f) => f.check).join(', ')}. ` +
+        `${OVERRIDE} does not apply to these - it would start the load and stop ` +
+        'partway, leaving MySQL part-populated. Fix them in the SOURCE data and ' +
+        're-run; the load is idempotent by legacy_id.'
+    );
+  }
+
   if (result.blocking.length > 0 && !override) {
     throw new Error(
       `${result.blocking.length} blocking pre-flight finding(s). Resolve them in the ` +

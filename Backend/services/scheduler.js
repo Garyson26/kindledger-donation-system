@@ -2,12 +2,16 @@
  * =============================================================================
  * Scheduled jobs (SPEC-2 section 7.2)
  * =============================================================================
- * Two jobs, both against MySQL:
+ * Two jobs covering THREE retention rules, all against MySQL:
  *
- *   1. The retention purge - BUG-04. Declared as a Vercel cron in Phase 1a
- *      against POST /api/admin/cleanup/trigger, which sits behind adminAuth, so
- *      the cron received a 401 and the purge has never once run.
- *   2. The pending-signup expiry sweep - replaces MongoDB's TTL index, which
+ *   1. The donation retention purge - BUG-04. Declared as a Vercel cron in
+ *      Phase 1a against POST /api/admin/cleanup/trigger, which sits behind
+ *      adminAuth, so the cron received a 401 and the purge has never once run.
+ *   2. The inactive-account purge, in the same nightly job. Added in package
+ *      3.3 when `dataCleanupService` was retired: that service implemented
+ *      three rules and this file had replaced two, so retiring it without this
+ *      would have dropped a retention control without anyone deciding to.
+ *   3. The pending-signup expiry sweep - replaces MongoDB's TTL index, which
  *      MySQL has no equivalent for (SPEC-1A section 5.2).
  *
  * BOTH ARE INERT UNTIL PHASE 4 LOADS DATA, and that is correct rather than a
@@ -28,6 +32,7 @@
 
 const cron = require('node-cron');
 const donations = require('../repositories/donations');
+const users = require('../repositories/users');
 const pendingSignups = require('../repositories/pendingSignups');
 
 // SPEC-1A section 9: donations are retained for ten years.
@@ -99,6 +104,35 @@ async function purgeOldDonations({ dryRun = false, now = new Date() } = {}) {
 }
 
 /**
+ * Purge inactive accounts - THE THIRD RETENTION RULE (package 3.3).
+ *
+ * `dataCleanupService` did three things: donation retention, pending-signup
+ * expiry, and this. This file had replaced the first two, and the map recorded
+ * that it "already implements the same retention rules" - true of two of them.
+ * Retiring the legacy service without this would have DROPPED A RETENTION
+ * CONTROL silently, which for an NGO holding donor personal data is the kind of
+ * loss that surfaces years later in an audit, not in a test.
+ *
+ * Same shape as `purgeOldDonations` deliberately: dry-run capable, counts
+ * first, never swallows a failure. The guards are the legacy ones - admins are
+ * never purged, and an account with ANY donation is never purged, because
+ * severing a donation from the person who made it is not a retention outcome
+ * anybody asked for.
+ */
+async function purgeInactiveUsers({ dryRun = false, now = new Date() } = {}) {
+  const cutoff = tenYearsAgo(now);
+  const candidates = await users.countInactiveOlderThan(cutoff);
+  const base = { cutoff: cutoff.toISOString(), candidates };
+
+  if (dryRun || candidates === 0) {
+    return { ...base, deleted: 0, dryRun: Boolean(dryRun) };
+  }
+
+  const deleted = await users.deleteInactiveOlderThan(cutoff);
+  return { ...base, deleted, dryRun: false };
+}
+
+/**
  * Delete expired pending signups.
  *
  * This is the TTL replacement, and it is a correctness requirement rather than
@@ -139,6 +173,13 @@ function initializeScheduler() {
           const result = await purgeOldDonations();
           // eslint-disable-next-line no-console
           console.log('[scheduler] retention purge', JSON.stringify(result));
+          // The third retention rule, carried across from dataCleanupService in
+          // package 3.3. Run AFTER the donation purge, and that order matters:
+          // an account whose last donation was just purged becomes eligible in
+          // the same pass, which is what the legacy service did too.
+          const accounts = await purgeInactiveUsers();
+          // eslint-disable-next-line no-console
+          console.log('[scheduler] inactive-account purge', JSON.stringify(accounts));
         } catch (err) {
           // A failed scheduled job must not take the process down - but it must
           // not look like a quiet success either. The legacy
@@ -197,6 +238,7 @@ module.exports = {
   initializeScheduler,
   stopScheduler,
   purgeOldDonations,
+  purgeInactiveUsers,
   sweepExpiredSignups,
   enabled,
   RETENTION_YEARS,

@@ -377,6 +377,50 @@ async function deleteByEmailPrefix(prefix, tx) {
   return res.count;
 }
 
+// -----------------------------------------------------------------------------
+// Inactive-account retention (package 3.3)
+// -----------------------------------------------------------------------------
+/**
+ * Accounts eligible for the ten-year retention purge.
+ *
+ * THIS EXISTS BECAUSE RETIRING `dataCleanupService` WOULD OTHERWISE DROP A
+ * CONTROL. That service did three things - donation retention, pending-signup
+ * expiry, and this - and `services/scheduler.js` had replaced only the first
+ * two. The map recorded that the scheduler "already implements the same
+ * retention rules", which was true of two thirds of them. Losing a
+ * data-retention control silently during a migration is exactly the failure
+ * this project exists to avoid, so the rule is carried across rather than
+ * quietly dropped.
+ *
+ * THE GUARDS ARE THE LEGACY ONES, KEPT DELIBERATELY:
+ *
+ *   - `role: 'user'` - an admin account is never purged, however old.
+ *   - NO DONATIONS. A donor's account is never removed by this job. The FK is
+ *     ON DELETE SET NULL, so deleting a donor would not destroy their
+ *     donations, but it WOULD sever a donation from the person who made it,
+ *     and a retention job must not launder attribution away as a side effect.
+ *
+ * `createdAt` is the right column here, unlike the donation purge (ADR-054):
+ * the thing being retained IS the account, so the date the account came into
+ * existence is the date the policy is about.
+ */
+function inactiveWhere(cutoff) {
+  return {
+    role: 'user',
+    createdAt: { lt: new Date(cutoff) },
+    donations: { none: {} },
+  };
+}
+
+async function countInactiveOlderThan(cutoff, tx) {
+  return client(tx).user.count({ where: inactiveWhere(cutoff) });
+}
+
+async function deleteInactiveOlderThan(cutoff, tx) {
+  const res = await client(tx).user.deleteMany({ where: inactiveWhere(cutoff) });
+  return res.count;
+}
+
 module.exports = {
   create,
   createFromPendingSignup,
@@ -399,6 +443,10 @@ module.exports = {
   setActive,
   countAdmins,
   deleteByEmailPrefix,
+  // Inactive-account retention (package 3.3), carried across from the retired
+  // dataCleanupService rather than dropped with it.
+  countInactiveOlderThan,
+  deleteInactiveOlderThan,
   normalise,
   BCRYPT_COST,
 };

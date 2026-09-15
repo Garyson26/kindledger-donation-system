@@ -1,14 +1,27 @@
 /**
  * =============================================================================
- * CHARACTERISATION tests for routes/donations.js  (SPEC-3 package 3.2)
+ * CHARACTERISATION tests for routes/donations.js  (SPEC-3 package 3.3)
  * =============================================================================
  *   docker compose up -d          (MongoDB and MySQL both required)
  *   npm run test:donations
  *
- * These capture what this route file does TODAY, before the migration. Where
- * the current behaviour is wrong, the WRONG behaviour is asserted and marked
- * `QUIRK`, cross-referenced to the finding that will change it. Editing one of
- * these later is the record that a change was deliberate.
+ * Written against the Mongoose implementation BEFORE the migration, and now
+ * asserted against the MySQL one. EIGHT assertions changed; each is marked
+ * `CHANGED IN 3.3` with the finding that caused it.
+ *
+ * SEVEN OF THE EIGHT ARE QUIRKS BEING CLOSED - BUG-01, BUG-02, BUG-06, BUG-08,
+ * BUG-12, SEC-16 and SEC-19. They were pinned as WRONG behaviour on purpose, so
+ * fixing them HAD to break this file. A fix that broke nothing here would mean
+ * the original assertion was not testing the defect.
+ *
+ * SEAM SWITCHED (SPEC-2 section 4.1). `store` now reads and writes MySQL
+ * through the repositories. Donations are the last entity this suite held in
+ * MongoDB; what remains of Mongoose here is the AK3 fixture, whose whole
+ * purpose is to NOT be in MySQL.
+ *
+ * AK3 / AM1: a donation created in MONGODB and NOT migrated, created AFTER any
+ * ETL run so no ordering can migrate it, with a POSITIVE assertion that it has
+ * no MySQL row before the route is exercised.
  *
  * AE4: PIN WHAT THE ENDPOINT ACTUALLY RETURNED, NOT WHAT THE CODE APPEARS TO
  * ASK FOR. Package 3.1 found `populate("category", "name description price")`
@@ -48,10 +61,13 @@ process.env.FRONTEND_FAILURE_URL = 'http://frontend.test/payment-failure';
 
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const Donation = require('../models/Donation');
-const User = require('../models/User');
+// MongoDB models. Retained ONLY for the AK3 fixture - the donation that is
+// deliberately never migrated, so that "absent from MySQL" can be asserted
+// rather than assumed.
+const MongoDonation = require('../models/Donation');
 const categories = require('../repositories/categories');
+const donations = require('../repositories/donations');
+const users = require('../repositories/users');
 const prismaModule = require('../config/prisma');
 
 const TAG = 'zzz-don-test';
@@ -67,27 +83,47 @@ let categoryId; // the ObjectId-shaped external id (ADR-051)
 
 const uniq = (t) => `${TAG}-${t}-${crypto.randomBytes(3).toString('hex')}`;
 
+/**
+ * A fresh 24-hex external identifier (ADR-051).
+ *
+ * The fixtures mint their own rather than letting the repository default,
+ * because the routes exchange the ObjectId form and a fixture that skipped it
+ * would exercise a code path no client uses.
+ */
+let objectIdCounter = crypto.randomBytes(3).readUIntBE(0, 3);
+function mintObjectId() {
+  objectIdCounter = (objectIdCounter + 1) % 0xffffff;
+  return (
+    Math.floor(Date.now() / 1000).toString(16).padStart(8, '0') +
+    crypto.randomBytes(5).toString('hex') +
+    objectIdCounter.toString(16).padStart(6, '0')
+  );
+}
+
 // -----------------------------------------------------------------------------
-// Storage seam. Package 3.2 reimplements the Donation half against MySQL.
+// Storage seam - MySQL as of package 3.3.
+// -----------------------------------------------------------------------------
+// SPEC-2 section 4.1: the suite talks to `store`, never to a driver, so
+// switching the store was these function bodies and not 24 rewritten tests.
+// Everything below returns the EXTERNAL identifier (ADR-051: a 24-hex
+// ObjectId), because that is what the routes and the clients exchange.
 // -----------------------------------------------------------------------------
 const store = {
   async resetDonations() {
-    await Donation.deleteMany({ donorEmail: new RegExp('^' + TAG) });
+    await donations.deleteByDonorEmailPrefix(TAG);
+    await MongoDonation.deleteMany({ donorEmail: new RegExp('^' + TAG) });
   },
 
   async resetAll() {
     await this.resetDonations();
-    await User.deleteMany({ email: new RegExp('^' + TAG) });
+    await users.deleteByEmailPrefix(TAG);
     await categories.deleteByNamePrefix(CAT_PREFIX);
   },
 
   async createCategory(name) {
-    const legacyId =
-      Math.floor(Date.now() / 1000).toString(16).padStart(8, '0') +
-      crypto.randomBytes(8).toString('hex');
     const row = await categories.create({
       name,
-      legacyId,
+      legacyId: mintObjectId(),
       shortDescription: 'fixture',
       donationAmountMinor: 150000,
       descriptions: [],
@@ -105,52 +141,75 @@ const store = {
     date = new Date(),
     category = categoryId,
   }) {
-    const doc = await Donation.create({
+    const row = await donations.create({
+      legacyId: mintObjectId(),
       donorName: 'ZZZ Donor ' + tag,
       donorEmail: `${TAG}-${tag}@invalid.test`,
-      userId,
-      category,
+      userId: userId || undefined,
+      categoryId: category,
       quantity: 1,
-      amount,
+      baseAmountMinor: Math.round(amount * 100),
+      extraAmountMinor: 0,
+      amountMinor: Math.round(amount * 100),
       status,
       paymentStatus,
-      date,
-      transactionId: uniq('txn'),
+      donatedAt: date,
+    });
+    return row.legacyId;
+  },
+
+  /**
+   * A donation in MONGODB ONLY. The AK3 fixture.
+   *
+   * ADR-056: a read-through bridge does not make a route migration additive, so
+   * this must be INVISIBLE to every endpoint in the migrated file - and the ETL
+   * is the only thing that changes that. Asserted, never assumed.
+   */
+  async createMongoOnlyDonation(tag) {
+    const doc = await MongoDonation.create({
+      donorName: 'ZZZ Legacy Donor ' + tag,
+      donorEmail: `${TAG}-${tag}@invalid.test`,
+      category: new mongoose.Types.ObjectId(),
+      quantity: 1,
+      amount: 4242,
+      status: 'Pending',
+      paymentStatus: 'Pending',
+      date: new Date(),
+      transactionId: uniq('legacy-txn'),
     });
     return doc._id.toString();
   },
 
+  async hasMysqlRow(legacyId) {
+    return Boolean(await donations.findByLegacyId(String(legacyId)));
+  },
+
   /** Normalised view; no storage types leak past here. */
-  async readDonation(id) {
-    let doc = null;
-    try {
-      doc = await Donation.findById(id);
-    } catch {
-      return null;
-    }
-    if (!doc) return null;
+  async readDonation(externalId) {
+    const row = await donations.findByLegacyId(String(externalId));
+    if (!row) return null;
     return {
-      id: doc._id.toString(),
-      donorEmail: doc.donorEmail,
-      amount: doc.amount,
-      status: doc.status,
-      paymentStatus: doc.paymentStatus,
-      userId: doc.userId ? doc.userId.toString() : null,
-      category: doc.category ? doc.category.toString() : null,
+      id: row.legacyId || row.id,
+      donorEmail: row.donorEmail,
+      amount: row.amountMinor / 100,
+      status: row.status,
+      paymentStatus: row.paymentStatus,
+      userId: row.donor.user ? row.donor.user.legacyId || row.donor.user.id : null,
+      category: row.category ? row.category.legacyId || row.category.id : null,
     };
   },
 
   async createUser(role, tag) {
     const email = `${TAG}-${tag}@invalid.test`;
-    await User.deleteOne({ email });
-    const doc = await User.create({
+    const created = await users.create({
       name: 'ZZZ Don Test ' + role,
       email,
-      password: await bcrypt.hash('FixturePass123!', 10),
+      password: 'FixturePass123!',
       role,
       isVerified: true,
     });
-    return doc._id.toString();
+    const fresh = await users.findById(created.id);
+    return fresh.legacyId || fresh.id;
   },
 };
 
@@ -310,49 +369,53 @@ test('GET /user/:userId refuses another user, and admins may read anyone', async
 // POST / - BUG-01 and BUG-06
 // =============================================================================
 
-test('QUIRK (BUG-01): POST /api/donations can NEVER succeed', async () => {
-  // The handler builds a document with donorName, item, category and quantity.
-  // The schema marks donorEmail and amount required, so every call fails
-  // validation. The endpoint is dead; all real donations go through
-  // /api/payment/initiate.
+test('BUG-01 CLOSED: POST /api/donations is GONE (CHANGED IN 3.3)', async () => {
+  // WAS: a 400 for every request the endpoint had ever received, because the
+  // handler built a document without the required donorEmail and amount. It
+  // never succeeded once in its life.
   //
-  // It is a clean 400, not a 500: the catch block special-cases
-  // `err.name === 'ValidationError'` and reports the field list. So the
-  // endpoint refuses correctly and informatively - it just refuses
-  // ALWAYS, for every possible request, which no status code can express.
+  // The map asked for a decision - supply the fields, or delete it - and this
+  // is the decision. Deleted, for two reasons:
   //
-  // (An earlier draft of this test asserted a 5xx. PROJECT.md's BUG-01 entry
-  // said 400 and was right; the assumption was mine.)
+  //   1. NOTHING CAN DEPEND ON IT. An endpoint that has always refused has no
+  //      client relying on success, and the frontend's DONATIONS.CREATE
+  //      constant is declared and never referenced.
+  //   2. COMPLETING IT WOULD BE THE WORSE CHANGE. It sat behind optionalAuth,
+  //      so making it work would create an UNAUTHENTICATED path that writes
+  //      donation records bypassing payment initiation entirely: arbitrary
+  //      amounts, no gateway, any status the caller liked.
+  //
+  // Express has no POST handler on this path now, so the router falls through.
   const res = await post(
     '/api/donations',
     { item: 'Reef', category: categoryId, quantity: 1 },
     ownerToken
   );
-  assertRefused(res, 400);
-  assert.match(res.body.error, /Donation validation failed/);
-  assert.match(res.body.error, /donorEmail/);
-  assert.match(res.body.error, /amount/);
+  assert.notEqual(Math.floor(res.status / 100), 5, `must not 500: ${res.raw.slice(0, 160)}`);
+  assert.equal(res.status, 404, 'the endpoint is gone, not broken');
 });
 
-test('QUIRK (BUG-01): it fails the same way for a guest', async () => {
+test('BUG-01 CLOSED: it is gone for a guest too (CHANGED IN 3.3)', async () => {
   const res = await post('/api/donations', { item: 'Reef', category: categoryId, quantity: 1 });
-  assertRefused(res, 400);
-  assert.match(res.body.error, /Donation validation failed/);
+  assert.notEqual(Math.floor(res.status / 100), 5, `must not 500: ${res.raw.slice(0, 160)}`);
+  assert.equal(res.status, 404);
 });
 
-test('QUIRK (BUG-06): optionalAuth 401s a guest who holds an EXPIRED token', async () => {
-  // "No header" is treated as guest, but any header present is delegated to
-  // authMiddleware, which 401s an expired token instead of falling back to
-  // guest. A donor whose session lapsed cannot submit as a guest either.
-  const expired = jwt.sign({ userId: ownerId, role: 'user' }, process.env.JWT_SECRET, {
+test('BUG-06 CLOSED BY DELETION: optionalAuth is gone (CHANGED IN 3.3)', async () => {
+  // WAS: a guest holding a stale token got 401 from optionalAuth instead of
+  // falling through to guest.
+  //
+  // NOT FIXED - REMOVED. POST / was optionalAuth's only caller, so fixing the
+  // helper would have left a corrected fragment that nothing reaches: code that
+  // looks tested and is not exercised. If an endpoint later needs optional
+  // authentication it needs the fall-through, and THAT is recorded in the map
+  // rather than preserved here as dead code.
+  const expired = jwt.sign({ userId: ownerId, role: 'user', tokenVersion: 0 }, process.env.JWT_SECRET, {
     expiresIn: '-1h',
   });
-  const res = await post(
-    '/api/donations',
-    { item: 'Reef', category: categoryId, quantity: 1 },
-    expired
-  );
-  assertRefused(res, 401);
+  const res = await post('/api/donations', { item: 'Reef', category: categoryId }, expired);
+  assert.notEqual(Math.floor(res.status / 100), 5, `must not 500: ${res.raw.slice(0, 160)}`);
+  assert.equal(res.status, 404, 'no optionalAuth path remains to 401 anyone');
 });
 
 test('BUG-11 is FIXED: every layer names its reason under `error` (CHANGED IN 3.2)', async () => {
@@ -372,9 +435,14 @@ test('BUG-11 is FIXED: every layer names its reason under `error` (CHANGED IN 3.
 
   const noToken = await get(`/api/donations/${id}`);          // authMiddleware
   const nonAdmin = await get('/api/donations', ownerToken);    // adminAuth
+  // CHANGED IN 3.3: this used `{status:'Approved'}`, which was a 400 only
+  // because of BUG-02 - the endpoint refused the canonical casing. Closing
+  // BUG-02 made it a 200 and this test started failing on a REFUSAL it could no
+  // longer provoke. The trigger, not the rule, was stale: `banana` is outside
+  // the enum in any casing, so it exercises the same refusal path permanently.
   const badStatus = await patch(                               // route handler
     `/api/donations/${id}/status`,
-    { status: 'Approved' },
+    { status: 'banana' },
     adminToken
   );
   const malformed = await put('/api/donations/not-an-objectid', { status: 'x' }, adminToken);
@@ -383,7 +451,7 @@ test('BUG-11 is FIXED: every layer names its reason under `error` (CHANGED IN 3.
     ['authMiddleware', noToken],
     ['adminAuth', nonAdmin],
     ['route handler', badStatus],
-    ['route handler (500)', malformed],
+    ['route handler (malformed id)', malformed],
   ]) {
     assert.equal(typeof res.body.error, 'string', `${label}: reason under "error"`);
     assert.equal('msg' in res.body, false, `${label}: "msg" is gone`);
@@ -470,18 +538,67 @@ test('GET / search escapes regex metacharacters rather than executing them', asy
   );
 });
 
-test('QUIRK (BUG-08): GET / limit is uncapped and NaN passes through', async () => {
+test('BE-HIGH-08 SURVIVES THE STORE SWAP: `%` is a literal, not a wildcard', async () => {
+  // THE FINDING WAS NOT RETIRED BY MOVING TO SQL - IT WAS RENAMED.
+  //
+  // BE-HIGH-08 was about `$regex` executing the caller's metacharacters, and
+  // the fix escaped them. `LIKE` has its own metacharacters, `%` and `_`, and a
+  // parameterised query does NOT neutralise them: binding stops SQL injection,
+  // it does not stop `%` from meaning "anything". So `searchQuery=%` would
+  // return every donor - the same over-match, through a different door.
+  //
+  // This also pins the dependency the escaping rests on: MySQL's LIKE treats
+  // backslash as the default escape character, which is only true while
+  // NO_BACKSLASH_ESCAPES is absent from sql_mode. Asserted by behaviour here
+  // rather than trusted from a comment.
+  await store.resetDonations();
+  await store.createDonation({ tag: 'likepct', userId: ownerId });
+
+  for (const term of ['%', '%%', '_', 'zzz%test']) {
+    const res = await get(
+      `/api/donations?page=1&limit=100&searchQuery=${encodeURIComponent(term)}`,
+      adminToken
+    );
+    assert.equal(res.status, 200, `${term}: ${res.raw.slice(0, 160)}`);
+    assert.equal(
+      res.body.donations.filter((d) => d.donorEmail.startsWith(TAG)).length,
+      0,
+      `'${term}' must be matched literally, not as a pattern`
+    );
+  }
+
+  // The control: a term that IS a literal substring still finds the row, so the
+  // assertions above are about escaping and not about search being broken.
+  const hit = await get('/api/donations?page=1&limit=100&searchQuery=likepct', adminToken);
+  assert.equal(
+    hit.body.donations.filter((d) => d.donorEmail.startsWith(TAG)).length,
+    1,
+    'CONTROL FAILED: literal search matches nothing either, so nothing above is proven'
+  );
+});
+
+test('BUG-08 CLOSED: limit is CAPPED and NaN is REFUSED (CHANGED IN 3.3)', async () => {
+  // WAS: `limit=100000` was used verbatim and loaded a hundred thousand rows;
+  // `limit=abc` produced NaN, which flowed into the query and came back as
+  // `"limit": null` inside a 200. A caller could not tell an empty page from a
+  // request the server had failed to parse.
   await store.resetDonations();
   await store.createDonation({ tag: 'page' });
 
   const big = await get('/api/donations?page=1&limit=100000', adminToken);
   assert.equal(big.status, 200);
-  assert.equal(big.body.pagination.limit, 100000, 'used verbatim');
+  assert.equal(big.body.pagination.limit, 100, 'clamped to MAX_PAGE_SIZE');
+  assert.ok(big.body.donations.length <= 100, 'and the page obeys the clamp');
 
   const nan = await get('/api/donations?page=abc&limit=abc', adminToken);
-  assert.notEqual(Math.floor(nan.status / 100), 5, `must not 500: ${nan.raw.slice(0, 160)}`);
-  assert.equal(nan.status, 200);
-  assert.equal(nan.body.pagination.limit, null, 'NaN serialises as null');
+  assertRefused(nan, 400);
+
+  // The clamp applies to the per-user listing too - the old code had the same
+  // defect twice, at donations.js:112 and :218, and one fix had to cover both.
+  const perUser = await get(`/api/donations/user/${ownerId}?page=1&limit=100000`, ownerToken);
+  assert.equal(perUser.status, 200);
+  assert.equal(perUser.body.pagination.limit, 100);
+  assertRefused(await get(`/api/donations/user/${ownerId}?page=abc&limit=abc`, ownerToken), 400);
 });
 
 // =============================================================================
@@ -507,11 +624,37 @@ test('filter-options reports statuses PRESENT IN THE DATA, not the enum members'
   ]);
   assert.ok(res.body.paymentStatuses.includes('Paid'));
   assert.ok(res.body.paymentStatuses.includes('Pending'));
-  assert.equal(
-    res.body.paymentStatuses.includes('Cancelled'),
-    false,
-    'a status nobody has used must NOT appear'
+
+  // CHANGED IN 3.3, AND THE REASON IS WORTH RECORDING.
+  //
+  // This used to assert that `Cancelled` is absent, which held only because the
+  // suite had the store to itself. Against MySQL it shares one database with
+  // whatever else is loaded locally - the ETL's own fixtures include a
+  // Cancelled donation - so the assertion started failing on data it does not
+  // own. The rule it was reaching for was never about `Cancelled`.
+  //
+  // THE RULE IS: the statuses reported are EXACTLY the statuses that have rows.
+  // That is what separates data semantics from enum semantics, it is what
+  // ADR-041 actually says, and it is true no matter what else is in the table.
+  assert.deepEqual(
+    res.body.paymentStatuses.slice().sort(),
+    Object.keys(res.body.counts.byStatus).sort(),
+    'reported statuses must be exactly those with rows, never the enum members'
   );
+
+  // And where an enum member genuinely has no rows, it must be absent. This
+  // half can only run when such a member exists; when every member is in use,
+  // reporting all four IS correct and the assertion above carries the test.
+  const unused = ['Pending', 'Paid', 'Failed', 'Cancelled'].filter(
+    (m) => !(m in res.body.counts.byStatus)
+  );
+  for (const m of unused) {
+    assert.equal(
+      res.body.paymentStatuses.includes(m),
+      false,
+      `${m} has no rows and must NOT be offered as a filter`
+    );
+  }
 
   assert.deepEqual(Object.keys(res.body.counts).sort(), ['byStatus', 'guest', 'registered', 'total']);
   assert.deepEqual(Object.keys(res.body.dateRange).sort(), ['max', 'min']);
@@ -536,58 +679,82 @@ test('filter-options omits a userType with no rows', async () => {
 // PUT /:id and PATCH /:id/status
 // =============================================================================
 
-test('QUIRK (SEC-16): PUT /:id writes ANY status string, bypassing the enum', async () => {
-  // findByIdAndUpdate does not run validators by default, so the schema enum is
-  // not enforced and any string lands in the field. This is the mechanism
-  // behind BUG-02.
+test('SEC-16 CLOSED: PUT /:id refuses a status outside the enum (CHANGED IN 3.3)', async () => {
+  // WAS: `findByIdAndUpdate` does not run validators, so `{status:"banana"}`
+  // landed in the column and every status filter missed the row afterwards.
+  // That is also the mechanism behind BUG-02.
   const id = await store.createDonation({ tag: 'sec16' });
 
   const res = await put(`/api/donations/${id}`, { status: 'banana' }, adminToken);
-  assert.equal(res.status, 200, res.raw.slice(0, 160));
-  assert.equal((await store.readDonation(id)).status, 'banana', 'CURRENT: anything is accepted');
+  assertRefused(res, 400);
+  assert.equal(
+    (await store.readDonation(id)).status,
+    'Pending',
+    'and the stored value is UNCHANGED - a refused write must write nothing'
+  );
+
+  // The enum members themselves still work, in either casing (BUG-02).
+  assert.equal((await put(`/api/donations/${id}`, { status: 'approved' }, adminToken)).status, 200);
+  assert.equal((await store.readDonation(id)).status, 'Approved', 'stored canonically');
 });
 
-test('QUIRK: PUT /:id on a MISSING donation returns 200 with donation:null', async () => {
-  // There is no not-found branch at all. The caller is told "Donation updated"
-  // for a donation that does not exist.
-  const missing = new mongoose.Types.ObjectId().toString();
+test('BUG-12 CLOSED: PUT /:id 404s a missing donation (CHANGED IN 3.3)', async () => {
+  // WAS: no not-found branch at all. The caller was told `200 {message:
+  // "Donation updated", donation: null}` for a donation that does not exist -
+  // the status said success and the message said updated - while PATCH
+  // /:id/status, doing the same job on the same resource, returned 404.
+  const missing = mintObjectId();
   const res = await put(`/api/donations/${missing}`, { status: 'Approved' }, adminToken);
+  assertRefused(res, 404);
 
-  assert.equal(res.status, 200);
-  assert.equal(res.body.message, 'Donation updated');
-  assert.equal(res.body.donation, null, 'CURRENT: a null donation with a success message');
+  // The point of the finding was the DISAGREEMENT, so assert they now agree.
+  const patched = await patch(`/api/donations/${missing}/status`, { status: 'approved' }, adminToken);
+  assertRefused(patched, 404);
+  assert.equal(res.status, patched.status, 'two endpoints, one meaning of "not found"');
 });
 
-test('QUIRK (SEC-19): PUT /:id leaks the internal error on a malformed id', async () => {
+test('SEC-19 CLOSED: a malformed id leaks nothing, and is a 404 (CHANGED IN 3.3)', async () => {
+  // WAS: `500` with `Cast to ObjectId failed for value "not-an-objectid" ...`
+  // returned verbatim - which told a caller the store, the driver and the
+  // column. AD1b: the id SHAPE is checked before dispatch, so a syntactically
+  // impossible id names nothing, which is what "not found" means.
   const res = await put('/api/donations/not-an-objectid', { status: 'Approved' }, adminToken);
-  assert.equal(res.status, 500);
-  assert.match(res.body.error, /Cast to ObjectId failed/);
+  assertRefused(res, 404);
+  assert.doesNotMatch(res.raw, /Cast to ObjectId|prisma|Invalid `|mongo/i, 'no internals');
 });
 
-test('QUIRK (BUG-02): PATCH /:id/status accepts ONLY lowercase, and writes it', async () => {
-  // The schema enum is Pending|Approved|Rejected and the payment callbacks
-  // write those. This endpoint accepts only "approved"/"rejected" and writes
-  // them through findByIdAndUpdate, which does not validate - so the collection
-  // ends up holding both casings and every status filter misses half the rows.
+test('BUG-02 CLOSED: both casings are accepted, ONE is stored (CHANGED IN 3.3)', async () => {
+  // WAS: this endpoint accepted ONLY `approved`/`rejected` and wrote them
+  // unvalidated, while the payment callbacks wrote `Approved` - so the
+  // collection held both casings, every status filter missed half its rows, and
+  // admin.js's dashboard tile counting `status:"approved"` read zero forever
+  // (BUG-03). Casing is now decided in the repository, once, so the two writers
+  // cannot disagree again.
   const id = await store.createDonation({ tag: 'bug02' });
 
   const capitalised = await patch(`/api/donations/${id}/status`, { status: 'Approved' }, adminToken);
-  assertRefused(capitalised, 400);
-  assert.equal(capitalised.body.message, 'Invalid status');
+  assert.equal(capitalised.status, 200, 'the canonical casing is no longer refused');
+  assert.equal((await store.readDonation(id)).status, 'Approved');
 
-  const lower = await patch(`/api/donations/${id}/status`, { status: 'approved' }, adminToken);
+  const lower = await patch(`/api/donations/${id}/status`, { status: 'rejected' }, adminToken);
   assert.equal(lower.status, 200);
   assert.equal(
     (await store.readDonation(id)).status,
-    'approved',
-    'CURRENT: lowercase is written, corrupting the enum casing'
+    'Rejected',
+    'lowercase in, canonical stored - the whole point of the finding'
   );
+
+  // And a status outside the pair is still refused, mechanism asserted (AC1).
+  assertRefused(await patch(`/api/donations/${id}/status`, { status: 'banana' }, adminToken), 400);
+  assertRefused(await patch(`/api/donations/${id}/status`, { status: 'Pending' }, adminToken), 400);
+  assert.equal((await store.readDonation(id)).status, 'Rejected', 'and nothing was written');
 });
 
-test('PATCH /:id/status 404s a missing donation - unlike PUT', async () => {
-  // Worth pinning side by side with the PUT case above: two endpoints doing the
-  // same job disagree about what "not found" means.
-  const missing = new mongoose.Types.ObjectId().toString();
+test('PATCH /:id/status 404s a missing donation - AND SO DOES PUT NOW', async () => {
+  // Pinned side by side with the PUT case above. When this was written the two
+  // endpoints disagreed about what "not found" means; BUG-12 closed that, and
+  // this test is kept because it is the one that was RIGHT.
+  const missing = mintObjectId();
   const res = await patch(`/api/donations/${missing}/status`, { status: 'approved' }, adminToken);
   assertRefused(res, 404);
 });
@@ -614,10 +781,12 @@ test('AE4: what GET /:id ACTUALLY returns', async () => {
   assert.equal(typeof res.body.paymentStatus, 'string');
 });
 
-test('GET /:id on a malformed id is a 500, not a 404', async () => {
+test('GET /:id on a malformed id is a 404 now, not a 500 (CHANGED IN 3.3)', async () => {
+  // WAS: 500 with a generic body - this handler did not leak the detail, but it
+  // still reported a caller's malformed input as a server fault. AD1b checks
+  // the id shape before dispatch.
   const res = await get('/api/donations/not-an-objectid', adminToken);
-  assert.equal(res.status, 500);
-  assert.equal(res.body.error, 'Failed to fetch donation', 'this one does NOT leak the detail');
+  assertRefused(res, 404);
 });
 
 // =============================================================================
@@ -676,4 +845,65 @@ test('stats/charts defaults to the current month when period is absent or unknow
   const from = new Date(res.body.dateRange.from);
   assert.equal(from.getDate(), 1, 'defaults to the first of the current month');
   assert.deepEqual(res.body.stats.timeline, [], 'and an unknown period produces no timeline');
+});
+
+// =============================================================================
+// AK3 / AM1 - a donation that exists in MONGODB and was never migrated
+// =============================================================================
+
+test('AK3: an UN-MIGRATED donation is ABSENT, and the ETL is what closes the gap', async () => {
+  // ADR-056, which is the constraint this whole package sequence exists to
+  // respect: A READ-THROUGH BRIDGE DOES NOT MAKE A ROUTE MIGRATION ADDITIVE.
+  // The category bridge covers single-record reads; it never covered lists or
+  // writes, which is how package 3.1 would have returned `[]` for every
+  // production category. Donations are worse, because the admin console IS a
+  // list.
+  //
+  // AM1: created HERE, after any ETL run, and asserted to have no MySQL row
+  // BEFORE the endpoints are exercised. If it ever has one, the setup migrated
+  // it and every assertion below is vacuous.
+  await store.resetDonations();
+  const legacyId = await store.createMongoOnlyDonation('unmigrated');
+
+  assert.equal(
+    await store.hasMysqlRow(legacyId),
+    false,
+    'SETUP ERROR: the AK3 fixture has a MySQL row, so it was migrated after all. ' +
+      'Everything below would pass for the wrong reason.'
+  );
+
+  // The admin list does not contain it.
+  const list = await get('/api/donations?page=1&limit=100', adminToken);
+  assert.equal(list.status, 200);
+  assert.equal(
+    list.body.donations.some((d) => d._id === legacyId),
+    false,
+    'an un-migrated donation is INVISIBLE to the migrated list - not an error, absent'
+  );
+
+  // Nor can it be fetched by id. A clean 404, not a crash: the id is a
+  // well-formed ObjectId, so the shape check passes and the lookup simply finds
+  // nothing. That distinction matters - AC1 wants the MECHANISM, and "refused
+  // because absent" is a different mechanism from "refused because malformed".
+  const byId = await get(`/api/donations/${legacyId}`, adminToken);
+  assert.notEqual(Math.floor(byId.status / 100), 5, `must not 500: ${byId.raw.slice(0, 160)}`);
+  assertRefused(byId, 404);
+
+  // And it cannot be updated, for the same reason.
+  assertRefused(await put(`/api/donations/${legacyId}`, { status: 'Approved' }, adminToken), 404);
+  assertRefused(
+    await patch(`/api/donations/${legacyId}/status`, { status: 'approved' }, adminToken),
+    404
+  );
+
+  // THE CONTROL. The identical donation, present in MySQL, IS visible - so the
+  // assertions above are about MIGRATION STATE and not about some unrelated
+  // filter quietly excluding the fixture.
+  const migrated = await store.createDonation({ tag: 'unmigrated-control' });
+  const control = await get('/api/donations?page=1&limit=100', adminToken);
+  assert.equal(
+    control.body.donations.some((d) => d._id === migrated),
+    true,
+    'CONTROL FAILED: a MySQL donation is missing too, so the test above proves nothing'
+  );
 });

@@ -494,11 +494,27 @@ test('POST refuses a duplicate name with 400, and does not create a second row',
   assert.equal(still.donationAmount, 1500, 'the original is untouched');
 });
 
-test('displayOrder is assigned as max+1, starting at 0 for the first category', async () => {
-  // Note the asymmetry, which is current behaviour: the FIRST category gets 0,
-  // and every subsequent one gets (highest + 1). So a collection created
-  // through this endpoint runs 0, 1, 2...
+test('displayOrder is assigned as max+1, starting at 0 in an EMPTY table', async () => {
+  // Note the asymmetry, which is current behaviour: the FIRST category in an
+  // empty table gets 0, and every subsequent one gets (highest + 1). So a
+  // collection created through this endpoint runs 0, 1, 2...
+  //
+  // CHANGED IN 3.3, AND THE REASON MATTERS MORE THAN THE EDIT.
+  //
+  // This asserted the literal values 0, 1, 2, which held only while the suite
+  // had the store to itself. Against MySQL every suite shares ONE database -
+  // with each other and with whatever is loaded locally - so package 3.3's ETL
+  // run put two categories in the table and `max+1` stopped being 0. The suite
+  // was reading data it does not own.
+  //
+  // The RULE is `max+1`, and the literal 0 was incidental to an empty table. It
+  // is still asserted, but only when the table is actually empty, which is the
+  // only condition under which it was ever a claim about the code.
   await store.resetData();
+  // The TRUE table count, not `store.countCategories()` - that one filters to
+  // this suite's own name prefix, which would report an empty table while two
+  // rows sat in it and reintroduce exactly the assumption being removed.
+  const baseline = await categories.count();
   const mk = async (tag) => {
     const name = uniqueName(tag);
     const r = await post(
@@ -510,9 +526,15 @@ test('displayOrder is assigned as max+1, starting at 0 for the first category', 
     return store.readCategoryByName(name);
   };
 
-  assert.equal((await mk('order1')).displayOrder, 0);
-  assert.equal((await mk('order2')).displayOrder, 1);
-  assert.equal((await mk('order3')).displayOrder, 2);
+  const first = (await mk('order1')).displayOrder;
+  const second = (await mk('order2')).displayOrder;
+  const third = (await mk('order3')).displayOrder;
+
+  if (baseline === 0) {
+    assert.equal(first, 0, 'the first category in an EMPTY table gets 0');
+  }
+  assert.equal(second, first + 1, 'each subsequent category is max+1');
+  assert.equal(third, second + 1, 'and they stay consecutive');
 });
 
 // =============================================================================

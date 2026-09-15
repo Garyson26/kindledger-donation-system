@@ -10,7 +10,11 @@ const categoryBridge = require("../services/categoryBridge");
 
 const adminAuth = require("../middleware/adminAuth");
 const bcrypt = require("bcryptjs");
-const { triggerManualCleanup, cleanupOldDonations, cleanupInactiveUsers } = require("../services/dataCleanupService");
+// services/dataCleanupService.js is DELETED (package 3.3). It targeted MongoDB,
+// and services/scheduler.js implements the same three retention rules against
+// MySQL with a dry-run mode and counts that come back to the caller.
+const scheduler = require("../services/scheduler");
+const { failed } = require("../utils/respond");
 
 // Protect all admin routes
 router.use(adminAuth);
@@ -275,69 +279,88 @@ router.delete("/users/:id", async (req, res) => {
 // ==========================================
 
 /**
- * Trigger manual cleanup of old records
- * Removes all data older than 10 years
+ * Run the retention cleanup. BUG-10, all three defects.
+ *
+ * WAS: one authenticated POST with an empty body started an irreversible bulk
+ * delete of donations and accounts. It returned 200 immediately and deleted in
+ * the BACKGROUND - `triggerManualCleanup().catch(...)` was never awaited - so
+ * the caller was told "started" and never learned the outcome, and the response
+ * said to go and read the server logs. Both underlying functions returned 0
+ * from their catch blocks, which made a partial delete and a clean no-op
+ * indistinguishable to every caller INCLUDING that log line. The one operation
+ * in this system that destroys donor records had the weakest feedback of any
+ * endpoint in it.
+ *
+ * NOW:
+ *
+ *   1. THE DRY RUN IS THE DEFAULT. A real delete requires `?confirm=delete`
+ *      explicitly. There was a GET /cleanup/preview, but nothing required it to
+ *      be called first and nothing tied a trigger to a preview anyone had read.
+ *   2. IT IS AWAITED, and the counts come back in the response. A caller learns
+ *      what happened from the answer to their own request.
+ *   3. A FAILURE IS A FAILURE. No catch returns 0. If the purge throws, this
+ *      answers 500 and says so, because "deleted: 0" must mean nothing needed
+ *      deleting and never "something went wrong on the way".
  */
 router.post("/cleanup/trigger", async (req, res) => {
+  const dryRun = req.query.confirm !== "delete";
   try {
-    console.log('[Admin API] Manual cleanup triggered by admin');
-    
-    // Run cleanup in background and return immediately
-    triggerManualCleanup().catch(err => {
-      console.error('[Admin API] Background cleanup error:', err);
-    });
+    const donationsResult = await scheduler.purgeOldDonations({ dryRun });
+    const usersResult = await scheduler.purgeInactiveUsers({ dryRun });
 
-    res.json({ 
-      message: "Data cleanup started in background. Check server logs for details.",
-      status: "processing"
+    res.json({
+      dryRun,
+      donations: donationsResult,
+      users: usersResult,
+      message: dryRun
+        ? "DRY RUN - nothing was deleted. Re-send with ?confirm=delete to execute."
+        : `Deleted ${donationsResult.deleted} donation(s) and ${usersResult.deleted} inactive account(s).`,
     });
   } catch (err) {
-    console.error('[Admin API] Error triggering cleanup:', err);
-    res.status(500).json({ error: err.message });
+    return failed(res, "Cleanup failed - rows may have been partially deleted", err, {
+      tag: "admin",
+    });
   }
 });
 
 /**
- * Get statistics on how many records would be deleted
- * Without actually deleting them (dry run)
+ * What the cleanup WOULD delete.
+ *
+ * The preview and the trigger now run THE SAME CODE with `dryRun` flipped,
+ * which is the only way the preview can be trusted to describe the delete. The
+ * old pair reimplemented the retention rules separately - the preview counted
+ * old users with a loop over `countDocuments` per user, the trigger did its own
+ * version - so the two could disagree about what was about to be destroyed and
+ * nobody would find out until afterwards.
+ *
+ * It also reports IMPLAUSIBLE DATES (AG1a), which are excluded from the purge
+ * rather than deleted. A row dated 1970 sits inside a ten-year window; the
+ * floor keeps it, and this is where an admin learns it exists.
  */
 router.get("/cleanup/preview", async (req, res) => {
   try {
-    const tenYearsAgo = new Date();
-    tenYearsAgo.setFullYear(tenYearsAgo.getFullYear() - 10);
-
-    // Count old donations
-    const oldDonationsCount = await Donation.countDocuments({
-      createdAt: { $lt: tenYearsAgo }
-    });
-
-    // Count inactive users (no donations, older than 10 years)
-    const oldUsers = await User.find({
-      createdAt: { $lt: tenYearsAgo },
-      role: 'user'
-    });
-
-    let inactiveUsersCount = 0;
-    for (const user of oldUsers) {
-      const donationCount = await Donation.countDocuments({ userId: user._id });
-      if (donationCount === 0) {
-        inactiveUsersCount++;
-      }
-    }
+    const donationsResult = await scheduler.purgeOldDonations({ dryRun: true });
+    const usersResult = await scheduler.purgeInactiveUsers({ dryRun: true });
 
     res.json({
       preview: {
-        donations: oldDonationsCount,
-        users: inactiveUsersCount,
-        cutoffDate: tenYearsAgo
+        donations: donationsResult.candidates,
+        users: usersResult.candidates,
+        implausibleDates: donationsResult.implausible,
+        cutoffDate: donationsResult.cutoff,
+        plausibleFloor: donationsResult.floor,
       },
-      message: `${oldDonationsCount} donation(s) and ${inactiveUsersCount} inactive user(s) would be deleted`,
-      note: "This is a preview only. No data has been deleted. Use POST /admin/cleanup/trigger to execute cleanup."
+      message:
+        `${donationsResult.candidates} donation(s) and ${usersResult.candidates} ` +
+        "inactive account(s) would be deleted",
+      note:
+        "Preview only - nothing has been deleted. POST /admin/cleanup/trigger?confirm=delete " +
+        "executes it; without that parameter the trigger is a dry run too.",
     });
   } catch (err) {
-    console.error('[Admin API] Error generating cleanup preview:', err);
-    res.status(500).json({ error: err.message });
+    return failed(res, "Could not generate the cleanup preview", err, { tag: "admin" });
   }
 });
 
 module.exports = router;
+

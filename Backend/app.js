@@ -98,12 +98,18 @@ app.use("/api/payment", openCors, paymentRoutes);
 // Connect Database
 connectDB();
 
-// The legacy node-cron scheduler in services/dataCleanupService.js is still
-// deliberately NOT initialised: it targets MongoDB and Vercel recycles
-// instances (BE-MED-02).
+// services/dataCleanupService.js is GONE as of package 3.3. It targeted
+// MongoDB, it was never initialised here (it also assumed a long-lived process,
+// which Vercel does not provide - BE-MED-02), and its one reachable caller was
+// POST /api/admin/cleanup/trigger, which now runs the scheduler instead.
 //
-// The Phase 2 scheduler targets MySQL, is guarded by SCHEDULER_ENABLED, and
-// is inert until Phase 4 loads data (SPEC-2 section 7.2).
+// ADR-053 is why "not initialised" was not the same as "does not execute": that
+// was a statement about ONE caller being read as a statement about all of them,
+// and it let BUG-10 sit unnoticed behind BUG-04.
+//
+// The Phase 2 scheduler targets MySQL, carries all three retention rules, is
+// guarded by SCHEDULER_ENABLED, and is inert until Phase 4 loads data
+// (SPEC-2 section 7.2).
 initializeScheduler();
 
 // Close the Prisma pool on SIGTERM/SIGINT. Registered here rather than on

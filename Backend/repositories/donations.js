@@ -36,8 +36,21 @@ const SELECT = {
   donatedAt: true,
   createdAt: true,
   updatedAt: true,
-  user: { select: { uuid: true, name: true, email: true } },
-  category: { select: { uuid: true, name: true, shortDescription: true, donationAmountMinor: true } },
+  // `legacyId` on both relations because ADR-051 keeps the 24-hex ObjectId as
+  // the EXTERNAL identifier for the rest of Phase 3, and the wire shape quotes
+  // it as `_id`. Without it, package 3.3 would have silently changed the id the
+  // frontend reads for the donor and the category.
+  user: { select: { uuid: true, legacyId: true, name: true, email: true } },
+  category: {
+    select: {
+      uuid: true,
+      legacyId: true,
+      name: true,
+      shortDescription: true,
+      donationAmountMinor: true,
+      descriptions: { select: { text: true, position: true }, orderBy: { position: 'asc' } },
+    },
+  },
   paymentDetails: true,
 };
 
@@ -86,14 +99,23 @@ function normalise(row) {
     updatedAt: iso(row.updatedAt),
     donor: {
       isGuest: !row.user,
-      user: row.user ? { id: row.user.uuid, name: row.user.name, email: row.user.email } : null,
+      user: row.user
+        ? {
+            id: row.user.uuid,
+            legacyId: row.user.legacyId,
+            name: row.user.name,
+            email: row.user.email,
+          }
+        : null,
     },
     category: row.category
       ? {
           id: row.category.uuid,
+          legacyId: row.category.legacyId,
           name: row.category.name,
           shortDescription: row.category.shortDescription,
           donationAmountMinor: fromBigInt(row.category.donationAmountMinor),
+          descriptions: (row.category.descriptions || []).map((d) => d.text),
         }
       : null,
     paymentDetails: pd
@@ -113,14 +135,23 @@ function normalise(row) {
 /**
  * Create a donation.
  *
- * `categoryId` and `userId` are external uuids. They are resolved to internal
- * keys here, which is the only place that translation happens.
+ * `categoryId` and `userId` are EXTERNAL identifiers, in either form. They are
+ * resolved to internal keys here, which is the only place that translation
+ * happens.
+ *
+ * BOTH FORMS ARE ACCEPTED ON PURPOSE (package 3.3). This originally matched on
+ * `uuid` alone, which is what the identifier policy will settle on - but
+ * ADR-051 keeps the 24-hex ObjectId as the external identifier for the REST OF
+ * PHASE 3, so the ids the routes and clients actually exchange are legacy ids.
+ * Accepting only the uuid made `create` unreachable from a real caller, and
+ * `payment.js` would have hit the same wall in 3.4. Narrowing this back to
+ * `uuid` is part of retiring the ObjectId, not part of this package.
  */
 async function create(input, tx) {
   const db = client(tx);
 
-  const category = await db.category.findUnique({
-    where: { uuid: input.categoryId },
+  const category = await db.category.findFirst({
+    where: { OR: [{ uuid: String(input.categoryId) }, { legacyId: String(input.categoryId) }] },
     select: { id: true },
   });
   if (!category) {
@@ -129,7 +160,10 @@ async function create(input, tx) {
 
   let userKey = null;
   if (input.userId) {
-    const user = await db.user.findUnique({ where: { uuid: input.userId }, select: { id: true } });
+    const user = await db.user.findFirst({
+      where: { OR: [{ uuid: String(input.userId) }, { legacyId: String(input.userId) }] },
+      select: { id: true },
+    });
     if (!user) throw new Error(`Unknown user ${input.userId}`);
     userKey = user.id;
   }
@@ -323,6 +357,268 @@ async function countImplausibleDates(floor, now, tx) {
   });
 }
 
+// =============================================================================
+// The listing and reporting surface (package 3.3)
+// =============================================================================
+
+/** BUG-08. Same ceiling as `routes/categories.js`, deliberately one number. */
+const MAX_PAGE_SIZE = 100;
+
+const DONATION_STATUSES = ['Pending', 'Approved', 'Rejected'];
+const PAYMENT_STATUSES = ['Pending', 'Paid', 'Failed', 'Cancelled'];
+
+/**
+ * Canonicalise a status, or return null.
+ *
+ * BUG-02. `PATCH /:id/status` accepted ONLY `approved`/`rejected` while the
+ * payment callbacks wrote `Approved`, so the collection held both casings and
+ * every status filter missed half its rows. Casing is decided HERE, once, so
+ * the two writers cannot disagree again.
+ *
+ * Note that MySQL would canonicalise `'approved'` to `'Approved'` by itself
+ * under `utf8mb4_0900_as_ci` (ADR-018). Doing it explicitly means the caller
+ * can tell a recognised status from an unrecognised one, which is what lets
+ * SEC-16 answer 400 instead of writing junk.
+ */
+function canonicalStatus(value, allowed) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase();
+  return allowed.find((a) => a.toLowerCase() === v) || null;
+}
+
+/**
+ * Make a search term a LITERAL.
+ *
+ * BE-HIGH-08 was about `$regex` executing the user's metacharacters; the fix
+ * was to escape them. Moving to SQL does NOT retire that finding, it RENAMES
+ * it: `LIKE` has its own metacharacters, `%` and `_`, and Prisma's `contains`
+ * binds the value as a parameter without neutralising them. A parameterised
+ * query stops SQL injection; it does not stop `%` from meaning "anything".
+ *
+ * So a search for `%` would return every donor - the same over-match the regex
+ * fix removed, arriving through a different door. MySQL treats backslash as the
+ * default LIKE escape character, so escaping here restores "a search term is
+ * text, not a pattern".
+ *
+ * This depends on `NO_BACKSLASH_ESCAPES` being absent from `sql_mode`, which
+ * the schema gate already pins. It is asserted by behaviour in the route suite
+ * rather than trusted.
+ */
+function escapeLike(term) {
+  return String(term).replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Resolve an external user identifier to the internal key.
+ *
+ * Accepts either form on purpose. `req.user.uuid` is the MySQL key and
+ * `req.params.userId` is still the 24-hex ObjectId that ADR-051 keeps as the
+ * external identifier for the rest of Phase 3, and both reach this function
+ * from the same route.
+ */
+async function resolveUserKey(externalId, tx) {
+  if (typeof externalId !== 'string' || !externalId.trim()) return undefined;
+  const value = externalId.trim();
+  const row = await client(tx).user.findFirst({
+    where: { OR: [{ uuid: value }, { legacyId: value }] },
+    select: { id: true },
+  });
+  return row ? row.id : null;
+}
+
+/**
+ * Build a Prisma `where` from NAMED SCALAR FILTERS.
+ *
+ * THE INTERFACE IS THE POINT, not the implementation. The Mongoose version
+ * assembled a filter OBJECT in the route from `req.query` and handed it to
+ * `Donation.find()` - which is the same shape SEC-03 exploits, one layer up: a
+ * caller controlling the structure of a query rather than its values. This
+ * function takes scalars and builds the structure itself, so a route cannot
+ * pass one through even by accident.
+ *
+ * Returns `{ impossible: true }` for a filter no row can satisfy - an
+ * unrecognised paymentStatus, or a userId that resolves to nothing. That is the
+ * MongoDB behaviour preserved (an unknown status simply matched nothing) and it
+ * is also the honest answer: an empty page, not an error, and not a silently
+ * ignored filter showing the caller every row instead.
+ */
+async function buildWhere(filters = {}, tx) {
+  const where = {};
+
+  if (filters.userType === 'registered') where.userId = { not: null };
+  else if (filters.userType === 'guest') where.userId = null;
+
+  if (filters.paymentStatus && filters.paymentStatus !== 'all') {
+    const canonical = canonicalStatus(filters.paymentStatus, PAYMENT_STATUSES);
+    if (!canonical) return { impossible: true };
+    where.paymentStatus = canonical;
+  }
+
+  if (filters.status && filters.status !== 'all') {
+    const canonical = canonicalStatus(filters.status, DONATION_STATUSES);
+    if (!canonical) return { impossible: true };
+    where.status = canonical;
+  }
+
+  if (filters.userId) {
+    const key = await resolveUserKey(filters.userId, tx);
+    if (!key) return { impossible: true };
+    where.userId = key;
+  }
+
+  if (filters.categoryId) {
+    const value = String(filters.categoryId).trim();
+    const category = await client(tx).category.findFirst({
+      where: { OR: [{ uuid: value }, { legacyId: value }] },
+      select: { id: true },
+    });
+    if (!category) return { impossible: true };
+    where.categoryId = category.id;
+  }
+
+  if (filters.from || filters.to) {
+    where.donatedAt = {};
+    if (filters.from) where.donatedAt.gte = new Date(filters.from);
+    if (filters.to) where.donatedAt.lte = new Date(filters.to);
+  }
+
+  if (filters.search && String(filters.search).trim()) {
+    const term = escapeLike(String(filters.search).trim());
+    where.OR = [{ donorName: { contains: term } }, { donorEmail: { contains: term } }];
+  }
+
+  return { where };
+}
+
+/**
+ * A filtered, paginated page of donations.
+ *
+ * Returns the total alongside the rows because the count has to use the SAME
+ * `where`, and building it twice in a route is how those two drift apart.
+ */
+async function list(filters = {}, paging = {}, tx) {
+  const built = await buildWhere(filters, tx);
+  if (built.impossible) return { rows: [], total: 0 };
+
+  const db = client(tx);
+  const take = Math.min(Math.max(1, paging.limit || 10), MAX_PAGE_SIZE);
+  const skip = Math.max(0, ((paging.page || 1) - 1) * take);
+
+  const [total, rows] = await Promise.all([
+    db.donation.count({ where: built.where }),
+    db.donation.findMany({
+      where: built.where,
+      select: SELECT,
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take,
+    }),
+  ]);
+
+  return { rows: rows.map(normalise), total };
+}
+
+/** The same filters, count only. */
+async function count(filters = {}, tx) {
+  const built = await buildWhere(filters, tx);
+  if (built.impossible) return 0;
+  return client(tx).donation.count({ where: built.where });
+}
+
+/** Earliest and latest donation dates, or nulls when there are no rows. */
+async function dateRange(tx) {
+  const agg = await client(tx).donation.aggregate({
+    _min: { donatedAt: true },
+    _max: { donatedAt: true },
+  });
+  return { min: iso(agg._min.donatedAt), max: iso(agg._max.donatedAt) };
+}
+
+/**
+ * Row counts per payment status, for statuses PRESENT IN THE DATA.
+ *
+ * Same reasoning as `listPaymentStatusesInUse` and ADR-041: a status nobody has
+ * used must be absent, not zero. A `groupBy` reports only the groups that
+ * exist, which is exactly the Mongo `$group` semantics.
+ */
+async function countsByPaymentStatus(tx) {
+  const groups = await client(tx).donation.groupBy({
+    by: ['paymentStatus'],
+    _count: { _all: true },
+  });
+  const out = {};
+  for (const g of groups) out[g.paymentStatus] = g._count._all;
+  return out;
+}
+
+/** How many donations have a user attached, and how many do not. */
+async function countsByUserPresence(tx) {
+  const db = client(tx);
+  const [registered, guest] = await Promise.all([
+    db.donation.count({ where: { userId: { not: null } } }),
+    db.donation.count({ where: { userId: null } }),
+  ]);
+  return { registered, guest };
+}
+
+/**
+ * Set the donation status, canonically.
+ *
+ * SEC-16: the Mongoose version used `findByIdAndUpdate`, which does not run
+ * validators, so any string landed in the field. Here the value is
+ * canonicalised first and an unrecognised one never reaches the database.
+ *
+ * BUG-12: returns null for a donation that does not exist, so the caller can
+ * answer 404. The old `PUT /:id` had no not-found branch at all and reported
+ * "Donation updated" with `donation: null`.
+ */
+async function setStatus(id, status, tx) {
+  const canonical = canonicalStatus(status, DONATION_STATUSES);
+  if (!canonical) return { ok: false, reason: 'invalid-status' };
+
+  const db = client(tx);
+  const target = await db.donation.findUnique({ where: { uuid: id }, select: { id: true } });
+  if (!target) return { ok: false, reason: 'not-found' };
+
+  await db.donation.update({ where: { id: target.id }, data: { status: canonical } });
+  return { ok: true, donation: await findById(id, tx) };
+}
+
+/**
+ * The projection `GET /stats/charts` needs, and NOTHING ELSE.
+ *
+ * The Mongoose version loaded every donation in the range as a full document,
+ * resolved each category through the bridge, and reduced in JavaScript. The
+ * reduction stays in JavaScript - the grouping rules are fiddly and preserving
+ * them exactly matters more than pushing them into SQL - but the READ is now
+ * five columns and a joined name instead of whole records. Same output, a
+ * fraction of the bytes.
+ *
+ * Still unbounded by row count: a custom range of several years loads every row
+ * in it. That is the pre-existing behaviour and it is left alone here rather
+ * than changed silently alongside the store swap.
+ */
+async function listForStats(from, to, tx) {
+  const rows = await client(tx).donation.findMany({
+    where: { donatedAt: { gte: new Date(from), lte: new Date(to) } },
+    select: {
+      donatedAt: true,
+      amountMinor: true,
+      paymentStatus: true,
+      userId: true,
+      category: { select: { name: true } },
+    },
+    orderBy: { donatedAt: 'desc' },
+  });
+  return rows.map((r) => ({
+    donatedAt: iso(r.donatedAt),
+    amountMinor: fromBigInt(r.amountMinor),
+    paymentStatus: r.paymentStatus,
+    isRegistered: r.userId !== null,
+    categoryName: r.category ? r.category.name : null,
+  }));
+}
+
 /** Test and ETL support: remove rows by donor-email prefix. Never used at runtime. */
 async function deleteByDonorEmailPrefix(prefix, tx) {
   const res = await client(tx).donation.deleteMany({
@@ -344,4 +640,21 @@ module.exports = {
   countImplausibleDates,
   deleteByDonorEmailPrefix,
   normalise,
+
+  // The listing and reporting surface (package 3.3).
+  list,
+  count,
+  dateRange,
+  countsByPaymentStatus,
+  countsByUserPresence,
+  setStatus,
+  listForStats,
+
+  // Exported so the route can tell "unrecognised status" from "no such
+  // donation" WITHOUT re-stating the enum members. Two copies of an enum is how
+  // BUG-02 happened.
+  canonicalStatus,
+  DONATION_STATUSES,
+  PAYMENT_STATUSES,
+  MAX_PAGE_SIZE,
 };

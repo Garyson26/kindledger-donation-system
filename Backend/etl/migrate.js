@@ -86,9 +86,14 @@ function requireMinor(value, label, fallback = null) {
 function plausibleDate(value, label, stats) {
   const d = value ? new Date(value) : null;
   if (!d || Number.isNaN(d.getTime()) || d < PLAUSIBLE_FLOOR || d > new Date()) {
-    // Never guessed, never substituted. The pre-flight blocks on these; if the
-    // operator overrode it, the row still fails here rather than being loaded
-    // with an invented date.
+    // Never guessed, never substituted.
+    //
+    // THIS THROW FAILS THE RUN, NOT THE ROW (ETL-01). The previous comment here
+    // said "the row still fails here", which is what was intended and is not
+    // what a throw does - package 3.3's local load stopped on the fifth donation
+    // with four already written. The pre-flight now refuses this finding
+    // outright rather than offering an override that produces a partial load,
+    // so reaching this line means the data changed between the two steps.
     throw new Error(
       `${label}: implausible date ${JSON.stringify(value)}. The pre-flight reported ` +
         'this; it is not corrected here on purpose (ADR-054).'

@@ -52,9 +52,28 @@ function toMinorWithDelta(value) {
   return { minor, delta, ok: true };
 }
 
-/** A finding. `blocking` decides whether the load may proceed without an override. */
-function finding(check, severity, detail, blocking = true) {
-  return { check, severity, detail, blocking };
+/**
+ * A finding.
+ *
+ * `blocking` decides whether the load may proceed without an override.
+ *
+ * `loaderRefuses` says that `migrate.js` will ALSO refuse these rows. That
+ * distinction is not cosmetic - it decides whether the override is honest.
+ *
+ * ETL-01, found by package 3.3's local donation load. The override converted a
+ * clean refusal into a PARTIAL LOAD: the pre-flight reported one implausible
+ * date, the operator overrode it, the loader wrote two categories, one user and
+ * four of five donations, and then threw on exactly the row that had been
+ * reported. The comment in `migrate.js:plausibleDate` said "the row still fails
+ * here", which is what its author intended and is not what the code does - a
+ * throw fails the RUN, not the ROW.
+ *
+ * Overriding such a finding is strictly worse than not overriding it, in every
+ * case, so the override must not apply to it. Every finding carrying this flag
+ * is refused before ANYTHING is written.
+ */
+function finding(check, severity, detail, blocking = true, loaderRefuses = false) {
+  return { check, severity, detail, blocking, loaderRefuses };
 }
 
 // -----------------------------------------------------------------------------
@@ -108,7 +127,10 @@ async function checkDuplicateEmails(User) {
       'BLOCKING',
       `${r.count} accounts collapse to '${r._id}' under the case-insensitive unique ` +
         `index: ${r.ids.map(String).join(', ')}. A human must decide which survives; ` +
-        'the ETL will not choose.'
+        'the ETL will not choose.',
+      true,
+      // The second insert hits uq_users_email and throws mid-load (ETL-01).
+      true
     )
   );
 }
@@ -269,7 +291,10 @@ async function checkOrphanedCategories(Donation, Category) {
           (nullCount ? `, plus ${nullCount} donation(s) with no category at all` : '') +
           '. donations.category_id is NOT NULL with ON DELETE RESTRICT, so these ' +
           'rows cannot be loaded. A human must decide: recreate the category, or ' +
-          'reassign. The ETL will not invent one.'
+          'reassign. The ETL will not invent one.',
+        true,
+        // migrate.js throws on a category reference that does not resolve (ETL-01).
+        true
       )
     );
   }
@@ -293,7 +318,10 @@ async function checkDates(Donation) {
         'future, or absent. Loaded as-is they would fall inside the ten-year retention ' +
         'window and be deleted by the first cleanup run after cutover (BUG-10). ' +
         'Reported, never corrected - an impossible date is evidence of a defect, and ' +
-        'guessing the real one destroys it.'
+        'guessing the real one destroys it.',
+      true,
+      // migrate.js's plausibleDate() throws rather than inventing a date (ETL-01).
+      true
     ),
   ];
 }
@@ -317,6 +345,9 @@ async function runPreflight({ prisma, models }) {
     findings,
     blocking: findings.filter((f) => f.blocking),
     fatal: findings.filter((f) => f.severity === 'FATAL'),
+    // ETL-01. Findings the LOADER will also refuse, so the override cannot help
+    // and must not be offered - see finding().
+    refusedByLoader: findings.filter((f) => f.loaderRefuses),
   };
 }
 
@@ -336,11 +367,32 @@ function formatReport(result) {
   }
   lines.push('-'.repeat(74));
   const b = result.blocking.length;
-  lines.push(
-    b === 0
-      ? '  No blocking findings. The load may proceed.'
-      : `  ${b} BLOCKING finding(s). The load will refuse without --i-have-reviewed-the-preflight.`
-  );
+  const r = (result.refusedByLoader || []).length;
+  if (b === 0) {
+    lines.push('  No blocking findings. The load may proceed.');
+  } else {
+    lines.push(
+      `  ${b} BLOCKING finding(s). The load will refuse without --i-have-reviewed-the-preflight.`
+    );
+  }
+  if (r > 0) {
+    // ETL-01. Say this plainly, because the override's name invites the
+    // assumption that reviewing is enough.
+    lines.push('');
+    lines.push(
+      `  ${r} of them CANNOT BE OVERRIDDEN: ` +
+        (result.refusedByLoader || []).map((f) => f.check).join(', ') +
+        '.'
+    );
+    for (const chunk of (
+      'The loader refuses these rows too, so overriding would not load them - ' +
+      'it would write everything up to the first one and then stop, leaving MySQL ' +
+      'part-populated. Fix them in the SOURCE data and re-run; the load is ' +
+      'idempotent by legacy_id, so a re-run resumes rather than duplicates.'
+    ).match(/.{1,68}(\s|$)/g) || []) {
+      lines.push(`    ${chunk.trim()}`);
+    }
+  }
   lines.push('');
   return lines.join('\n');
 }
