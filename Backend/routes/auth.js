@@ -305,10 +305,29 @@ router.post("/login", authLimiter, async (req, res) => {
     // ever read it, so "disable user" had no effect at all.
     if (!user.isActive) return refuse(res, 403, "This account has been disabled");
 
-    // Backward compatibility for accounts created before the OTP flow. Narrowed
-    // to accounts that predate it rather than applying to everyone: SEC-21
-    // recorded that an admin-created account lands unverified and was then
-    // silently auto-verified here on first login.
+    // THIS COMMENT USED TO CLAIM A NARROWING THAT THE CODE DOES NOT DO (AJ3).
+    // It said the branch had been "narrowed to accounts that predate the OTP
+    // flow rather than applying to everyone". It applies to everyone. The
+    // narrowing was described and never implemented, and the wrong version
+    // would have been inherited by the next reader as a fact.
+    //
+    // WHAT IS ACTUALLY TRUE, checked by enumerating every read of the flag:
+    // `isVerified` IS READ NOWHERE ELSE. Not in a route, not in a middleware.
+    // The only line in the codebase that reads it is this one, and it exists to
+    // set it true. So the flag GATES NOTHING - an "unverified" account has
+    // exactly the capabilities of a verified one.
+    //
+    // That is SEC-05's shape exactly (a flag that exists, is settable from the
+    // admin UI, and is never read), and it is why SEC-21 was understated at Low.
+    // The practical exposure is narrower than SEC-05's was, because self-service
+    // signup enforces verification STRUCTURALLY - the User row does not exist
+    // until the PendingSignup OTP is confirmed - so only admin-created accounts
+    // are affected.
+    //
+    // NOT CHANGED HERE. Making `isVerified` a real gate is a behaviour change
+    // that belongs with SEC-21's owner (admin.js, 3.5); removing this line would
+    // change nothing today and would leave admin-created accounts flagged
+    // unverified forever with no difference in what they can do.
     if (!user.isVerified) await users.setVerified(user.id, true);
 
     const otp = generateVerificationCode();

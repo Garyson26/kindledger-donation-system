@@ -834,11 +834,16 @@ understated:**
 | SEC-08 lists `/login` as leaking via `needsSignupVerification` | the security review | **Wrong.** That branch is reached only after `bcrypt.compare` SUCCEEDS, so a caller without the password gets the same `Invalid credentials` as any other failure. Read the branch (AP3) |
 | AE1-b's trigger is `donations.js` | AE1, restated in the map, revised once by AK5 | **Wrong file.** The ObjectId ref is written by `payment.js:141`. Enumerate the WRITE sites (3.3) |
 | `services/scheduler.js` "already implements the same retention rules" | the BUG-10 mechanism | **Two of three.** The inactive-account purge had no MySQL equivalent, and retiring `dataCleanupService` would have dropped it (3.3) |
+| `auth.js`'s auto-verify branch is "narrowed to accounts that predate the OTP flow" | **my own comment, package 3.2** | **Never implemented.** The branch applies to everyone. The narrowing was described in a comment and the code was not changed to match (AJ3) |
 
 Each was correct-looking, repeated, and load-bearing. That combination is the
 signature, and the countermeasure is cheap: **run it once.**
 
-**SIX NOW, and the signature is holding as a predictor.** That is worth knowing
+**SEVEN NOW, and the signature is holding as a predictor.** The seventh is the
+most instructive, because **it is one I wrote**: a comment asserting a narrowing
+that was never implemented. Every countermeasure in this section assumes the
+inherited claim came from somewhere else. This one shows the generator is the
+act of writing a confident sentence near code, not the age of the document. That is worth knowing
 with three packages left: it means the remaining inherited claims are more
 likely to be wrong than a base rate would suggest, and AJ3's severity pass
 should be read as an application of this rule rather than a separate exercise.
@@ -854,6 +859,256 @@ both were found, and is AD2's method applied to something other than ordering.
 
 **Applies to AJ3's severity pass**, which is the same rule aimed at one class of
 claim - a severity derived from a mechanism is an inherited guess at an outcome.
+
+---
+
+## ADMIN-01 - every admin user operation writes a store that authentication does not read
+
+**Severity HIGH. Provenance X** - found by AJ3's severity pass, while checking a
+bcrypt cost parameter. **LIVE ON `phase-2-data-layer` TODAY.** Not in production:
+the branch has never been deployed.
+
+**This is ADR-057's constraint, and package 3.2 had already violated it.** The
+constraint was derived at 3.3 from donations. It applies to `User` identically,
+and it was broken one package earlier without anyone noticing - which is the
+strongest argument for the ADR that could exist.
+
+`routes/admin.js` is entirely on the Mongoose `User` model (`admin.js:3`).
+`routes/auth.js`, `routes/users.js` and both middlewares are entirely on
+`repositories/users` (MySQL) as of package 3.2. They no longer share a store.
+
+**MEASURED, not reasoned about.** Run against the stack with an ETL-migrated
+account present in both stores with the same id:
+
+```
+PATCH /api/admin/users/:id/change-password  -> 200
+  says: {"message":"Password changed successfully", ...}
+  MongoDB hash changed : true
+  MySQL   hash changed : false          <- and MySQL is what login reads
+
+PATCH /api/admin/users/:id/toggle-status    -> 200
+  says: {"message":"User disabled successfully", ...}
+  MongoDB isActive = false
+  MySQL   isActive = true               <- and MySQL is what authMiddleware enforces
+```
+
+| Admin operation | What an admin is told | What actually happens |
+|---|---|---|
+| `PATCH /users/:id/toggle-status` (`:198`) | **"User disabled successfully"** | `isActive` is set in MongoDB. `authMiddleware` enforces the MySQL value. **The disabled account keeps authenticating.** SEC-05 reopened - not by forgetting to read the flag this time, but by writing it to the wrong database |
+| `PATCH /users/:id/change-password` (`:234`) | **"Password changed successfully"** | the hash is written to MongoDB. Login verifies against the MySQL hash. **The old password still works and the new one does not** |
+| `DELETE /users/:id` (`:270`) | user deleted | the MongoDB row goes. The MySQL account survives and keeps authenticating |
+| `PATCH /users/:id` - role (`:182`) | user updated | role is changed in MongoDB. `authMiddleware` takes the role from MySQL |
+| `POST /admin/users` (`:143`) | account created | a MongoDB row. **The account cannot log in** - already asserted by `auth-characterisation`'s AK3 test |
+| `GET /admin/users` (`:99`) | the user list | MongoDB rows. After the ETL these are stale copies |
+
+**THE CONDITION MATTERS, and checking it changed the finding.** The silent
+failures above need the account to exist in BOTH stores - which is every
+ETL-migrated account, i.e. **every real user after cutover**. An account created
+through the API since package 3.2 exists only in MySQL, and the same calls
+return a loud `404 "User not found"`:
+
+```
+SAME CALL for a MySQL-ONLY account (created after 3.2) -> 404
+  says: {"error":"User not found"}
+```
+
+So the endpoints are not uniformly broken - **they are loud for the accounts
+that do not matter yet and silent for the ones that will.** That is the worse
+half of the distribution, and it is the half a developer testing on a fresh
+database never sees.
+
+**The first four share one shape: an admin acts to REVOKE access, is told it
+succeeded, and access is not revoked.**
+
+**Why it was not caught.** Every one of these paths is untested: `admin.js` is
+package 3.5 and has no characterisation suite yet, which is exactly the coverage
+rule's point ("no route file is migrated until it has characterisation tests")
+seen from the other side - **a file that has not been migrated has no tests
+either, so a change in a DIFFERENT file can break it silently.** Package 3.2
+changed where users live; nothing was watching `admin.js` when it did.
+
+### What this does to the sequence
+
+**`admin.js`'s user operations must ship with 3.2's store change, not two
+packages later.** The options, and neither is mine to choose:
+
+1. **Fold `admin.js`'s user management into the 3.3/3.4 merge unit**, so nothing
+   reaches `main` with the split open. It grows the unit to three packages.
+2. **Migrate only `admin.js`'s user operations now**, leaving its donation and
+   category reads for 3.5. It splits a file across packages - the thing ADR-057
+   declined to do for `payment.js` - but the argument is stronger here, because
+   this split is already open and shipping rather than hypothetical.
+
+**What must NOT happen is 3.2 reaching production as it stands.** An admin
+console that reports success for every revocation it performs and performs none
+is worse than the finding it was migrated to fix.
+
+### It also answers a question the map had left open
+
+AK2's ordering constraints are about which package goes FIRST. ADR-057 added
+granularity - which packages MERGE together. **ADMIN-01 shows the two are the
+same question asked at different times**, and that the check is mechanical:
+*for each entity, list every file that WRITES it and every file that READS it;
+if those sets span package boundaries, those packages are one merge.* That check
+has never been run over the whole codebase. It should be, before 3.4.
+
+---
+
+## AJ3's severity pass - run at the end of 3.3, before 3.4
+
+**The rule being applied: severity comes from the OUTCOME, not the MECHANISM.**
+A severity derived from a mechanism is an inherited guess at an outcome, which
+makes this an application of the inherited-claim rule rather than a separate
+exercise - and with six inherited claims already fallen, the base rate says to
+expect hits.
+
+**Method: for each open finding, read the code and state what an attacker or a
+user actually gets.** Not what the category is called.
+
+**A pass that only moves things UP is inflation, not analysis.** One finding
+moved down, and that is recorded as prominently as the one that moved up.
+
+### MOVED: SEC-06 is HIGH, not Medium
+
+**Was:** "Unauthenticated donor PII via `GET /payment/status/:txnid`" - Medium,
+filed as information disclosure.
+
+**Outcome, read from the code:** `payment.js:612` has no authentication of any
+kind. It returns the WHOLE donation record, populated - donor name, email,
+phone, amount, and the payment details including `mihpayid` and `bank_ref_num`.
+The only thing standing between an anonymous request and a donor's personal data
+is knowing `txnid`.
+
+**And the application publishes `txnid` into the URL bar itself.** Every callback
+redirects to `FRONTEND_SUCCESS_URL?txnid=...` (`payment.js:247,304,391,471`). A
+value in a query string is in the browser history, in the `Referer` header sent
+to every third party the success page loads, and in any analytics or error
+reporter on that page. **The credential protecting donor PII is transmitted the
+one way a credential must never be transmitted.**
+
+Blind enumeration is NOT the exposure and saying so would overstate it:
+`TXN${Date.now()}${rand(1000)}` is roughly 10^11 candidates per day, which is not
+practically brute-forceable. The exposure is that the secret leaks by design.
+
+**High.** It is one band below SEC-03 - that is an authentication bypass, this is
+unauthenticated access to personal data - and a band above where "information
+disclosure" placed it.
+
+### MOVED DOWN: SEC-18 is Low, and its real finding is a different one
+
+**Was:** "bcrypt cost 10 (`admin.js:128,220`)" - Medium.
+
+**Outcome:** cost 10 versus 12 is a four-fold change in offline cracking cost,
+and it only matters at all GIVEN a database compromise. It is hardening, not a
+control that can be defeated. **Low.**
+
+**But reading it produced a better finding than the severity.** `admin.js:140`
+and `:232` call `bcrypt.hash(password, 10)` DIRECTLY - they do not go through
+`repositories/users`, which is where `BCRYPT_COST = 12` lives and where
+`create()` and `setPassword()` apply it. So:
+
+- There are **two password-hashing implementations** in this codebase, and only
+  one of them is governed by the policy.
+- `setPassword` also increments `token_version`, which is SEC-05's revocation
+  mechanism. An admin resetting a user's password through `admin.js` therefore
+  **does not revoke that user's existing sessions**, because it never calls the
+  function that would.
+
+**That second consequence is the finding.** It is not about a cost parameter; it
+is a security control silently skipped by the one code path most likely to be
+used after an account compromise. Recorded against `admin.js` (3.5), and it is
+more important than the number that led to it.
+
+### RESTATED: SEC-21 is not about `isVerified` being false
+
+**Was:** "`POST /admin/users` leaves `isVerified` false, then `auth.js` silently
+auto-verifies" - Low.
+
+**Outcome, checked by enumerating every read of the flag:** `isVerified` is read
+in **exactly one place in the entire codebase** - `auth.js:312`, the line that
+sets it to true. No route and no middleware gates anything on it.
+
+**So the flag is not a control.** An "unverified" account has precisely the
+capabilities of a verified one. That is SEC-05's shape exactly: a field that
+exists, is settable from the admin UI, and is never read - and SEC-05 was rated
+High on that basis.
+
+**It does NOT get High here, and the reason matters.** Self-service signup
+enforces verification STRUCTURALLY: no `User` row exists until the
+`PendingSignup` OTP is confirmed, so the flag being decorative does not open
+unverified self-registration. The exposure is limited to admin-created accounts
+and migrated legacy rows. **Medium**, restated as "the email-verification flag
+gates nothing", which is a different sentence from the one filed.
+
+**And it exposed a seventh inherited claim, which is mine.** Package 3.2's
+comment at that line said the branch had been "narrowed to accounts that predate
+the OTP flow rather than applying to everyone". It applies to everyone. **The
+narrowing was described and never implemented**, and the comment would have been
+inherited by the next reader as a statement of fact - which is exactly how the
+other six propagated. Corrected in place to describe what the code does.
+
+### PAY-01 - NEW: `quantity` is unbounded on the pricing path
+
+**Severity** Low. **Provenance X** - found during this pass, by reading the two
+adjacent lines rather than the finding list.
+
+```js
+const qty   = Math.max(1, parseInt(quantity, 10) || 1);              // no ceiling
+const extra = Math.max(0, Math.min(1_000_000, parseFloat(extraAmount) || 0));
+```
+
+**`extraAmount` is clamped and `quantity` is not, on consecutive lines.** That
+asymmetry is the tell: a bound was added to one input and not to its neighbour,
+and a reviewer skimming the pair concludes that amounts are bounded.
+
+Measured rather than reasoned about: `quantity="99999999999999999999"` gives
+`qty = 1e20` and a total of `1.5e+23`, on an endpoint with **no authentication**.
+
+| Store | What happens |
+|---|---|
+| MongoDB (today) | the amount is stored as a float and handed to PayU |
+| MySQL (after 3.4) | `toMinorUnits(1.5e23)` returns `null`, the repository refuses, the endpoint 500s |
+
+So the migration converts it from a bad stored value into an unauthenticated
+500. Neither is acceptable and the fix is one `Math.min`. **Assigned to 3.4**,
+with the bound stated as a constant next to `extraAmount`'s so the pair cannot
+drift apart again.
+
+### SEC-07's label hides that no credential is needed
+
+**Not re-graded** - Medium is right by outcome: an injected donation lands in a
+victim's history as `Pending`, and the attacker cannot read it back, because
+`GET /donations/:id` matches ownership and the donation is not theirs. It is
+integrity and nuisance, not disclosure or escalation.
+
+**But "Donation attribution forgery" does not convey that `/initiate` has no
+authentication at all.** `userId` is taken from `req.body` on an endpoint any
+anonymous caller can reach, so anyone on the internet can write rows into any
+identified user's donation history. The severity is right; the sentence
+undersells what is required to do it, which is nothing.
+
+### Checked and NOT moved
+
+Recorded so the pass is auditable rather than a list of the ones that changed.
+
+| ID | Label | Outcome, re-derived | Verdict |
+|---|---|---|---|
+| SEC-14 | Medium | Malformed hash throws rather than refusing. Fails CLOSED - the donation stays `Pending` - so it is a broken refusal, not a bypass | **Medium stands** |
+| SEC-11 | Medium | Unauthenticated writes allow row and email flooding. Email flooding can get the org's SMTP reputation blocked, which is an availability loss for every donor | **Medium stands** |
+| SEC-19 | Low | `err.message` to the client. Names the store, driver and column - reconnaissance, not access | **Low stands** |
+| SEC-08 | Medium | Account enumeration. Confirms an address is registered; no access | **Medium stands** |
+| BUG-03 | - | Dashboard tile reads 0 forever. Misinformation to one admin | **stands** |
+| BUG-04 | - | Purge never ran. A retention obligation unmet, and the reason the first real run is dangerous | **stands** |
+| BUG-08 | - | Unbounded page size on `admin.js`. Resource exhaustion behind adminAuth | **stands** |
+| DEPLOY-01 | Medium | Shared Redis throttles real users. Availability, very hard to diagnose | **Medium stands** |
+
+### What the pass says about the method
+
+Three of the four findings that moved were **not found by re-reading the
+severity column**. SEC-18's real finding came from asking why the cost was
+hard-coded, SEC-21's from enumerating reads of a flag, and PAY-01 from reading
+the line next to the one under review. **The severity label is where the
+mis-grading is recorded; it is almost never where the evidence is.**
 
 ---
 
@@ -1505,9 +1760,10 @@ The original table is kept below as the record of what the package was given.
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
 | SEC-08 | Medium | User enumeration (admin-side endpoints) | Generic responses | Test asserts identical responses for known and unknown | **R** |
-| SEC-18 | Medium | bcrypt cost 10 (`admin.js:128,220`) | `BCRYPT_COST = 12` via `repositories/users` | Test asserts the stored hash's cost parameter | **R** |
+| SEC-18 | **Low** (AJ3: was Medium) | bcrypt cost 10 (`admin.js:140,232`). **The real finding is that these call `bcrypt.hash` DIRECTLY instead of `repositories/users`** - two hashing implementations, one governed by policy | Route both through `users.create` / `users.setPassword` | Test asserts the cost AND that an admin password reset revokes sessions | **R**, re-derived **X** |
+| **ADMIN-01** | **High** | **EVERY admin user-management operation writes MongoDB, which authentication no longer reads.** See the dedicated section above - this is not a bcrypt finding and not a `tokenVersion` finding, it is a store split | Migrate `admin.js`'s user operations, or move them into the package that owns the entity | Test: each admin operation, then assert the effect through `/api/auth/login` | **X** (AJ3) |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
-| SEC-21 | Low | `POST /admin/users` leaves `isVerified` false, then `auth.js:242-245` silently auto-verifies (`admin.js:131-139` confirmed: no `isVerified` set) | Set `isVerified: true` explicitly; scope or remove the auto-verify branch (branch itself is 3.4) | Test: admin-created account is verified at creation, and the legacy branch does not fire | **R** |
+| SEC-21 | **Medium** (AJ3: was Low, and RESTATED) | **`isVerified` gates nothing.** It is read in exactly one place in the codebase - `auth.js:312`, the line that sets it true. SEC-05's shape. Not High only because self-service signup enforces verification structurally via `PendingSignup` | Decide whether the flag is a control. If it is, gate on it; if it is not, remove it rather than leave a field the admin UI can toggle to no effect | Test: an unverified account is refused, or the field is gone | **R**, re-derived **X** |
 | BUG-03 | - | Dashboard "approved" counter always 0 - `countDocuments({status:"approved"})` at `admin.js:20` | Canonical casing; follows BUG-02 | Test: seed an `Approved` donation, expect the tile to count it | **R** |
 | BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` (`Backend/vercel.json:15-20`) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
 | BUG-08 | - | Unbounded pagination (`admin.js:80`) | As 3.1 | As 3.1 | **R** |
@@ -1533,9 +1789,10 @@ The original table is kept below as the record of what the package was given.
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
 | **SEC-14** | Medium | **Still live.** Malformed hash throws `RangeError` - char-length guard, byte-length decode (`payment.js:51-52`) | Validate `/^[0-9a-f]{128}$/i` before decoding | Extend `payment-callbacks.test.js:355` to assert the response status, not only the donation state | **R**, re-opened by **X** |
-| SEC-06 | Medium | Unauthenticated donor PII via `GET /payment/status/:txnid` - confirmed: no auth middleware at `payment.js:601` | Authenticate; random transaction ids | Test: unauthenticated request returns no PII | **R** |
+| SEC-06 | **High** (AJ3: was Medium) | Unauthenticated donor PII via `GET /payment/status/:txnid`, and the `txnid` protecting it is published into the URL bar by the app's own redirects - confirmed: no auth middleware at `payment.js:601` | Authenticate; random transaction ids | Test: unauthenticated request returns no PII | **R** |
 | SEC-07 | Medium | Donation attribution forgery - `userId` is destructured from `req.body` at `payment.js:99` and written at `:134` | Take the user from the token, never the body | Test: post a forged `userId`, assert it is ignored | **R** |
 | SEC-11 | Medium | Unauthenticated write endpoints allow storage/email flooding | `paymentInitiateLimiter` (built in Phase 2, unwired); stale-`Pending` sweep | Test the limiter fires; scheduler test for the sweep | **R** |
+| **PAY-01** | Low | **`quantity` is unbounded while `extraAmount` is clamped, on consecutive lines** (`payment.js:136-137`). `quantity="99999999999999999999"` prices a donation at 1.5e23, unauthenticated. After 3.4 it becomes an unauthenticated 500 instead | One `Math.min`, with the ceiling a named constant beside `extraAmount`'s so the pair cannot drift again | Test both bounds together | **X** (AJ3) |
 | SEC-19 | Low | `details: error.message` at `payment.js:443,475` | Generic message | Characterisation test | **R** |
 | ADR-012 / ADR-026 | - | SEC-01 idempotency is a non-atomic read-then-write. **ADR-026 supersedes ADR-012's conclusion**: the `mihpayid` UNIQUE index is integrity, NOT the replay defence | Wrap the callback in `withTransaction` (SPEC-3 §4.3) | Concurrent-callback test | **R** |
 | ADR-024 §3 / ADR-026 / ADR-027 | - | No security decision may rest on an unsigned field; unsigned text must be escaped per sink | Keep the `verifyHash` banner; escape at each sink, not at ingest | Test asserts `unmappedstatus` cannot drive the decision | **R** |
