@@ -28,6 +28,7 @@
     "test:auth-char": "node --test test/auth-characterisation.test.js",
     "test:etl": "node --test test/etl.test.js",
     "test:migration-state": "node --test test/migration-state.test.js",
+    "test:admin": "node --test test/admin-characterisation.test.js",
     "etl": "node etl/cli.js",
     "etl:preflight": "node etl/cli.js --preflight-only",
     "test:payment": "node --test test/payment-callbacks.test.js",
