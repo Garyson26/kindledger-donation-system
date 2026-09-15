@@ -985,6 +985,45 @@ The first was found by running the ETL and watching a flag apply to nothing. The
 second by running the pre-flight and watching a load refuse to perform its own
 remedy. Neither was found by reading.
 
+### THE THIRD INSTANCE, AND IT HAPPENED INSIDE THE COMMIT THAT RECORDED THE PATTERN (AU3)
+
+| The rule | The fix | What the fix turned out to be |
+|---|---|---|
+| AT1: a purge must not go live as a side effect | gate each destructive job on its own authorisation | **the gates sat AFTER the candidate count**, which short-circuits on zero - so the gate was unreachable exactly when the job had nothing to do |
+
+**Three instances now, and this one was written in the same commit that recorded
+the first two.** Knowing the pattern, naming it, and putting it in the map did
+not prevent me from producing it again forty minutes later.
+
+That is the strongest available evidence that **this is not an attention
+failure**. It is structural: the fix is authored by someone holding the rule in
+mind, so it reads as compliant to the only two people who will ever check it -
+the author and a reviewer applying the same rule.
+
+### The family resemblance: A CONTROL VALIDATED ONLY ON THE CASES IT WAS NEVER NEEDED FOR
+
+This instance has a sibling that is not a fix at all, and the shape is worth
+naming because it recurs:
+
+| | The control | Worked correctly on | Was absent exactly where it mattered |
+|---|---|---|---|
+| **ADR-048** | rate-limit keying | **every IPv4 client** - counted, throttled, metrics healthy | IPv6 clients, who hold ~2^64 addresses each and had an unlimited budget |
+| **AT1 (this)** | the destructive-job gates | **every run with nothing to delete** - refused nothing, deleted nothing, logs clean | the first run with a qualifying row, which is the only run that can do harm |
+
+> **A control validated only on the cases where nothing was at stake.**
+
+In both, the control is CORRECT on the subset it is exercised against, and that
+subset is precisely the one where its correctness is worthless. Observation makes
+it worse rather than better: the IPv6 gap looked like a healthy limiter, and the
+gate gap looked like months of clean scheduler logs. **The evidence of working
+and the evidence of not working are the same evidence**, which is why neither
+review nor monitoring finds them.
+
+The countermeasure is the same in both cases and it is not vigilance: construct
+the case where it matters, and run it. ADR-048's IPv6 finding came from a
+library warning firing during a test run; AT1's came from a test asserting a
+rejection that did not arrive.
+
 ### The consequence: THE INJECTION-PROOF STANDARD APPLIES TO FIXES, NOT ONLY GATES
 
 This project already proves gates by injection - break the thing, watch the gate
@@ -2255,6 +2294,73 @@ in the previous package**, which is where the seventh came from.
 Running something and reading the result: a test, a query, a request against the
 stack, a grep that enumerates call sites. **Re-reading the document is not
 verification** - it is how the claim propagated in the first place.
+
+### THE CITATION RULE (AU2) - listing is not catching
+
+**AR6 as first written was not enough, and the evidence is its own output: I
+listed three inherited claims for package AT1-AT5 and two of them were wrong.**
+Listing a claim after acting on it records the failure; it does not prevent it.
+
+The signature AT5 identified is the fix. The highest-risk claims are the ones
+**written IN PASSING TO CLOSE A FINDING, inside a commit about something
+larger.** Nobody re-reads them - including the author, who knows what they meant
+and therefore reads the sentence as a description of their own intention rather
+than as an assertion about the system.
+
+> **Any sentence in a commit message, a code comment or an ADR that asserts a
+> finding is CLOSED, NARROWED, or NOT APPLICABLE must cite the behaviour that
+> establishes it: a test name, a probe output, or a file:line reference.**
+>
+> **A closure claim with no citation is flagged UNVERIFIED. It is not listed as
+> verified, and it is not listed as a claim at all - it is listed as a gap.**
+
+The asymmetry matters. "I checked" is a claim about the author. "`test:admin`
+case 12 asserts it" is a claim about the repository, and anyone can falsify it
+in one command.
+
+#### The two that were wrong, worked through
+
+**CLAIM: "3.5's findings are all closed by AS7."**
+
+*Asserted in:* the AS7 commit message, as a list - BUG-03, BUG-08, SEC-18,
+SEC-18b, SEC-19, SEC-21 and SEC-10 closed; SEC-08 not applicable; BUG-04's cron
+the only remainder.
+
+*What was true:* everything in that list was correct. **U-2 was not in the
+list.** It had been parked against 3.5 as a design-only item, and collapsing the
+package orphaned it - the U-2-through-U-6 pattern recurring on U-2 itself.
+
+*The citation that would have caught it:* the claim is about a SET, so its
+citation has to be the enumeration that produced the set - `grep -n "3\.5"
+docs/remediation-map.md`, run and its output read. I ran exactly that grep one
+package later, under AL3, and it found the orphan immediately. **The claim was
+made from memory of what I had just migrated, not from the document that owns
+the assignments.**
+
+**CLAIM: "the gates are checked before deletion."**
+
+*Asserted in:* `config/destructiveJobs.js`'s header and `services/scheduler.js`'s
+comments, while building AT1.
+
+*What was true:* both gates sat AFTER the candidate count, which short-circuits
+on zero. So a job with nothing to delete never reached either gate, and an
+unauthorised job would look correct until the day a row first qualified.
+
+*The citation that would have caught it:* a test NAME. "Checked before deletion"
+is a claim about control flow under a specific condition - zero candidates - and
+naming the test that covers that condition forces the question "does one exist?".
+It did not. The test I later wrote failed with `Missing expected rejection`,
+which is precisely the state the citation rule asks you to discover before
+writing the sentence rather than after.
+
+#### What this does NOT require
+
+It does not require a test for every claim. It requires that a claim with no
+citation be **labelled as such**. An honest "UNVERIFIED: I believe this closes
+SEC-19 but nothing asserts it" is a useful entry. A confident "SEC-19 closed" is
+not, and is worse than silence, because the next reader inherits it.
+
+---
 
 ### The register
 
