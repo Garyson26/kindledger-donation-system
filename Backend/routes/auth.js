@@ -15,6 +15,98 @@ const generateVerificationCode = () => {
   return crypto.randomInt(100000, 1000000).toString();
 };
 
+// =============================================================================
+// SEC-03 HOTFIX - unauthenticated authentication bypass
+// =============================================================================
+// DELETE THIS BLOCK AT THE PHASE 3 CUTOVER. It patches one instance of a class
+// that parameterised SQL closes entirely: once this file talks to MySQL through
+// repositories/users, a JSON object cannot become a query operator because it
+// is never interpolated into a query. Package 3.2 replaces this file wholesale
+// and this guard goes with it.
+//
+// WHAT IT FIXES, precisely, because "NoSQL operator injection" understates it:
+//
+//   POST /api/auth/login  {"email": {"$ne": null}, "password": "<any password
+//   that any user has>"}
+//
+// `User.findOne({ email })` with an OPERATOR object matches the first user in
+// the collection. `bcrypt.compare` then runs against THAT user's hash, and if
+// the supplied password happens to be theirs, execution continues past the
+// credential check into OTP generation (auth.js:248-258). The attacker is
+// authenticated as an account whose address they never knew.
+//
+// It reads as a refusal in any environment without SMTP, because the send fails
+// and returns 500 - which is exactly how this was first mistaken for "the
+// operator reaches the query" rather than "authentication does not hold".
+//
+// THE ENUMERATION (AN1). Every user-supplied value in this file that reaches a
+// query operator position:
+//
+//   email   11 sites: User.findOne({ email }) x7, PendingSignup.findOne({
+//           email }) x4. THE ONLY ONE.
+//
+// Checked and NOT in operator position, so stated rather than assumed:
+//   otp, code          compared with `!==` against a stored string. An object
+//                      is never equal to a string, so they already fail closed.
+//   password,          passed to bcrypt.compare / written to a document.
+//   newPassword,       Never interpolated into a query.
+//   oldPassword
+//   name, role,        compared with `===` against a literal, or written to a
+//   adminKey           document. `adminKey === process.env....` cannot be
+//                      satisfied by an object.
+//
+// The guard below is nevertheless applied to EVERY body value, not just email.
+// No endpoint in this file legitimately accepts an object or an array for any
+// field, so rejecting them outright costs nothing and does not depend on the
+// enumeration above staying correct as handlers change.
+//
+// REJECTED, NOT COERCED. `String({$ne:null})` is "[object Object]", which would
+// turn an attack into a lookup for a nonexistent user and quietly succeed at
+// looking like a normal failure. An object arriving here is an attack, not a
+// client bug, and it should be refused as one.
+// =============================================================================
+const CREDENTIAL_PATHS = new Set(['/login', '/login/verify-otp']);
+
+function rejectNonScalarBody(req, res, next) {
+  const body = req.body;
+  if (!body || typeof body !== 'object') return next();
+
+  for (const [key, value] of Object.entries(body)) {
+    if (value === null || value === undefined) continue;
+    const bad = typeof value === 'object'; // covers arrays too
+    if (!bad) continue;
+
+    console.warn(
+      `[SEC-03] Rejected non-scalar '${key}' on ${req.method} ${req.path} ` +
+        `from ${req.ip}. This is an injection attempt, not a malformed client.`
+    );
+
+    // On the credential endpoints the refusal is INDISTINGUISHABLE from a wrong
+    // password. SEC-08 is already closed on /login - unknown address and bad
+    // password both answer this exact string - and a distinctive message here
+    // would reopen it for anyone probing with an operator.
+    return res.status(400).json({
+      error: CREDENTIAL_PATHS.has(req.path) ? 'Invalid credentials' : 'Invalid request',
+    });
+  }
+
+  // `email` must additionally be a STRING. Everything above rejects objects;
+  // this rejects a number or a boolean reaching a field the schema and every
+  // lookup treat as text.
+  if (body.email !== undefined && body.email !== null && typeof body.email !== 'string') {
+    console.warn(`[SEC-03] Rejected non-string email on ${req.method} ${req.path} from ${req.ip}.`);
+    return res.status(400).json({
+      error: CREDENTIAL_PATHS.has(req.path) ? 'Invalid credentials' : 'Invalid request',
+    });
+  }
+
+  return next();
+}
+
+// Applied to EVERY route in this file, including any added later. A guard that
+// has to be remembered per handler is a guard that will be forgotten.
+router.use(rejectNonScalarBody);
+
 // Rate limiter for auth endpoints (BE-HIGH-03)
 const authLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
