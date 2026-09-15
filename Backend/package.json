@@ -33,6 +33,7 @@
     "etl": "node etl/cli.js",
     "etl:preflight": "node etl/cli.js --preflight-only",
     "test:payment": "node --test test/payment-callbacks.test.js",
+    "test:payment-char": "node --test test/payment-characterisation.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
     "test:charset": "node db/check-charset.js"
   },

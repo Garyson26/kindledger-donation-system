@@ -394,3 +394,73 @@ test('SCHEDULER_ENABLED cannot turn the gate off', async () => {
     else process.env.SCHEDULER_ENABLED = previous;
   }
 });
+
+// =============================================================================
+// PAY-02: which Mongoose models does the APP actually register at boot?
+// =============================================================================
+
+test('the set of Mongoose models registered at boot is DECLARED, not incidental', async () => {
+  // THE GATE THAT WOULD HAVE CAUGHT PAY-02.
+  //
+  // Package AS7 removed `const User = require("../models/User")` from
+  // routes/admin.js as a dead import - the binding genuinely was unused, and
+  // AT4's own check is what flagged it. But `require()` DOES WORK: it registers
+  // the schema with Mongoose's global model registry, and that registration was
+  // the only one in the process. Removing it broke
+  // `GET /api/payment/status/:txnid`, which calls `.populate('userId', ...)`
+  // and now threw `Schema hasn't been registered for model "User"` on every
+  // request - a 500 on the donor-facing receipt lookup.
+  //
+  // AN UNUSED BINDING IS NOT AN UNUSED IMPORT. No reference-level analysis can
+  // see a side effect on a global registry; only asking the booted process can.
+  //
+  // Asserted as an EXACT SET rather than a minimum, so both directions are
+  // caught: a model silently dropped (PAY-02) and a model silently reintroduced
+  // (a route quietly reaching back to Mongoose).
+  //
+  // Run in a CHILD PROCESS with a deliberately unreachable MONGODB_URI, because
+  // registration happens at require() time and does not need a connection -
+  // which keeps this suite free of a database dependency it otherwise lacks.
+  const { execFileSync } = require('node:child_process');
+  const script = `
+    const mongoose = require('mongoose');
+    require(${JSON.stringify(path.join(BACKEND, 'app.js'))});
+    process.stdout.write(JSON.stringify(mongoose.modelNames().sort()));
+    process.exit(0);
+  `;
+
+  const out = execFileSync(process.execPath, ['-e', script], {
+    cwd: BACKEND,
+    encoding: 'utf8',
+    timeout: 30000,
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      VERCEL: '1',
+      MONGODB_URI: 'mongodb://127.0.0.1:1/unreachable-on-purpose',
+      JWT_SECRET: 'test-only-jwt-secret-at-least-32-chars-long',
+      ADMIN_CREATION_KEY: 'test-admin-key',
+      SCHEDULER_ENABLED: 'false',
+    },
+  });
+
+  const registered = JSON.parse(out.trim().slice(out.trim().lastIndexOf('[')));
+
+  // WHAT EACH ONE IS DOING THERE. A model on this list with no reason is a
+  // coupling nobody chose.
+  const expected = {
+    Donation: 'routes/payment.js - the live donation writer, until package 3.4',
+  };
+
+  assert.deepEqual(
+    registered,
+    Object.keys(expected).sort(),
+    'The models registered at boot changed.\n' +
+      `  registered: ${registered.join(', ') || '(none)'}\n` +
+      `  expected:   ${Object.keys(expected).sort().join(', ') || '(none)'}\n\n` +
+      'If one DISAPPEARED, something that looked like a dead import was ' +
+      'registering it - that is PAY-02, and something using .populate() is now ' +
+      'throwing. If one APPEARED, a file reached back to Mongoose. Update this ' +
+      'list WITH THE REASON, or undo the change.'
+  );
+});

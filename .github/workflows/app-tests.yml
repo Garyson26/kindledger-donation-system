@@ -179,6 +179,12 @@ jobs:
         working-directory: Backend
         run: npm run test:etl
 
+      - name: Payment characterisation (/initiate and /status - SPEC-3 package 3.4)
+        working-directory: Backend
+        env:
+          TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_paychar_ci
+        run: npm run test:payment-char
+
       - name: Admin characterisation (AS7)
         working-directory: Backend
         env:

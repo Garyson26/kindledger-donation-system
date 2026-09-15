@@ -886,6 +886,80 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## PAY-02 - AS7 broke the donor receipt lookup by deleting a DEAD IMPORT
+
+**Severity** High, availability. **Provenance X** - found by extending the
+payment baseline BEFORE touching `payment.js`, which is the order AU1 required.
+**Live on `phase-2-data-layer`; never reaches production, because 3.3 and 3.4
+are one merge unit and 3.4 repairs it.**
+
+`GET /api/payment/status/:txnid` calls `.populate('userId', 'name email')`.
+Mongoose resolves that through a GLOBAL MODEL REGISTRY, and the only thing
+registering `User` in the running process was `const User = require("../models/User")`
+at `routes/admin.js:3`.
+
+**AS7 deleted that line as a dead import - correctly, by AT4's own gate.** The
+binding genuinely was unused; package 3.1 had replaced every USE with the bridge.
+
+Measured:
+
+```
+models registered at boot: Donation
+User registered? false
+
+GET /api/payment/status/TXN... -> 500
+{"error":"Failed to check payment status",
+ "details":"Schema hasn't been registered for model \"User\"."}
+```
+
+The frontend calls it at `Frontend/src/utils/api.js:272` - it is the receipt
+lookup a donor hits after paying.
+
+### AN UNUSED BINDING IS NOT AN UNUSED IMPORT
+
+`require()` does work. In a module system with side effects, an import can be
+load-bearing through a registry that **no reference-level analysis can see** -
+and AT4's check is exactly a reference-level analysis. It was right that
+`admin.js` must not import a migrated model. The REMEDY had a consequence the
+check does not model.
+
+This is the inverse of AT4's own lesson. AT4 said an audit organised around
+USAGE cannot see declarations that are never used. PAY-02 says some of those
+declarations **are not unused at all** - they are used by something that is not
+a reference.
+
+### The gate
+
+`test/migration-state.test.js` now asserts **the exact set of Mongoose models
+the app registers at boot**, each with a reason for being there. Exact rather
+than minimum, so it catches both directions:
+
+- a model silently DROPPED - PAY-02, and something using `.populate()` starts
+  throwing
+- a model silently REINTRODUCED - a route reaching back to Mongoose
+
+It runs in a child process with a deliberately unreachable `MONGODB_URI`, since
+registration happens at `require()` time and needs no connection.
+
+**Proved by injection.** Re-adding a `models/User` import to a boot-loaded file
+fails BOTH gates - the AT4 import check and this one - and they are not
+redundant: the import check sees an import being ADDED, and cannot see the last
+registration being REMOVED, which is the direction that broke this.
+
+### SEC-06 is currently MASKED by it, which is not the same as fixed
+
+The status endpoint returns the whole donation - name, email, phone, amount - to
+a caller with no credential. Right now it cannot, because it 500s first.
+
+**The map has recorded this exact shape before.** SEC-03 was "currently
+unreachable ONLY because MongoDB rejects the application's credentials - an
+availability failure standing in for an access control". It was not a defence
+then and it is not one now: repair the registration and the disclosure is live
+again. The characterisation suite therefore asserts the MECHANISM is still
+present without depending on the broken path.
+
+---
+
 ## AT1 - destructive jobs need AUTHORISATION, separate from migration state
 
 **`config/destructiveJobs.js`.** A job runs only when its own gate is on AND
