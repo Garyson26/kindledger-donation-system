@@ -886,6 +886,115 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## AW2 - the destructive-assertion audit. One finding, and it is not a test.
+
+**AW1's question, applied to every assertion in 259 tests that something is
+cleared, voided, disabled, locked, deleted or revoked at a threshold or on a
+failure count:**
+
+> What does an attacker gain by reaching that threshold ON SOMEONE ELSE'S
+> BEHALF?
+
+**The absences are evidence, so every one is listed - including the "nothing"s.**
+
+### The matrix
+
+| Assertion | Threshold | What an attacker gains by triggering it on a third party |
+|---|---|---|
+| `setActive(false)` increments `token_version` (`data-layer:225`) | an admin disables an account | **Nothing.** Only an admin reaches it |
+| admin password change revokes sessions (`admin-char:604`) | an admin sets a password | **Nothing.** Only an admin reaches it |
+| `setPassword` increments `token_version` (`data-layer:182`) | the password changes | **Nothing.** Requires already controlling the account or a valid reset code |
+| the reset code is CONSUMED on success (`auth-reset:281`) | a CORRECT code is used | **Nothing.** Requires the code, at which point they have won already |
+| the attempt counter is NOT cleared at `/verify` (`auth-reset:294`, ADR-034) | — | **Nothing** - it asserts a non-clearing, which is the safe direction |
+| the attempt counter IS carried by the ETL (`etl:216`) | migration | **Nothing.** Carrying it is the conservative choice; resetting would hand an in-progress attacker a fresh budget |
+| expired pending signups are swept (`data-layer:710`) | 24 hours | **Nothing.** The rows expire by design and hold only unverified attempts |
+| the retention purge deletes donations (`data-layer:826`) | ten years + AT1's gates | **Nothing.** Unreachable without an operator's explicit authorisation |
+| DELETE archives a category rather than removing it (`categories:810`) | an admin deletes | **Nothing.** Only an admin reaches it, and ADR-004 made it a soft delete |
+| the reset code SURVIVES the cap (`auth-reset:263`) | 5 wrong codes | **Nothing - this is the one AV1 FIXED.** It previously read `hasResetCode === false` and was the finding AW1 records |
+| **`signupOtpAttempts` is reset to 0 by `upsert`** (`data-layer:246`) | **a second `/signup` for the same address** | **SEE SIGNUP-01 BELOW** |
+
+### Ten of eleven are "nothing", and the reason is structural
+
+**Every safe one has the same property: the threshold is reachable only by
+someone who already holds the authority the destruction represents** - an admin,
+or the holder of a valid code, or the passage of time. The unsafe one is the
+only case where an ANONYMOUS third party can reach the threshold.
+
+That is a sharper form of AW1's question, and it is worth stating as the rule
+this audit actually found:
+
+> **A destructive threshold is safe when reaching it requires authority the
+> destruction itself presupposes. It is dangerous when an unauthenticated party
+> can reach it on someone else's behalf.**
+
+### SIGNUP-01 - PRE-REGISTRATION ACCOUNT TAKEOVER
+
+**Severity: High. Provenance X - proved by probe, output below. NOT introduced by
+package 3.5a; found by auditing in its neighbourhood.**
+
+`POST /api/auth/signup` is unauthenticated and accepts any address. For an
+address with NO account it stores a pending signup containing **the name, the
+role and the PASSWORD HASH the caller supplied** - and emails that address a
+code saying *"Thank you for joining For Ocean Foundation! To complete your
+registration, please verify your email address with this code."*
+
+**If the recipient enters that code, an account is created with the ATTACKER'S
+PASSWORD, and the attacker can sign in as them.**
+
+Measured, end to end:
+
+```
+--- 1. ATTACKER initiates a signup for the victim address ---
+  status: 200 {"message":"Registration initiated. Please check your email..."}
+  pending row created: true
+  name stored: Totally The Victim
+  password hash is the ATTACKER-chosen one: true
+
+--- 2. Can an attacker RESET the OTP attempt counter by re-posting? ---
+  attempts before re-post: 4 -> after: 0
+
+--- 3. If the victim verifies, WHOSE password does the account have? ---
+  verify status: 200
+  account created: true
+  ATTACKER PASSWORD WORKS ON IT: true
+```
+
+**Three separate problems, and the third is the one that matters:**
+
+1. **An attacker can destroy a legitimate in-flight signup.** `upsert` replaces
+   the whole row, so re-posting the address invalidates the OTP already sitting
+   in the victim's inbox. Repeatable.
+2. **`signupOtpAttempts` resets to 0 on every re-post.** It does not help brute
+   force - each re-post also changes the code - but a counter that any
+   anonymous caller can reset is not a counter.
+3. **THE ACCOUNT IS CREATED WITH THE ATTACKER'S PASSWORD.** The victim believes
+   the account is theirs. Everything they subsequently do - donations, profile,
+   receipts - is visible to whoever chose that password.
+
+**The email is the whole attack surface**, and it currently reads as a
+legitimate welcome. It thanks the recipient for joining something they did not
+join, and asks for an action. Contrast 3.5a's new notice, which was written for
+a recipient who did not initiate the request and says *"you do not need to do
+anything"* and *"we will never ask you for your password or a verification code
+by email."* **The template written for the untrusted case is careful; the one
+that has always existed is not.**
+
+### Recommended, NOT implemented - this is an audit and the fixes are decisions
+
+1. **Warn in the signup OTP email.** "If you did not request this, ignore this
+   email and do not enter the code." One template edit, in the file 3.5a owns,
+   no downside. It is the single highest-value change.
+2. **Do not reset `signupOtpAttempts` when a pending row already exists.** A
+   small repository change; keeps the counter meaningful.
+3. **Consider rate-limiting `/signup` per ADDRESS**, as AV1 did for resets - it
+   bounds problems 1 and 2 without touching the flow.
+
+Not done here because AW2 was commissioned as an audit and because the email
+wording is a product decision. **Recorded with its evidence so it cannot be
+inherited as "probably fine".**
+
+---
+
 ## Package 3.5a - SEC-08's LAST ORACLE CLOSED
 
 `config/email.js` gains one template and `/signup` uses it. AQ2's audit said it
