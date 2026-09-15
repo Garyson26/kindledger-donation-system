@@ -107,6 +107,9 @@ services:
       PORT: 5000
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # DEPLOY-01: namespaces the rate-limit counters. Change it if two
+      # deployments share one Redis, or they throttle each other.
+      RATE_LIMIT_PREFIX: ${RATE_LIMIT_PREFIX:-kl:rl:}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       ADMIN_CREATION_KEY: ${ADMIN_CREATION_KEY:?set ADMIN_CREATION_KEY in .env}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}

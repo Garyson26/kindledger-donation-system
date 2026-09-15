@@ -990,10 +990,28 @@ would be precisely the silent behaviour change section 4.1 exists to prevent.
 The residual oracle is ASSERTED in `auth-characterisation.test.js` so that the
 day it is closed, that test fails and someone updates it deliberately.
 
-**The fix that satisfies both** is a per-ADDRESS attempt counter that applies to
-addresses with no account too, so an unknown address also exhausts and also
-answers 429. That is new mechanism rather than a tweak, and it needs a decision
-about where the counter lives. **Not assigned.**
+**FUNDED AND ASSIGNED TO PACKAGE 3.4 (AQ1).** Accepting the residual would leave
+SEC-08 half-closed indefinitely, and a 429 that confirms an account exists is a
+real enumeration primitive on a public donation platform.
+
+Requirements, all three:
+
+1. **The counter covers addresses with NO account**, so the cap response is
+   identical either way. That is the whole point; a counter that only exists for
+   real accounts reproduces the oracle.
+2. **Cap the RESPONSE, not the ACCOUNT.** An attacker must not be able to lock a
+   real user out by exhausting their reset attempts - the counter throttles what
+   the endpoint will say, it does not disable anything. This is the requirement
+   that makes the feature safe to add at all: a per-address counter is otherwise
+   a denial-of-service primitive handed to anyone who knows an address.
+3. **Assert the full body identical at the cap** (AP1), for an address with an
+   account and one without.
+
+**WHEN IT LANDS, THE SEC-02 SCENARIO ASSERTING 429 CHANGES.** That is the
+deliberate edit SPEC-3 section 4.1 asks for, not a breach of it: state it as a
+behaviour change with the reason, in the commit and in this map. The rule is
+against editing a scenario QUIETLY to make a package go green - not against
+changing behaviour on purpose and saying so.
 
 ---
 
@@ -1006,14 +1024,26 @@ address" notice.
 
 **Trigger: the package that migrates `Backend/config/email.js`.**
 
-**AND THAT IS A GAP IN THE PLAN, which is worth saying plainly.** Checked
-against the sequence: `config/email.js` is not owned by any Phase 3 package -
-3.3 is donations, 3.4 payment, 3.5 admin, 3.6 Mongoose removal - and Phase 5 is
-scoped to the frontend and dependencies. **No package owns the email templates.**
+**IT WAS A GAP IN THE PLAN, AND IT NOW HAS A PACKAGE (AQ2).** `config/email.js`
+was owned by no Phase 3 package and Phase 5 is scoped to the frontend and
+dependencies, so the deferral had no owner - which is exactly how U-2 through
+U-6 happened.
 
-That is exactly how U-2 through U-6 happened: a defensible deferral with no
-owner. Recorded here as an unassigned item needing a decision, not as a
-deferral that has been dealt with.
+**Assigned to package 3.5a**, before `admin.js`.
+
+**THE AUDIT (AQ2): it is one template.** Everything assigned to
+`config/email.js`, checked against the review and the ADRs:
+
+| Candidate | Verdict |
+|---|---|
+| SEC-08 on `/signup` | **IN SCOPE.** Needs a "someone tried to register with your address" template so the endpoint can answer identically whether or not the account exists |
+| ADR-027, escape per sink - "an email template is not React" | **ALREADY DONE.** `config/email.js:4` defines `escapeHtml` and applies it to `userName`; the codes it interpolates are server-generated six digits, not attacker-controlled. Remains a STANDING CONSTRAINT on any field added later, not work |
+| LOW-06, `module.exports` ordering | Already fixed - appendix A of the review |
+| SEC-11, "email flooding" | Not this file. It is about unauthenticated endpoints accepting unlimited writes, and it belongs with the limiter |
+
+So 3.5a is one template and the `/signup` handler change that uses it. Kept
+small deliberately: the reason to name the package was to give the finding an
+owner, not to invent a body of work for it.
 
 ---
 
@@ -1031,6 +1061,46 @@ The common shape: **infrastructure made correct produces a symptom that reads as
 a broken test.** The natural response makes the test quiet rather than making
 the system right. In all three the honest read was available immediately from
 asking what the symptom would mean if the code were correct.
+
+---
+
+## DEPLOY-01 - two deployments sharing one Redis throttle each other (AQ4)
+
+**Severity** Medium, operational. **Provenance X** - found when the SEC-02 suite
+began failing with `429` on its FIRST request after SEC-04 was wired.
+**Owning package: closed by `RATE_LIMIT_PREFIX`; the documentation half lands
+with the self-hosting docs.**
+
+Wiring the Redis-backed limiter (SEC-04) changed the store from per-process to
+**shared and persistent**. That is exactly what the finding asked for, and it
+introduces a failure mode the MemoryStore could not have:
+
+**Two deployments pointed at one Redis share rate-limit buckets.** A staging
+instance and a production instance, or a blue/green pair, count each other's
+requests against the same 5-per-minute budget. Real users get `429`s caused by
+traffic they never generated.
+
+**IT IS VERY HARD TO DIAGNOSE, and that is the substance of the finding.** Each
+side sees a limiter behaving perfectly correctly: the counter increments, the
+window rolls, the 429s are issued exactly as configured. Nothing is broken
+anywhere. The only way to see it is to notice that the counts do not match the
+traffic on either host - which requires already suspecting the answer.
+
+**An NGO self-hosting this is a plausible victim.** Standing up a staging
+instance by copying the production `.env` and changing the database URL is an
+ordinary thing to do, and `REDIS_URL` is exactly the line someone would forget
+to change. The reward for the mistake is intermittent 429s on the donation and
+login paths under load, which reads as a capacity problem.
+
+**Closed by `RATE_LIMIT_PREFIX`**, which namespaces the keys. Documented in
+`.env.example` next to `REDIS_URL`, because that is where the person about to
+make the mistake is looking.
+
+Recorded rather than fixed-and-forgotten because it belongs to the class in AP4:
+**infrastructure made correct producing a symptom that points somewhere else.**
+It first appeared as a flaky test, and the natural response - a retry, or marking
+the suite unreliable - would have left the deployment hazard in place with no
+trace that anyone had seen it.
 
 ---
 
@@ -1096,7 +1166,8 @@ specific.
 | **3.1r** | Categories data migrated locally; route re-verified; AK3 fixture added | 4a exists |
 | **3.2** | `auth.js` + `users.js` + `middleware/` - completing what is already built | users data migrated |
 | **3.3** | `donations.js` + retire `dataCleanupService` | donations data migrated; users migrated (FK) |
-| **3.4** | `payment.js` | donations data migrated |
+| **3.4** | `payment.js` + **the per-address attempt counter** (AQ1) | donations data migrated |
+| **3.5a** | **`config/email.js`** (AQ2) | none - it was unowned |
 | **3.5** | `admin.js` - last reader of every bridged entity | all bridged entities migrated |
 | **3.6** | Mongoose removal | no file imports Mongoose; `fallbackCount()` zero (AE3) |
 | **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
@@ -1122,12 +1193,15 @@ its data has moved, or when a bridge exists.
 
 | Pkg | File(s) | Introduces | Retires |
 |---|---|---|---|
-| 3.1 | `categories.js` **(done)** | `Category` bridge | - |
-| **3.2** | `auth.js` + `users.js` + `middleware/` **(swapped, ADR-055)** | `User` bridge | - |
-| **3.3** | `donations.js`, and retire `dataCleanupService` **(swapped)** | `Donation` bridge | `dataCleanupService`; `PendingSignup`'s second reader; stop minting `legacy_id` (AE1b) |
-| **3.4** | `payment.js` | - | - |
-| **3.5** | `admin.js` | - | **all three bridges deleted** |
-| **3.6** | Mongoose removal | - | minted `legacy_id`s, then MongoDB |
+**THE SEQUENCE TABLE THAT WAS HERE IS DELETED (AQ3/AL3).** It was the second
+statement of the package order in this document, and two statements of one order
+is precisely how the map came to contradict itself. **The sequence is stated
+ONCE, under "Revised sequence" above.** What remains below is the read-dependency
+REASONING, which is still correct as the third ordering constraint.
+
+The bridges each die when the last reader of their entity migrates, and the
+minted `legacy_id`s are NULLed before MongoDB is deleted - both are triggers, and
+both are recorded against the packages that own them rather than restated here.
 
 `admin.js` moves from third to **last**, because it is the last reader of all
 three bridged collections and putting it last lets every bridge die in one
