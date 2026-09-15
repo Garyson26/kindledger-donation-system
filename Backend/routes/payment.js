@@ -3,7 +3,12 @@ const router = express.Router();
 const crypto = require('crypto');
 const payuConfig = require('../config/payu');
 const Donation = require('../models/Donation');
-const Category = require('../models/Category');
+// models/Category IS DELIBERATELY NOT IMPORTED (AS2). Package 3.1 replaced
+// every use in this file with services/categoryBridge and left the import
+// behind; it was dead, and a dead Mongoose import is the seed of the next
+// crossing - the next person editing this file has `Category` in scope.
+// Found by test/migration-state.test.js, which the AR1 audit could not have
+// found because that audit enumerated CALL SITES and a dead import has none.
 // TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
 // this file is not migrated until a later package, so category reads go through
 // the bridge, which tries MySQL first and falls back to MongoDB with a warning.

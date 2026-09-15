@@ -32,6 +32,8 @@ const mongoose = require('mongoose');
 
 // The plausible date floor, shared with the retention purge (AG1a).
 const { PLAUSIBLE_FLOOR } = require('../services/scheduler');
+// AS2: the single declaration of which store is authoritative per entity.
+const migrationState = require('../config/migrationState');
 
 /**
  * Convert a major-unit amount to integer minor units, reporting any rounding.
@@ -322,6 +324,62 @@ async function checkDates(Donation) {
   ];
 }
 
+// -----------------------------------------------------------------------------
+// 7. Is the DECLARATION ahead of the DATA? (AS2)
+// -----------------------------------------------------------------------------
+/**
+ * For every entity `config/migrationState.js` declares MySQL-authoritative and
+ * the ETL carries across, compare row counts between the two stores.
+ *
+ * MySQL being declared authoritative means the routes READ IT AND NOTHING ELSE.
+ * If MongoDB still holds rows MySQL has never seen, those rows are not stale -
+ * THEY ARE GONE, as far as every reader is concerned. That is ADR-056's failure
+ * exactly, and it is invisible from either side alone: MySQL looks healthy and
+ * MongoDB looks untouched. The ETL is the only component that sees both, which
+ * is why the check lives here rather than in a route or a boot probe.
+ *
+ * Counts rather than an id-by-id comparison, deliberately. It is O(1) against
+ * both stores, it catches the case that matters - the new store is missing rows
+ * - and the alternative walks every document to sharpen a number that already
+ * says "run the load".
+ */
+async function checkDeclarationAgainstData(prisma, models) {
+  const out = [];
+  const table = { category: 'category', user: 'user', donation: 'donation' };
+
+  for (const entity of migrationState.declaredAheadCandidates()) {
+    const model = models[migrationState.stateFor(entity).model];
+    const delegate = prisma[table[entity]];
+    if (!model || !delegate) continue;
+
+    const inMongo = await model.countDocuments();
+    const migrated = await delegate.count({ where: { legacyId: { not: null } } });
+    if (inMongo <= migrated) continue;
+
+    out.push(
+      finding(
+        'declaration-ahead-of-data',
+        'RECORD',
+        `config/migrationState.js declares '${entity}' MySQL-authoritative, but ` +
+          `MongoDB holds ${inMongo} row(s) and MySQL has ${migrated} migrated ` +
+          `one(s) - ${inMongo - migrated} row(s) that every reader now treats as ` +
+          'NON-EXISTENT rather than stale (ADR-056). RUNNING THIS LOAD IS THE ' +
+          'REMEDY; if it persists afterwards, the declaration is wrong and the ' +
+          'entity has not migrated.',
+        // NOT BLOCKING, and getting this wrong once is worth recording. The
+        // first version was BLOCKING - which deadlocked: a blocking finding
+        // stops the load, and running the load is what fixes this finding. A
+        // gate that prevents its own remedy is ETL-01's shape exactly ("an
+        // option that can only make things worse"), reproduced in the check
+        // written to honour it. Caught by running it rather than by reading it.
+        false,
+        false
+      )
+    );
+  }
+  return out;
+}
+
 /**
  * Run every check. Returns findings; NEVER changes anything.
  */
@@ -336,6 +394,7 @@ async function runPreflight({ prisma, models }) {
   findings.push(...(await checkAmountConsistency(Donation)));
   findings.push(...(await checkOrphanedCategories(Donation, Category)));
   findings.push(...(await checkDates(Donation)));
+  findings.push(...(await checkDeclarationAgainstData(prisma, models)));
 
   return {
     findings,
@@ -369,18 +428,33 @@ function formatReport(result) {
   } else {
     lines.push(`  ${b} BLOCKING finding(s). THE LOAD WILL REFUSE. There is no override.`);
     lines.push('');
-    for (const chunk of (
-      (r === b
-        ? 'The loader refuses every one of these rows too, so there is nothing an ' +
-          'override could have loaded - it would only write everything up to the ' +
-          'first one and then stop, leaving MySQL part-populated (ETL-01). '
-        : 'Some of these are refused by the loader as well (' +
-          (result.refusedByLoader || []).map((f) => f.check).join(', ') +
-          '). ') +
-      'Fix them in the SOURCE data and re-run; the load is idempotent by ' +
-      'legacy_id, so a re-run resumes rather than duplicates.'
-    ).match(/.{1,68}(\s|$)/g) || []) {
-      lines.push(`    ${chunk.trim()}`);
+
+    // THE REMEDY DIFFERS PER FINDING, so do not state one remedy for all of
+    // them. An earlier version of this footer said "fix them in the SOURCE
+    // data" for every case, and printed "refused by the loader as well ()" with
+    // an empty list when none were - a summary asserting something untrue,
+    // about a report whose entire purpose is to be trusted.
+    if (r > 0) {
+      const names = (result.refusedByLoader || []).map((f) => f.check).join(', ');
+      for (const chunk of (
+        `The loader refuses these rows too (${names}), so no override could ever ` +
+        'have loaded them - it would only write everything up to the first one ' +
+        'and then stop, leaving MySQL part-populated (ETL-01). Fix them in the ' +
+        'SOURCE data and re-run; the load is idempotent by legacy_id, so a ' +
+        're-run resumes rather than duplicates.'
+      ).match(/.{1,68}(\s|$)/g) || []) {
+        lines.push(`    ${chunk.trim()}`);
+      }
+    }
+    if (r < b) {
+      if (r > 0) lines.push('');
+      for (const chunk of (
+        'The remaining finding(s) are not refused by the loader - each one names ' +
+        'its own remedy above, and for some of them RUNNING THIS LOAD IS THE ' +
+        'REMEDY. Read the detail rather than assuming the source data is at fault.'
+      ).match(/.{1,68}(\s|$)/g) || []) {
+        lines.push(`    ${chunk.trim()}`);
+      }
     }
   }
   lines.push('');

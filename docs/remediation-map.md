@@ -875,6 +875,216 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## AS2 - the destructive crossings, closed by a declaration rather than a default
+
+**`config/migrationState.js` is the single statement of which store is
+authoritative per entity.** The scheduler's DELETEs, the ETL's pre-flight and
+both bridges' exit condition read it; none of them restates it.
+
+### The finding it closes
+
+`services/scheduler.js` held `DELETE` on donations and on users against MySQL
+while the live writer for both was still MongoDB. A purge in that state deletes
+ETL-migrated history from MySQL while live rows accumulate in MongoDB where the
+purge cannot see them - **destroying data and failing the retention obligation
+the job exists to satisfy, in the same pass.**
+
+**The only thing preventing it was `SCHEDULER_ENABLED` defaulting to false.** A
+guard that is correct and is a default is not a control: an operator is
+eventually told to turn the scheduler on, and nothing stopped them doing it too
+early. The failure is silent - the job reports a successful purge, because from
+MySQL's point of view it performed one.
+
+### What replaced it
+
+| | Decides | Who can change it |
+|---|---|---|
+| `SCHEDULER_ENABLED` | whether the jobs are **registered** | an operator - it is an operational choice |
+| `config/migrationState` | whether a job may **delete** | a code change, which the self-check test then verifies |
+
+**THREE STATES, NOT TWO.** `split` means different files write different stores
+for one entity - ADR-057's crossing, and the state both `user` and `donation`
+are in now. A binary migrated/not-migrated cannot express the condition that
+causes the harm, so `split` is treated as not-migrated everywhere.
+
+**DRY RUNS STILL WORK IN EVERY STATE**, and report `authoritativeStore` so an
+operator learns why a real run would refuse without having to try it. Refusing
+the preview would remove information for no safety gain, and a control that
+blocks safe work gets turned off.
+
+**THE GATE IS PER-ENTITY.** The pending-signup sweep is ALLOWED today, because
+`pendingSignup` is MySQL-only. A blanket "is the migration finished" would block
+a job that is completely safe - which is how a control loses its credibility.
+
+**A REFUSAL IS NOT A FAILURE.** `ERR_NOT_AUTHORITATIVE` is logged distinctly by
+the cron and answered `409` by the admin endpoint. "Nothing was touched" and "it
+crashed partway through deleting" are opposite facts about the data, and the
+BUG-10 wording - "rows may have been partially deleted" - would send an admin
+looking for damage that does not exist.
+
+### The declaration is CHECKED, not believed
+
+`test/migration-state.test.js` walks the source tree and asserts that for every
+entity declared `mysql`, no file outside its `mongooseAllowed` list imports its
+Mongoose model. **The asymmetry is the right way round:** migrating a file and
+forgetting to update the declaration leaves it understated, which is safe;
+updating the declaration without migrating the file leaves it overstated - a
+purge would then be permitted - and that is the direction the test catches. It
+carries its own control, which proves the check would fail if the declaration
+overstated `user`.
+
+**IT FOUND SOMETHING ON ITS FIRST RUN, and something AR1 structurally could
+not.** `routes/admin.js` and `routes/payment.js` both still imported
+`models/Category` - **dead imports**, left behind when package 3.1 replaced the
+usage with the bridge. **AR1 enumerated CALL SITES, and a dead import has no
+call site.** Not a crossing today; the seed of one, because the next person
+editing those files has `Category` in scope. Both removed.
+
+### Two things I got wrong building it, recorded because the second is ironic
+
+1. **The ETL's new `declaration-ahead-of-data` check was BLOCKING first** - and
+   a blocking finding stops the load, while **running the load is what fixes
+   this finding.** A gate that prevents its own remedy is ETL-01's shape exactly
+   ("an option that can only make things worse"), reproduced inside the check
+   written to honour it. Now `RECORD`. Caught by running it, not by reading it.
+2. **The report footer printed "refused by the loader as well ()"** with an
+   empty list, and offered one remedy for findings whose remedies differ. A
+   summary asserting something untrue, in a report whose entire purpose is to be
+   trusted. Now per-finding.
+
+---
+
+## AS5 - `checkOrder.js` deleted
+
+An unreferenced diagnostic at the repo root reading a store that stopped being
+authoritative at package 3.1. Confirmed by `git grep` that nothing imports it,
+no npm script runs it, and no compose file or Dockerfile mentions it.
+
+**Deleted, and the reason is the one AS5 gave rather than tidiness:** it is the
+kind of thing someone runs DURING A CUTOVER to check something, and it would
+have answered confidently from the wrong database at the moment its answer
+mattered most.
+
+---
+
+## AS6 - the unwalked area, closed
+
+AR1 carried one explicitly unverified claim: that nothing outside `Backend/`
+touches an entity directly. Walked now.
+
+| Checked | Result |
+|---|---|
+| Repo root | **No JavaScript at all.** `.env`, `.gitignore`, two compose files, three markdown files, `LICENSE` |
+| Top-level `db/` | `schema.sql` only |
+| `Frontend/` dependencies | **No database driver.** react, react-dom, react-router-dom, chart.js, jspdf and build tooling |
+| Every `.js/.jsx/.ts/.tsx` outside `Backend/` | 50 files, all under `Frontend/src` or Frontend build config |
+
+**Nothing outside `Backend/` touches an entity's store directly**, and nothing
+could - the Frontend has no driver to do it with. The claim is now verified
+rather than carried.
+
+### What the walk did turn up
+
+**The Frontend couples to entity SHAPES through the API**, which is not a
+crossing but is the thing every migrated route's `present()` exists to protect:
+`_id` 60 references, `.category` 48, `isActive` 32, `donationAmount` 29,
+`paymentDetails` 23, `.userId` 25, `sortDescription` 19, `transactionId` 15.
+Those numbers are the cost of getting a wire shape wrong, and they are why AE4
+pins what an endpoint ACTUALLY returned rather than what its query asks for.
+
+**`pdfGenerator_backup.js` and `pdfGenerator_old.js` are byte-identical (20507
+bytes each) and neither is imported** - only `pdfGenerator.js` is, by five
+pages. The same class of artefact as `checkOrder.js`: stale copies of receipt
+logic that read donation fields. **Not deleted here** - Phase 5 owns the
+Frontend and this package has no business editing it - but recorded so Phase 5
+does not have to rediscover them.
+
+---
+
+## AS3 - a plan organised around a DIRECTORY cannot see what lives outside it
+
+**Recorded as a planning error, per AS3, not as an execution gap.**
+
+Four of the seven new crossings AR1 found are not in route files:
+`services/scheduler.js`, `scripts/seedDatabase.js` twice, and `checkOrder.js`.
+**The entire Phase 3 sequence is organised around `routes/`** - 3.1 categories,
+3.2 auth/users/middleware, 3.3 donations, 3.4 payment, 3.5 admin, 3.6 Mongoose
+removal. Every package is named for a route file.
+
+**So no amount of careful reading of the sequence could have surfaced them.**
+They are not omissions from a list; they are outside the space the list
+enumerates. Reading it more carefully finds route files you had missed - it
+cannot find a category of file the plan has no slot for.
+
+### The generalisation
+
+> **A plan organised around one directory cannot see dependencies that live
+> outside it. The audit that finds them has to be organised around the DATA, not
+> around the code layout.**
+
+That is why AR1's matrix is per-ENTITY and not per-package. Walking `routes/`
+would have produced the same blind spot the sequence has, because it would have
+inherited the sequence's organising principle. Walking the entities found
+`scheduler.js` holding `DELETE` on two of them.
+
+### Same shape as "every real constraint turned out to be a property of the data"
+
+The ordering constraints arrived in that order and the pattern held every time:
+
+| Constraint | Looked like | Actually was |
+|---|---|---|
+| ADR-055 | a read-dependency question | **FK direction** - a property of the schema |
+| ADR-056 | a bridge-coverage question | **where the rows are** - a property of the data |
+| ADR-057 | a package-sequencing question | **which store the writer writes** - a property of the data |
+| AR1's crossings | a code-review question | **which store each call site touches** - a property of the data |
+
+**Four times, the constraint that mattered was a fact about the DATA wearing the
+costume of a fact about the CODE.** The plan is a map of the code, so each time
+it was the wrong instrument, and each time the corrective was to enumerate
+something concrete - FK directions, row locations, write sites, call sites.
+
+**The operational conclusion is AR1's own: re-run the entity audit at the end of
+every package that moves an entity.** It is organised around the thing the
+constraints are properties of.
+
+---
+
+## AS4 - BrandingSettings has no callers, and that is CORRECT
+
+**Stated deliberately so a later reader does not mistake the absence for
+something missed.**
+
+`branding_settings` has a Prisma model, a table, a `ck_branding_settings_singleton`
+CHECK plus two colour-format CHECKs, two entries in `db/check-drift.js`, coverage
+in `test/data-layer.test.js` and `test/schema.test.js`, and a seeded row. It has
+**zero application callers**: no route, no middleware, no service, and no
+reference anywhere in `Frontend/src`.
+
+**THIS IS NOT A GAP. Phase 5 builds the whitelabel consumer, and the foundations
+are deliberately already in place.** A Phase 2 data layer built ahead of a Phase
+5 feature is the migration doing its job: the constraints that are expensive to
+add to a populated table - the singleton CHECK, the colour formats - exist
+before there is any data to migrate.
+
+**What the Phase 5 spec should know:**
+
+1. **The foundations exist.** Singleton-enforced, colour-validated, drift-gated,
+   with a seeded row at `id = 1`. Phase 5 writes the consumer, not the schema.
+2. **Nobody is its first caller yet, and that has a cost.** An entity with no
+   caller cannot be verified by any test of BEHAVIOUR - only its constraints are
+   proven. Whoever wires it up will be exercising its semantics for the first
+   time, and should expect to find things no CHECK constraint can catch.
+3. **It is the one entity with no MongoDB predecessor**, so it is the only one
+   that has never been `split` and never needed a bridge. `migrationState`
+   records it as `mysql` / `etlMigrates: false` for that reason, not because it
+   was migrated.
+
+**Recorded here rather than left to be rediscovered**, because "a fully built
+data layer nobody calls" reads like an oversight to anyone who finds it without
+this note - and the natural response to an apparent oversight is to remove it.
+
+---
+
 ## AR1 - the entity ownership audit. NINE crossings, seven of them new.
 
 **Full matrix: `docs/entity-ownership-audit.md`.** Summary only here.

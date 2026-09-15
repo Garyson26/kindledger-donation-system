@@ -162,4 +162,36 @@ module.exports = {
   resetFallbackCount: () => {
     fallbacks = 0;
   },
+
+  /**
+   * May a bridge for `entity` be DELETED? (AS2.)
+   *
+   * ADR-050's exit condition, stated ONCE here instead of restated in each
+   * bridge. Two conditions, and they are genuinely different claims:
+   *
+   *   1. MySQL is authoritative for the entity - no file still writes MongoDB.
+   *      Read from `config/migrationState`, the single declaration.
+   *   2. `fallbackCount()` is zero over a real run (AE3) - nothing has ACTUALLY
+   *      needed the MongoDB fallback. Evidence, rather than intention.
+   *
+   * THE FIRST CAN BE TRUE WHILE THE SECOND IS FALSE, which is the case worth
+   * naming: an entity can be fully migrated in CODE while un-migrated ROWS
+   * remain, and deleting the bridge then makes those rows vanish rather than
+   * fall back. Neither condition is sufficient alone.
+   */
+  readyToDelete: (entity) => {
+    const migrationState = require('../config/migrationState');
+    const authoritative = migrationState.isMysqlAuthoritative(entity);
+    return {
+      ready: authoritative && fallbacks === 0,
+      authoritative,
+      store: migrationState.storeFor(entity),
+      fallbackCount: fallbacks,
+      reason: !authoritative
+        ? `MySQL is not authoritative for ${entity} (${migrationState.storeFor(entity)})`
+        : fallbacks === 0
+          ? 'MySQL is authoritative and no fallback has fired'
+          : `${fallbacks} fallback(s) fired - un-migrated rows still exist; run the ETL`,
+    };
+  },
 };

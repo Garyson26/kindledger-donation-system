@@ -142,4 +142,6 @@ module.exports = {
   resolveAuthUser,
   ALLOWED_FIELDS: ALLOWED,
   AUTH_ALLOWED_FIELDS: AUTH_ALLOWED,
+  /** ADR-050's exit condition, read from the one declaration (AS2). */
+  readyToDelete: () => require('./legacyBridge').readyToDelete('user'),
 };

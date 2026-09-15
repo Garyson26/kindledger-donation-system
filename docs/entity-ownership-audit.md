@@ -23,6 +23,21 @@ Every table below therefore records the store, not only the operation.
 **Scope: every file under `Backend/`, not only `routes/`.** Middleware, services,
 the ETL, the scripts, and the unreferenced developer file at the repo root.
 
+**AND EVERYTHING OUTSIDE `Backend/` (AS6).** The first run of this audit carried
+an explicitly unverified claim - that nothing outside `Backend/` touches an
+entity directly - because I had not walked the repo root or the Frontend tree.
+Walked now: **no JavaScript at the repo root at all**, top-level `db/` holds only
+`schema.sql`, and the Frontend has **no database driver** in its dependencies.
+Nothing outside `Backend/` touches an entity's store directly, and nothing could.
+The claim is verified rather than carried.
+
+Two things the walk turned up that are not crossings: the Frontend couples to
+entity SHAPES through the API (`_id` 60 references, `.category` 48, `isActive`
+32, `donationAmount` 29 - which is what every `present()` exists to protect), and
+`pdfGenerator_backup.js` / `pdfGenerator_old.js` are byte-identical unimported
+copies of the receipt generator, the same class of artefact as `checkOrder.js`.
+Phase 5 owns the Frontend; recorded rather than removed here.
+
 ---
 
 ## Summary
@@ -62,8 +77,8 @@ new, and two of them are destructive operations.**
 **U-X1 — `admin.js` (3.5) writes MongoDB; `auth.js` and both middlewares (3.2)
 read MySQL. = ADMIN-01, High, already recorded and measured.**
 
-**U-X2 — `services/scheduler.js` (Phase 2) DELETES users from MySQL while
-`admin.js` (3.5) deletes them from MongoDB.** Two packages hold a destructive
+**U-X2 — CLOSED BY AS2. `services/scheduler.js` (Phase 2) DELETES users from
+MySQL while `admin.js` (3.5) deletes them from MongoDB.** Two packages hold a destructive
 operation on the same entity in different stores. An account deleted through the
 admin console still exists in MySQL and remains eligible for — or exempt from —
 the retention purge independently of what the admin did. Latent only because
@@ -128,8 +143,8 @@ invisible to exactly the check anyone would run.
 **The `approved` tile is already wrong, and BUG-03's description is wrong about
 how.**
 
-**D-X3 — `services/scheduler.js` (Phase 2) DELETES donations from MySQL while
-`payment.js` (3.4) writes them to MongoDB.** The retention purge would delete
+**D-X3 — CLOSED BY AS2. `services/scheduler.js` (Phase 2) DELETES donations from
+MySQL while `payment.js` (3.4) writes them to MongoDB.** The retention purge would delete
 ETL-migrated history from MySQL while live donations accumulate in MongoDB where
 the purge cannot see them. The organisation would satisfy its retention
 obligation against the wrong copy. Latent only because `SCHEDULER_ENABLED`
@@ -159,12 +174,13 @@ environment variable, not the code.** Same shape as U-X2.
 reads MySQL.** A seeded category is invisible to the category list — ADR-056's
 exact failure, reachable from an `npm` script. Same double guard as U-X3.
 
-**C-X2 — `checkOrder.js` reads MongoDB categories.** A developer diagnostic at
-the repo root, referenced by nothing: no import, no npm script. It prints the
-category ordering from a store that stopped being authoritative at package 3.1.
-Trivial in impact and listed because **it is the purest example of what this
-audit is for** — a file nobody would think to check, reporting confidently from
-the wrong database. It should be deleted or repointed in 3.6.
+**C-X2 — `checkOrder.js` read MongoDB categories. DELETED (AS5).** A developer
+diagnostic at the repo root, referenced by nothing: no import, no npm script, no
+compose or Dockerfile mention. It printed the category ordering from a store that
+stopped being authoritative at package 3.1. **It is the purest example of what
+this audit is for** — a file nobody would think to check, reporting confidently
+from the wrong database, and precisely the kind of thing someone runs DURING A
+CUTOVER to check something.
 
 **Note the route packages do NOT cross on Category.** Every route reader goes
 through `categoryBridge`, which is MySQL-first. That is ADR-050 working exactly
@@ -276,12 +292,16 @@ recording the STORE at each call site.
 
 `services/scheduler.js` holds `DELETE` on donations and on users, against MySQL,
 while the live writer for both is still MongoDB. The only thing preventing the
-retention purge from acting on the wrong copy of the data is `SCHEDULER_ENABLED`
+retention purge from acting on the wrong copy of the data was `SCHEDULER_ENABLED`
 defaulting to false. **That guard is correct and it is an environment variable.**
-It should not be the only thing standing between a half-migrated system and a
-retention purge — recommend the scheduler additionally refuses to run while any
-route file still imports Mongoose, which is a condition the code can check and
-which becomes vacuously true at 3.6.
+
+**CLOSED BY AS2.** `config/migrationState.js` is now the single declaration of
+which store is authoritative per entity, and every `DELETE` in the scheduler is
+gated on it. `SCHEDULER_ENABLED` still decides REGISTRATION - an operational
+choice an operator may make - while the declaration decides DELETION, which only
+a code change can alter, and which `test/migration-state.test.js` then verifies
+against the source tree. Dry runs still work in every state and report why a real
+run would refuse.
 
 ### What the audit says about the method
 

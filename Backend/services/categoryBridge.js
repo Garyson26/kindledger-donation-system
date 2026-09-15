@@ -74,4 +74,6 @@ module.exports = {
   /** Read by the tests and by the package 3.5 exit check (AE3). */
   fallbackCount: legacy.fallbackCount,
   resetFallbackCount: legacy.resetFallbackCount,
+  /** ADR-050's exit condition, read from the one declaration (AS2). */
+  readyToDelete: () => legacy.readyToDelete('category'),
 };

@@ -22,9 +22,26 @@
  * at cutover, and it would put a destructive job against live production data
  * into a phase that has no business touching it.
  *
- * DOUBLE-GUARDED. Registration requires SCHEDULER_ENABLED=true, so a Phase 3
- * deployment cannot begin deleting rows before the migration has run. The
- * default is off; an operator turns it on once, deliberately, after cutover.
+ * GUARDED TWICE, AND THE TWO GUARDS ARE NOT THE SAME KIND OF THING (AS2).
+ *
+ *   1. `SCHEDULER_ENABLED` decides whether the jobs are REGISTERED. That is an
+ *      OPERATIONAL choice and an operator may flip it.
+ *   2. `config/migrationState` decides whether a job may DELETE. That is a
+ *      CORRECTNESS one, and no environment variable can flip it.
+ *
+ * THE SECOND GUARD EXISTS BECAUSE THE FIRST WAS NOT A CONTROL. Until AS2, the
+ * only thing preventing the retention purge from running mid-migration was that
+ * `SCHEDULER_ENABLED` defaults to false - a default, not a control. An operator
+ * turning it on, which they are eventually told to do, had nothing to stop them
+ * turning it on too early, and the failure is SILENT: the job reports a
+ * successful purge, because from MySQL's point of view it performed one. It
+ * would have deleted ETL-migrated history while live donations accumulated in
+ * MongoDB where the purge cannot see them - destroying data and failing the
+ * retention obligation the job exists to satisfy, in the same pass.
+ *
+ * A DRY RUN IS STILL ALLOWED IN EVERY STATE. Counting is not destructive, and
+ * the preview is how an operator learns what the purge WOULD do - refusing it
+ * would remove information for no safety gain.
  * =============================================================================
  */
 
@@ -34,6 +51,9 @@ const cron = require('node-cron');
 const donations = require('../repositories/donations');
 const users = require('../repositories/users');
 const pendingSignups = require('../repositories/pendingSignups');
+// AS2: the single declaration of which store is authoritative per entity.
+// Every DELETE below is gated on it.
+const migrationState = require('../config/migrationState');
 
 // SPEC-1A section 9: donations are retained for ten years.
 const RETENTION_YEARS = 10;
@@ -96,8 +116,16 @@ async function purgeOldDonations({ dryRun = false, now = new Date() } = {}) {
   }
 
   if (dryRun || candidates === 0) {
-    return { ...base, deleted: 0, dryRun: Boolean(dryRun) };
+    return {
+      ...base,
+      deleted: 0,
+      dryRun: Boolean(dryRun),
+      authoritativeStore: migrationState.storeFor('donation'),
+    };
   }
+
+  // AS2. Gated on the DECLARATION, not on an environment variable.
+  migrationState.assertDeletable('donation', 'the retention purge');
 
   const deleted = await donations.deleteOlderThan(cutoff, PLAUSIBLE_FLOOR);
   return { ...base, deleted, dryRun: false };
@@ -125,8 +153,17 @@ async function purgeInactiveUsers({ dryRun = false, now = new Date() } = {}) {
   const base = { cutoff: cutoff.toISOString(), candidates };
 
   if (dryRun || candidates === 0) {
-    return { ...base, deleted: 0, dryRun: Boolean(dryRun) };
+    return {
+      ...base,
+      deleted: 0,
+      dryRun: Boolean(dryRun),
+      authoritativeStore: migrationState.storeFor('user'),
+    };
   }
+
+  // AS2. `user` is currently `split` - admin.js still writes MongoDB - so this
+  // refuses today, and that is the correct answer rather than a limitation.
+  migrationState.assertDeletable('user', 'the inactive-account purge');
 
   const deleted = await users.deleteInactiveOlderThan(cutoff);
   return { ...base, deleted, dryRun: false };
@@ -142,8 +179,19 @@ async function purgeInactiveUsers({ dryRun = false, now = new Date() } = {}) {
 async function sweepExpiredSignups({ dryRun = false, now = new Date() } = {}) {
   const candidates = await pendingSignups.countExpired(now);
   if (dryRun || candidates === 0) {
-    return { candidates, deleted: 0, dryRun: Boolean(dryRun) };
+    return {
+      candidates,
+      deleted: 0,
+      dryRun: Boolean(dryRun),
+      authoritativeStore: migrationState.storeFor('pendingSignup'),
+    };
   }
+
+  // AS2. Gated identically, and it PASSES - `pendingSignup` is MySQL-only. That
+  // is why the gate is per-entity rather than a blanket "is the migration
+  // finished": this job is safe today and blocking it would be theatre.
+  migrationState.assertDeletable('pendingSignup', 'the pending-signup sweep');
+
   const deleted = await pendingSignups.deleteExpired(now);
   return { candidates, deleted, dryRun: false };
 }
@@ -181,6 +229,15 @@ function initializeScheduler() {
           // eslint-disable-next-line no-console
           console.log('[scheduler] inactive-account purge', JSON.stringify(accounts));
         } catch (err) {
+          // A REFUSAL IS NOT A FAILURE, and must not be logged as one (AS2).
+          // "Refused because the entity has not migrated" and "crashed partway
+          // through deleting" are opposite facts about the data, and the second
+          // message would send someone looking for damage that does not exist.
+          if (err && err.code === 'ERR_NOT_AUTHORITATIVE') {
+            // eslint-disable-next-line no-console
+            console.warn(`[scheduler] retention purge REFUSED, nothing deleted: ${err.message}`);
+            return;
+          }
           // A failed scheduled job must not take the process down - but it must
           // not look like a quiet success either. The legacy
           // dataCleanupService returned 0 from its catch, which made a partial
@@ -220,6 +277,22 @@ function initializeScheduler() {
 
   // eslint-disable-next-line no-console
   console.log(`[scheduler] registered 2 job(s), timezone=${TIMEZONE}`);
+  // AS2. Say which entities the destructive jobs may actually act on, at the
+  // moment of registration. An operator who has just set SCHEDULER_ENABLED=true
+  // learns here that the purge will refuse, rather than at 02:00 from a stack
+  // trace - or, before this existed, not at all.
+  const pending = migrationState.pendingMigration();
+  // eslint-disable-next-line no-console
+  console.log(`[scheduler] migration state: ${migrationState.summary()}`);
+  if (pending.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[scheduler] DESTRUCTIVE JOBS WILL REFUSE for: ${pending.join(', ')}. ` +
+        'MySQL is not authoritative for them yet, so a purge would delete ' +
+        'migrated history while live rows accumulate in MongoDB. Dry runs still ' +
+        'work. See config/migrationState.js.'
+    );
+  }
   return { registered: true, jobs: ['retention-purge', 'pending-signup-sweep'] };
 }
 

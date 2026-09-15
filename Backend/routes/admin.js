@@ -2,7 +2,12 @@ const express = require("express");
 const router = express.Router();
 const User = require("../models/User");
 const Donation = require("../models/Donation");
-const Category = require("../models/Category");
+// models/Category IS DELIBERATELY NOT IMPORTED (AS2). Package 3.1 replaced
+// every use in this file with services/categoryBridge and left the import
+// behind; it was dead, and a dead Mongoose import is the seed of the next
+// crossing - the next person editing this file has `Category` in scope.
+// Found by test/migration-state.test.js, which the AR1 audit could not have
+// found because that audit enumerated CALL SITES and a dead import has none.
 // TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
 // this file is not migrated until a later package, so category reads go through
 // the bridge, which tries MySQL first and falls back to MongoDB with a warning.
@@ -14,7 +19,7 @@ const bcrypt = require("bcryptjs");
 // and services/scheduler.js implements the same three retention rules against
 // MySQL with a dry-run mode and counts that come back to the caller.
 const scheduler = require("../services/scheduler");
-const { failed } = require("../utils/respond");
+const { refuse, failed } = require("../utils/respond");
 
 // Protect all admin routes
 router.use(adminAuth);
@@ -317,6 +322,17 @@ router.post("/cleanup/trigger", async (req, res) => {
         : `Deleted ${donationsResult.deleted} donation(s) and ${usersResult.deleted} inactive account(s).`,
     });
   } catch (err) {
+    // AS2: A REFUSAL IS NOT A FAILURE. "MySQL is not authoritative for this
+    // entity yet, nothing was touched" and "the delete crashed partway" are
+    // opposite facts about the data, and answering 500 to the first would send
+    // an admin looking for damage that does not exist.
+    if (err && err.code === "ERR_NOT_AUTHORITATIVE") {
+      return refuse(res, 409, `Cleanup refused: ${err.message}`, {
+        deleted: 0,
+        entity: err.entity,
+        authoritativeStore: err.state,
+      });
+    }
     return failed(res, "Cleanup failed - rows may have been partially deleted", err, {
       tag: "admin",
     });
