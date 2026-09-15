@@ -839,11 +839,16 @@ understated:**
 Each was correct-looking, repeated, and load-bearing. That combination is the
 signature, and the countermeasure is cheap: **run it once.**
 
-**SEVEN NOW, and the signature is holding as a predictor.** The seventh is the
+**EIGHT NOW, and the signature is holding as a predictor.** The seventh is the
 most instructive, because **it is one I wrote**: a comment asserting a narrowing
 that was never implemented. Every countermeasure in this section assumes the
 inherited claim came from somewhere else. This one shows the generator is the
-act of writing a confident sentence near code, not the age of the document. That is worth knowing
+act of writing a confident sentence near code, not the age of the document.
+
+**The eighth arrived during the audit commissioned because of the seventh**
+(BUG-03 is not "always 0" - it counts the lowercase subset, measured at 1 of 2).
+That is the argument for AR6's gate in one line: **the claims do not run out, and
+every pass that looks for them finds one.** That is worth knowing
 with three packages left: it means the remaining inherited claims are more
 likely to be wrong than a base rate would suggest, and AJ3's severity pass
 should be read as an application of this rule rather than a separate exercise.
@@ -859,6 +864,70 @@ both were found, and is AD2's method applied to something other than ordering.
 
 **Applies to AJ3's severity pass**, which is the same rule aimed at one class of
 claim - a severity derived from a mechanism is an inherited guess at an outcome.
+
+---
+
+## AR1 - the entity ownership audit. NINE crossings, seven of them new.
+
+**Full matrix: `docs/entity-ownership-audit.md`.** Summary only here.
+
+| Entity | Crossings | Verdict |
+|---|---|---|
+| **User** | 3 | `admin.js` writes MongoDB, 3.2 reads MySQL (ADMIN-01); the scheduler DELETES from MySQL; the seeder writes MongoDB |
+| **Donation** | 3 | `payment.js` writes MongoDB, `donations.js` reads MySQL (ADR-057); `admin.js`'s two `/stats` counts read MongoDB; the scheduler DELETES from MySQL |
+| **Category** | 2 | `scripts/seedDatabase.js` and the unreferenced `checkOrder.js` - no route package crosses, because every route reader goes through the bridge |
+| **PendingSignup** | **0** | clean |
+| **BrandingSettings** | **0** | **no caller of any kind exists** |
+
+### The three things worth carrying forward
+
+**1. FOUR OF THE SEVEN NEW CROSSINGS ARE NOT IN ROUTE FILES.** `scheduler.js`,
+`seedDatabase.js` (twice) and `checkOrder.js`. The package sequence is organised
+around `routes/`, so no amount of reading it would have surfaced them. That is
+ADMIN-01's lesson generalised: the sequence defines scope, and scope defines
+attention.
+
+**2. TWO OF THEM ARE DESTRUCTIVE, AND THE WRITER/READER FRAMING MISSES THEM.**
+`services/scheduler.js` holds `DELETE` on donations and on users against MySQL
+while the live writer for both is still MongoDB. Both sides are WRITERS, so
+neither is "a reader reading the wrong store" - they were found only by recording
+the STORE at each call site rather than the operation. The retention purge would
+delete migrated history from MySQL while live rows accumulate in MongoDB, so the
+organisation satisfies its retention obligation against the wrong copy.
+
+**The only thing preventing that is `SCHEDULER_ENABLED` defaulting to false - a
+guard that is correct and is an environment variable.** Recommend the scheduler
+additionally refuse to run while any route file still imports Mongoose: a
+condition the code can check, and vacuously true from 3.6.
+
+**3. THE ONE CLEAN ENTITY IS CLEAN BY ACCIDENT.** `PendingSignup`'s writer and
+all its readers share a package because nobody split them, not because anyone
+checked. It would have come out clean at 3.1 too - and ADMIN-01 was created at
+3.2. **The audit must be re-run at the end of every package that moves an
+entity.** It took under an hour and it is a grep.
+
+### BrandingSettings: built, constrained, gated, tested, and called by nothing
+
+A Prisma model, a table, three CHECK constraints, two entries in the drift gate,
+coverage in two suites, a seeded singleton row - and **zero application callers**,
+in `routes/`, in `config/`, in `app.js` or in `Frontend/src`.
+
+Not a defect: a Phase 2 entity built ahead of a Phase 5 feature. Recorded because
+**an entity with no caller cannot be verified by any test of behaviour**, so it
+will reach whoever wires it up with its constraints proven and none of its
+semantics. They should know they are its first caller.
+
+### AR3 answered: `admin.js`'s other operations
+
+- **CATEGORY: not entangled.** One call, `categoryBridge.countCategories()` at
+  `admin.js:31`, already resolving to MySQL. Nothing to do.
+- **DONATION: entangled, but NOT equally** - two `countDocuments` in
+  `GET /admin/stats` (`admin.js:27,32`). Read-only, no control, no false
+  success. **Reported rather than taken**, per AR3. Recommendation and its cost
+  are in the audit document; the short version is that they sit in the same
+  handler as the user count, so leaving them produces one handler reading two
+  databases - the exact condition this audit exists to remove, newly created by
+  the fix for it.
 
 ---
 
@@ -942,6 +1011,66 @@ packages later.** The options, and neither is mine to choose:
 **What must NOT happen is 3.2 reaching production as it stands.** An admin
 console that reports success for every revocation it performs and performs none
 is worse than the finding it was migrated to fix.
+
+### THE SHAPE (AR4) - record this, not only the fix
+
+**A control that reports success without acting is worse than one that visibly
+fails, because nobody returns to verify.**
+
+That is the whole finding in one sentence, and it generalises past this bug. A
+`500` from the disable endpoint would have been fixed the same afternoon by the
+first admin who hit it. A `200 "User disabled successfully"` is filed as done.
+The admin moves on, the record says the account was disabled, and the only way
+anyone learns otherwise is the disabled person continuing to use the system -
+which is not a signal anybody is watching for, because the console already said
+it was handled.
+
+**THE FAILURE MODE IS INVERTED RELATIVE TO WHERE THE RISK IS.** This is the part
+that makes it more than an ordinary bug:
+
+| | Accounts created since 3.2 | ETL-migrated accounts |
+|---|---|---|
+| Exist in | MySQL only | **both stores** |
+| The admin gets | `404 "User not found"` - loud | `200 "...successfully"` - silent |
+| Who they are | test accounts, fixtures, whoever signed up on the branch | **every real user after cutover** |
+
+**It is loud for the accounts that do not matter and silent for the ones that
+will.** A developer on a fresh database sees the 404, reads it as "the endpoint
+is broken, someone will fix it", and never sees the silent case at all. The
+condition that produces the dangerous behaviour is precisely the condition that
+only exists in production.
+
+### ADR-057 was violated ONE PACKAGE BEFORE ADR-057 WAS WRITTEN
+
+The constraint was derived at 3.3, from donations. `User` had the identical
+split - `admin.js` writing, `auth.js` reading - and 3.2 shipped it.
+
+That ordering is the strongest argument the ADR could have. It was not a rule
+someone forgot to apply; **it was a rule nobody had yet articulated, and the
+system broke in exactly the way it now predicts, one package earlier.** A
+constraint that retroactively explains a defect found by an unrelated pass is
+worth more than one that merely sounds correct.
+
+### THE COVERAGE RULE FAILED FROM THE OTHER SIDE
+
+SPEC-3's spine is *no route file is migrated until it has characterisation
+tests*, and AC1 sharpened it: a test must assert the MECHANISM, not the outcome.
+Both are about tests that assert too little.
+
+**ADMIN-01 was not caught by a weak test. It was not caught because THERE IS NO
+TEST AT ALL in `admin.js`** - the file has no characterisation suite, because it
+is package 3.5 and its suite is written when it migrates.
+
+So the rule has a blind spot it cannot see from the inside:
+
+> **A file that has not been migrated has no tests either. A change in a
+> DIFFERENT file can therefore break it silently, and the coverage rule - which
+> only ever asks about the file being changed - will report full compliance.**
+
+Package 3.2 changed where users live. Nothing was watching `admin.js` when it
+did, and nothing in the process was supposed to be. **That is why AR1's audit is
+a per-package gate rather than a one-off**: the audit asks about the entity,
+which crosses files, where the coverage rule asks about the file.
 
 ### It also answers a question the map had left open
 
@@ -1261,6 +1390,27 @@ by re-running: the load now refuses with MySQL untouched at 0/0/0.
 It is AP4's class again - a control that is correct (refusing to guess a date)
 producing a symptom somewhere else (a half-migrated database).
 
+**THE GENERAL FORM (AR5): an option that can only make things worse is worse
+than no option.**
+
+The override's entire purpose was to let an operator accept a finding and
+proceed. It could not do that for any finding that exists, so every use of it
+was a strict downgrade: a refusal with nothing written became a refusal with
+part of the data written.
+
+**The first fix was not enough, and the reason is worth keeping.** Making the
+flag not apply to those findings left a documented flag that applied to
+NOTHING - which is the same defect one level up: an option offering a choice
+that does not exist. **The flag is now removed**, and passing it is a loud
+refusal rather than a silent no-op, because an operator who types a flag from an
+old runbook and sees a successful run concludes it worked.
+
+`loaderRefuses` is KEPT as reporting rather than deleted with the flag. It no
+longer changes behaviour; it records which findings the loader would also throw
+on, and it is the thing to check the day a BLOCKING-but-loadable finding is
+added - because on that day the question of an override becomes real again, and
+the flag comes back scoped to that finding and not before.
+
 ### Test isolation: the suites no longer own the store (worth knowing for 3.4)
 
 Two assertions broke on data they do not own, because every suite now shares one
@@ -1538,6 +1688,62 @@ trace that anyone had seen it.
 
 ---
 
+## PER-PACKAGE ACCEPTANCE CRITERIA (AR6) - the inherited-claim gate
+
+**AN3 was an observation. Seven claims in seven consecutive packages, the last
+one mine, make it a gate.**
+
+> **Every package MUST list, in its commit message, each claim it relied on that
+> came from a DOCUMENT rather than from observed behaviour. Each listed claim is
+> either VERIFIED - by running something - or explicitly marked UNVERIFIED and
+> carried as a risk.**
+
+An unverified claim is not a failure and must not be treated as one. **Listing it
+is the deliverable.** Six of the seven were load-bearing and wrong; the cost of
+each was a package or more of work built on it. The cost of writing three lines
+saying "I took this from the map and did not check it" is three lines.
+
+### What counts as inherited
+
+A claim is inherited if the package acted on it and the evidence for it is a
+sentence somewhere - the security review, SPEC-1A, SPEC-3, an ADR, the map, a
+code comment, or a previous commit message. **Including comments I wrote myself
+in the previous package**, which is where the seventh came from.
+
+### What counts as verified
+
+Running something and reading the result: a test, a query, a request against the
+stack, a grep that enumerates call sites. **Re-reading the document is not
+verification** - it is how the claim propagated in the first place.
+
+### The register
+
+| # | Claim | Inherited from | Outcome |
+|---|---|---|---|
+| 1 | SEC-03 is "NoSQL operator injection", Medium | the security review | **WRONG** - a CRITICAL unauthenticated auth bypass |
+| 2 | SPEC-1A §5.6's `mihpayid` claim | SPEC-1A | **WRONG** - ADR-026 |
+| 3 | The package sequence | SPEC-3, restated in the map | **WRONG** - two contradictory sequences (AL3) |
+| 4 | SEC-08 leaks via `/login`'s `needsSignupVerification` | the security review | **WRONG** - the branch is past `bcrypt.compare` (AP3) |
+| 5 | AE1-b's trigger is `donations.js` | AE1, restated, revised once | **WRONG FILE** - the ObjectId ref is written by `payment.js` |
+| 6 | `scheduler.js` "already implements the same retention rules" | the BUG-10 mechanism | **TWO OF THREE** - the inactive-account purge had no replacement |
+| 7 | The auto-verify branch is "narrowed to accounts that predate the OTP flow" | **my own comment, 3.2** | **NEVER IMPLEMENTED** - it applies to everyone |
+| 8 | BUG-03's counter is "always 0" | the review, restated in the map | **WRONG** - it counts the lowercase subset; measured 1 of 2 (AR1) |
+
+**Eight now.** Number 8 arrived during the audit that was commissioned because of
+number 7, which is the clearest possible argument for the gate: the claims do not
+run out, and each pass that looks for them finds one.
+
+### The pattern that predicts them
+
+Claims 5 and 6 are about **WHICH FILE or WHICH COMPONENT** does something, not
+about whether it is done. "Donations migrate" and "the scheduler implements the
+retention rules" are true sentences attached to the wrong subject, and they
+survive review because the reviewer checks the predicate - which is correct.
+**The countermeasure is to enumerate the call sites rather than reason about the
+name**, which is AD2's method and now AR1's audit.
+
+---
+
 ## The three ordering constraints, in order of precedence (AK2)
 
 > **A FOURTH was added in package 3.3, and it sits BELOW these three because it
@@ -1764,7 +1970,7 @@ The original table is kept below as the record of what the package was given.
 | **ADMIN-01** | **High** | **EVERY admin user-management operation writes MongoDB, which authentication no longer reads.** See the dedicated section above - this is not a bcrypt finding and not a `tokenVersion` finding, it is a store split | Migrate `admin.js`'s user operations, or move them into the package that owns the entity | Test: each admin operation, then assert the effect through `/api/auth/login` | **X** (AJ3) |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
 | SEC-21 | **Medium** (AJ3: was Low, and RESTATED) | **`isVerified` gates nothing.** It is read in exactly one place in the codebase - `auth.js:312`, the line that sets it true. SEC-05's shape. Not High only because self-service signup enforces verification structurally via `PendingSignup` | Decide whether the flag is a control. If it is, gate on it; if it is not, remove it rather than leave a field the admin UI can toggle to no effect | Test: an unverified account is refused, or the field is gone | **R**, re-derived **X** |
-| BUG-03 | - | Dashboard "approved" counter always 0 - `countDocuments({status:"approved"})` at `admin.js:20` | Canonical casing; follows BUG-02 | Test: seed an `Approved` donation, expect the tile to count it | **R** |
+| BUG-03 | - | **Dashboard "approved" counter is NOT "always 0" - it counts the LOWERCASE SUBSET** (`countDocuments({status:"approved"})`, `admin.js:32`). Measured in the AR1 audit: it returned **1 when the true figure was 2**. It reads 0 only where no admin ever used `PATCH /:id/status`; anywhere else it reads a plausible fraction. **A tile showing 0 is visibly broken; a tile showing 1 of 2 is believed** | Canonical casing; follows BUG-02, and closed as a side effect of migrating the two `/stats` counts | Test: donations approved through BOTH writers, expect the tile to count both | **R**, corrected by **X** (AR1) |
 | BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` (`Backend/vercel.json:15-20`) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
 | BUG-08 | - | Unbounded pagination (`admin.js:80`) | As 3.1 | As 3.1 | **R** |
 

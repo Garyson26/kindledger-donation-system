@@ -21,7 +21,8 @@
  *     original float is gone. If rounding moved a value, this is where it is
  *     recorded.
  *
- * A run with unresolved findings REFUSES TO LOAD without an explicit override.
+ * A RUN WITH ANY BLOCKING FINDING REFUSES TO LOAD. There is no override; see
+ * `finding()` below and ETL-01.
  * =============================================================================
  */
 
@@ -55,22 +56,17 @@ function toMinorWithDelta(value) {
 /**
  * A finding.
  *
- * `blocking` decides whether the load may proceed without an override.
+ * `blocking` stops the load. There is NO override flag - ETL-01, and the reason
+ * is recorded at length in `cli.js`: every blocking finding is one the loader
+ * also refuses, so an override could never load the rows it was overriding. It
+ * could only turn a clean refusal into a partial load.
  *
- * `loaderRefuses` says that `migrate.js` will ALSO refuse these rows. That
- * distinction is not cosmetic - it decides whether the override is honest.
- *
- * ETL-01, found by package 3.3's local donation load. The override converted a
- * clean refusal into a PARTIAL LOAD: the pre-flight reported one implausible
- * date, the operator overrode it, the loader wrote two categories, one user and
- * four of five donations, and then threw on exactly the row that had been
- * reported. The comment in `migrate.js:plausibleDate` said "the row still fails
- * here", which is what its author intended and is not what the code does - a
- * throw fails the RUN, not the ROW.
- *
- * Overriding such a finding is strictly worse than not overriding it, in every
- * case, so the override must not apply to it. Every finding carrying this flag
- * is refused before ANYTHING is written.
+ * `loaderRefuses` NO LONGER CHANGES BEHAVIOUR, and is kept deliberately as
+ * REPORTING. It records which findings `migrate.js` would also throw on, which
+ * is what the refusal message uses to tell the operator that fixing the source
+ * data is the only path. It is also the thing to check if a
+ * BLOCKING-but-loadable finding is ever added: the day one exists, this flag is
+ * false for it, and the question of an override becomes real again.
  */
 function finding(check, severity, detail, blocking = true, loaderRefuses = false) {
   return { check, severity, detail, blocking, loaderRefuses };
@@ -371,24 +367,18 @@ function formatReport(result) {
   if (b === 0) {
     lines.push('  No blocking findings. The load may proceed.');
   } else {
-    lines.push(
-      `  ${b} BLOCKING finding(s). The load will refuse without --i-have-reviewed-the-preflight.`
-    );
-  }
-  if (r > 0) {
-    // ETL-01. Say this plainly, because the override's name invites the
-    // assumption that reviewing is enough.
+    lines.push(`  ${b} BLOCKING finding(s). THE LOAD WILL REFUSE. There is no override.`);
     lines.push('');
-    lines.push(
-      `  ${r} of them CANNOT BE OVERRIDDEN: ` +
-        (result.refusedByLoader || []).map((f) => f.check).join(', ') +
-        '.'
-    );
     for (const chunk of (
-      'The loader refuses these rows too, so overriding would not load them - ' +
-      'it would write everything up to the first one and then stop, leaving MySQL ' +
-      'part-populated. Fix them in the SOURCE data and re-run; the load is ' +
-      'idempotent by legacy_id, so a re-run resumes rather than duplicates.'
+      (r === b
+        ? 'The loader refuses every one of these rows too, so there is nothing an ' +
+          'override could have loaded - it would only write everything up to the ' +
+          'first one and then stop, leaving MySQL part-populated (ETL-01). '
+        : 'Some of these are refused by the loader as well (' +
+          (result.refusedByLoader || []).map((f) => f.check).join(', ') +
+          '). ') +
+      'Fix them in the SOURCE data and re-run; the load is idempotent by ' +
+      'legacy_id, so a re-run resumes rather than duplicates.'
     ).match(/.{1,68}(\s|$)/g) || []) {
       lines.push(`    ${chunk.trim()}`);
     }

@@ -4,7 +4,8 @@
  * =============================================================================
  *   npm run etl:preflight          report only, never loads
  *   npm run etl                    pre-flight, then load if it is clean
- *   npm run etl -- --i-have-reviewed-the-preflight    load despite findings
+ *
+ * THERE IS NO OVERRIDE FLAG, and there used to be (ETL-01, AR5). See below.
  *
  * THE PRE-FLIGHT ALWAYS RUNS. There is no way to load without it, because the
  * two reports it produces - mixed-case status counts and float rounding deltas
@@ -26,7 +27,31 @@ const { getPrisma, disconnect } = require('../config/prisma');
 const { runPreflight, formatReport } = require('./preflight');
 const { runMigration } = require('./migrate');
 
-const OVERRIDE = '--i-have-reviewed-the-preflight';
+/**
+ * WHY THERE IS NO `--i-have-reviewed-the-preflight` FLAG ANY MORE (ETL-01, AR5).
+ *
+ * There was one. Its purpose was to let an operator knowingly accept a BLOCKING
+ * finding and load anyway.
+ *
+ * THE FIRST TIME IT WAS ACTUALLY USED, it wrote two categories, one user and
+ * four of five donations, then threw on exactly the row the pre-flight had
+ * reported - leaving MySQL part-populated. `migrate.js` refuses an implausible
+ * date rather than inventing one, which is correct; but a `throw` fails the RUN,
+ * not the ROW.
+ *
+ * Checked afterwards rather than assumed: EVERY blocking finding is one the
+ * loader also refuses - implausible dates, orphaned category references, and
+ * case-variant emails, which collide on `uq_users_email`. So overriding one
+ * could never load the rows it was overriding. It could only convert a clean
+ * refusal, with nothing written, into a partial load.
+ *
+ * AN OPTION THAT CAN ONLY MAKE THINGS WORSE IS WORSE THAN NO OPTION. The first
+ * fix made the flag not apply to those findings - which left a documented flag
+ * that applied to nothing, i.e. the same defect one level up. It is gone.
+ *
+ * If a BLOCKING-but-genuinely-loadable finding is ever added, the flag comes
+ * back WITH IT, scoped to it, and not before.
+ */
 
 /**
  * Refuse anything that looks like production.
@@ -55,7 +80,18 @@ function assertLocalTarget(uri) {
 async function main() {
   const args = process.argv.slice(2);
   const preflightOnly = args.includes('--preflight-only');
-  const override = args.includes(OVERRIDE);
+
+  // A leftover flag from a previous run must not be silently ignored - that is
+  // how an operator concludes it worked.
+  const stale = args.find((a) => a.startsWith('--i-have-reviewed'));
+  if (stale) {
+    throw new Error(
+      `${stale} no longer exists. Every blocking finding is one the loader also ` +
+        'refuses, so overriding could only produce a partial load (ETL-01). Fix ' +
+        'the findings in the SOURCE data and re-run; the load is idempotent by ' +
+        'legacy_id, so a re-run resumes rather than duplicates.'
+    );
+  }
 
   assertLocalTarget(process.env.MONGODB_URI);
 
@@ -74,9 +110,11 @@ async function main() {
   console.log(formatReport(result));
 
   if (result.fatal.length > 0) {
-    // FATAL is not overridable. Strict mode is the one check whose failure
-    // means every subsequent write is untrustworthy, so there is no flag for it.
-    throw new Error('FATAL pre-flight finding. Not overridable.');
+    // FATAL is kept separate from BLOCKING even though neither can now be
+    // bypassed, because they mean different things: BLOCKING is "these ROWS
+    // cannot be loaded", FATAL is "NO row can be trusted". Strict mode is the
+    // only FATAL check, and it fails before the data is even examined.
+    throw new Error('FATAL pre-flight finding: the ETL connection is not in strict mode.');
   }
 
   if (preflightOnly) {
@@ -84,28 +122,18 @@ async function main() {
     return;
   }
 
-  // ETL-01. NOT OVERRIDABLE, and refused BEFORE anything is written.
-  //
-  // These are the findings whose rows `migrate.js` will also refuse. Overriding
-  // one does not load it: the loader writes every row up to it and then throws,
-  // which is how package 3.3's local donation load ended with two categories,
-  // one user and four of five donations in MySQL. A partial load is strictly
-  // worse than a refusal, so the flag does not reach this class.
-  if (result.refusedByLoader.length > 0) {
+  // ETL-01. Refused BEFORE anything is written, which is the whole point: the
+  // failure this replaces wrote two categories, one user and four of five
+  // donations before throwing on the fifth.
+  if (result.blocking.length > 0) {
+    const refused = result.refusedByLoader.map((f) => f.check);
     throw new Error(
-      `${result.refusedByLoader.length} pre-flight finding(s) that the LOADER also ` +
-        `refuses: ${result.refusedByLoader.map((f) => f.check).join(', ')}. ` +
-        `${OVERRIDE} does not apply to these - it would start the load and stop ` +
-        'partway, leaving MySQL part-populated. Fix them in the SOURCE data and ' +
-        're-run; the load is idempotent by legacy_id.'
-    );
-  }
-
-  if (result.blocking.length > 0 && !override) {
-    throw new Error(
-      `${result.blocking.length} blocking pre-flight finding(s). Resolve them in the ` +
-        `SOURCE data, or re-run with ${OVERRIDE} if you have read the report and ` +
-        'accept what it says. The ETL will not correct them for you.'
+      `${result.blocking.length} blocking pre-flight finding(s)` +
+        (refused.length > 0 ? `, all of which the LOADER also refuses: ${refused.join(', ')}` : '') +
+        '. Resolve them in the SOURCE data and re-run. There is no override: it ' +
+        'could only start the load and stop partway, leaving MySQL part-populated ' +
+        '(ETL-01). The load is idempotent by legacy_id, so a re-run resumes rather ' +
+        'than duplicates.'
     );
   }
 
