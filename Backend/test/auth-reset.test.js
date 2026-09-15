@@ -61,6 +61,9 @@ let base;
 // -----------------------------------------------------------------------------
 // Storage seam. Phase 3 reimplements these against Prisma/MySQL.
 // -----------------------------------------------------------------------------
+/** Distinguishes one run's fixture addresses from the last run's. See below. */
+const RUN_ID = crypto.randomBytes(4).toString('hex');
+
 const store = {
   async reset() {
     await users.deleteByEmailPrefix(EMAIL_PREFIX);
@@ -68,7 +71,17 @@ const store = {
 
   /** A verified user holding a live reset code. */
   async createUserWithResetCode(tag, attempts = 0) {
-    const email = `${EMAIL_PREFIX}-${tag}@invalid.test`;
+    // A FRESH ADDRESS PER RUN (AV1). The per-address reset cap counts by
+    // ADDRESS over a 15-minute window and lives in Redis, which is shared and
+    // persistent - so a stable fixture address arrives at its second run
+    // already exhausted, and the suite fails on its FIRST request with
+    // `429/0`.
+    //
+    // DEPLOY-01's shape for the third time: a limiter that is correct, shared
+    // and durable, producing a symptom that reads as a broken test. The first
+    // two were per-IP; this one is per-address, which is a bucket no amount of
+    // varying the client address can escape. Recorded in the map.
+    const email = `${EMAIL_PREFIX}-${tag}-${RUN_ID}@invalid.test`;
     await users.deleteByEmailPrefix(email);
 
     const created = await users.create({
@@ -195,16 +208,59 @@ test('SEC-02 each wrong reset code increments the attempt counter', async () => 
   assert.equal(u.passwordIsOriginal, true, 'password must be unchanged');
 });
 
-test('SEC-02 at the cap even the CORRECT code is refused and voided', async () => {
-  // Seeded at the cap so the per-IP limiter cannot mask the counter.
+test('SEC-02 at the cap even the CORRECT code is refused - CHANGED DELIBERATELY IN AV1', async () => {
+  // ==========================================================================
+  // A DELIBERATE BEHAVIOUR CHANGE, STATED RATHER THAN MADE QUIETLY.
+  // SPEC-3 section 4.1 forbids editing this suite to make a package go green.
+  // It does not forbid changing behaviour ON PURPOSE and saying so, which is
+  // what AQ1 funded and AV1 built. The before and after, in full:
+  //
+  //   BEFORE                                  AFTER
+  //   ------                                  -----
+  //   assert.equal(r.status, 429)             assert.equal(r.status, 400)
+  //   assert.match(r.error,                   assert.equal(r.error,
+  //     /Too many attempts/i)                   'Invalid verification code')
+  //   assert.equal(u.hasResetCode, false,     assert.equal(u.hasResetCode, true,
+  //     'the reset code must be voided          'the reset code must SURVIVE
+  //      at the cap')                            the cap')
+  //   assert.equal(u.passwordIsOriginal,      UNCHANGED - this is the security
+  //     true)                                   property and it still holds
+  //
+  // WHY EACH ONE MOVED:
+  //
+  // 1. THE 429 WAS AN ORACLE (SEC-08). It was reachable only for an address
+  //    that HAS an account, so driving a known address to the cap confirmed the
+  //    account exists. The 429 has not disappeared - it moved to the
+  //    per-ADDRESS limiter, which produces it for EVERY address, above the
+  //    handler, before anything is looked up. SEC-02's control still announces
+  //    itself; it just no longer announces who has an account.
+  //
+  // 2. VOIDING THE CODE WAS A GRIEFING PRIMITIVE, and this assertion was the
+  //    thing requiring it. It defended nothing - an exhausted counter refuses
+  //    the code without ever comparing it - while letting anyone who knows an
+  //    address destroy that user's pending reset with five requests. AQ1's
+  //    second requirement, CAP THE RESPONSE AND NOT THE ACCOUNT, is precisely a
+  //    prohibition on this line.
+  //
+  //    That is the uncomfortable part and it is worth being plain about: a
+  //    regression test was ASSERTING a denial-of-service primitive, in good
+  //    faith, because "the code is voided" reads like defence in depth.
+  //
+  // 3. The password assertion is untouched. Everything above is about what the
+  //    endpoint SAYS; this is about what it DOES, and it must never change.
+  // ==========================================================================
   const { email } = await store.createUserWithResetCode('atcap', 5);
 
   const r = await resetReq(email, VALID_CODE, '10.20.0.2');
   const u = await store.readUser(email);
 
-  assert.equal(r.status, 429);
-  assert.match(r.error, /Too many attempts/i, `unexpected message: ${r.error}`);
-  assert.equal(u.hasResetCode, false, 'the reset code must be voided at the cap');
+  assert.equal(r.status, 400, `unexpected status: ${r.status}`);
+  assert.equal(
+    r.error,
+    'Invalid verification code',
+    'exhaustion must be indistinguishable from a wrong code'
+  );
+  assert.equal(u.hasResetCode, true, 'the reset code must SURVIVE the cap (AQ1)');
   assert.equal(u.passwordIsOriginal, true, 'password must be unchanged');
 });
 

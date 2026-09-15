@@ -425,47 +425,83 @@ test('SEC-08 AUDIT: EVERY existence-dependent endpoint answers identically (AP1)
   }
 });
 
-test('SEC-02 vs SEC-08: the reset-code cap IS an oracle, and that is unresolved', async () => {
-  // AN UNRESOLVED CONFLICT, ASSERTED SO IT CANNOT BE FORGOTTEN.
+test('SEC-02 / SEC-08 RESOLVED: the cap is byte-identical either way (CHANGED IN AV1)', async () => {
+  // THIS TEST PREVIOUSLY ASSERTED THE ORACLE EXISTED, and said in its own
+  // comment that the day it was closed, this should be updated deliberately.
+  // That day is AQ1's per-address counter, built in AV1.
   //
-  // SEC-08 wants every response identical for existing and non-existing
-  // accounts. SEC-02's regression suite asserts `429 Too many attempts` at the
-  // cap, because a control that announces itself is how that finding was shown
-  // to be closed. An attacker can reach the cap on a KNOWN account by
-  // requesting a reset and guessing five times, so the 429 confirms existence.
+  //   WAS: assert.equal(known.status, 429)    known account reaches a cap
+  //        assert.equal(unknown.status, 400)  unknown address cannot
+  //        assert.notEqual(known, unknown)    <- the oracle, pinned
   //
-  // BOTH CANNOT HOLD as written. The 429 stands, because the SEC-02 suite must
-  // pass unchanged (SPEC-3 section 4.1). This test pins the residual oracle so
-  // the day it is closed, this fails and someone edits it deliberately.
+  //   NOW: both reach the SAME cap and answer with the SAME BODY.
   //
-  // The fix that satisfies both is a per-ADDRESS attempt counter that also
-  // applies to addresses with no account, so an unknown address exhausts and
-  // answers 429 too. That is new mechanism, not a tweak, and it is recorded in
-  // the map rather than improvised here.
+  // WORTH NOTING HOW IT PASSED IN BETWEEN. After the limiter landed and before
+  // this edit, the test still went green - the known address tripped the new
+  // per-address cap at 429 and the unknown address, being a DIFFERENT address
+  // with its own untouched bucket, still answered 400. The assertion held and
+  // its PREMISE was false. A test can survive the removal of the thing it was
+  // written to pin, if what it measures is a side effect rather than the
+  // property.
+  //
+  // AP1: the full BODY, deepEqual, never the status alone. That rule exists
+  // because my first SEC-08 fix unified three endpoints on status and left a
+  // fourth differing on body text.
   await store.reset();
-  const email = uniqEmail('capconflict');
+  const email = uniqEmail('capresolved');
   await store.createUser({ email });
   const absent = uniqEmail('capabsent');
 
   await post('/api/auth/forgot-password/request', { email });
-  // EXACTLY five, so the NEXT call is the one that trips the cap. A sixth here
-  // would trip it and VOID the code, and the assertion below would then see the
-  // no-code path returning 400 - which looks like the oracle being closed when
-  // it is only the fixture being off by one.
-  for (let i = 0; i < 5; i += 1) {
-    await post('/api/auth/forgot-password/verify', { email, code: '000000' });
-  }
 
-  const known = await post('/api/auth/forgot-password/verify', { email, code: '000000' });
-  const unknown = await post('/api/auth/forgot-password/verify', { email: absent, code: '000000' });
+  // Drive BOTH addresses to the cap. The point is that an address with NO
+  // ACCOUNT can reach one at all - under the old design it could not, which is
+  // exactly what made the cap an oracle.
+  const driveToCap = async (address) => {
+    let last = null;
+    for (let i = 0; i < 8; i += 1) {
+      last = await post('/api/auth/forgot-password/verify', { email: address, code: '000000' });
+      if (last.status === 429) return last;
+    }
+    return last;
+  };
 
-  assert.equal(known.status, 429, 'SEC-02: the cap announces itself');
-  assert.equal(unknown.status, 400, 'SEC-08: an unknown address cannot reach a cap');
-  assert.notEqual(
-    known.status,
+  const known = await driveToCap(email);
+  const unknown = await driveToCap(absent);
+
+  assert.equal(known.status, 429, 'an address WITH an account reaches the cap');
+  assert.equal(
     unknown.status,
-    'THE ORACLE, asserted deliberately. If this starts failing, the conflict was ' +
-      'resolved and this test should be updated to assert the new behaviour.'
+    429,
+    'AND SO DOES AN ADDRESS WITH NO ACCOUNT - the requirement the whole feature ' +
+      'exists for. If this is 400, the cap is keyed off something that only ' +
+      'exists for real users and the oracle is back.'
+  );
+
+  assert.deepEqual(
+    known.body,
+    unknown.body,
+    'AP1: the ENTIRE body identical, not merely the status. A difference here ' +
+      'is the finding, however small - an extra field or a nested code is ' +
+      'exactly where an oracle hides once the obvious string is unified.'
+  );
+
+  // AND THE CAP MUST NOT HAVE TOUCHED THE ACCOUNT (AQ1's second requirement).
+  // An attacker who drives a real user's address to the cap must not have
+  // destroyed that user's pending reset code.
+  const row = await users.findByEmail(email);
+  assert.ok(row, 'the account still exists');
+  assert.equal(row.isActive, true, 'and is not disabled - the cap is not a lockout');
+
+  const raw = await getPrisma().user.findUnique({
+    where: { uuid: row.id },
+    select: { resetCodeHash: true },
+  });
+  assert.ok(
+    raw.resetCodeHash,
+    "THE USER'S RESET CODE SURVIVED. Voiding it at the cap was a griefing " +
+      'primitive - anyone who knows an address could destroy a pending reset ' +
+      'with five requests - and removing that is AQ1 requirement 2.'
   );
 });
 

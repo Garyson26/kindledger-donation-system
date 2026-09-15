@@ -886,6 +886,86 @@ claim - a severity derived from a mechanism is an inherited guess at an outcome.
 
 ---
 
+## AV1 - the per-address reset cap. SEC-02 vs SEC-08 RESOLVED.
+
+**`config/rateLimiters.resetAttemptLimiter`.** Five attempts per address per
+fifteen minutes, shared by `/forgot-password/verify` and `/reset`.
+
+### AQ1's three requirements, and how each is met
+
+**1. COVERS ADDRESSES WITH NO ACCOUNT.** It is a limiter, not a column. A column
+can only exist for an address that has a row, which was the whole problem.
+
+**2. CAPS THE RESPONSE, NOT THE ACCOUNT.** It is a WINDOW: it expires by itself,
+writes nothing to the user's row, and `/forgot-password/request` is deliberately
+NOT behind it, so a delayed user can always obtain a fresh code and a fresh
+per-account budget. A per-address counter that disabled anything would be a
+denial-of-service primitive handed to anyone who knows an address.
+
+**3. FULL BODY IDENTICAL AT THE CAP.** Asserted with `deepEqual` over the whole
+body, in `test:auth-char`, for an address with an account and one without.
+
+### THE UNIFORMITY IS STRUCTURAL, NOT MAINTAINED BY HAND
+
+The cap response is produced by MIDDLEWARE, before the handler, before anything
+has been looked up. **There is no code path in which the two cases could
+diverge** - as opposed to two branches a later edit has to keep byte-identical.
+
+That distinction is the lesson of AP1, which exists because my first SEC-08 fix
+unified three endpoints and left a fourth differing on body text. A property
+maintained by construction does not need the discipline that one maintained by
+agreement does.
+
+### VOIDING THE RESET CODE WAS A GRIEFING PRIMITIVE, AND A TEST REQUIRED IT
+
+The old cap did `clearResetCode(user.id)`. It defended nothing - an exhausted
+counter refuses the code without ever comparing it - while letting anyone who
+knows an address destroy that user's pending reset with five requests.
+
+**SEC-02's regression suite asserted it**: `'the reset code must be voided at the
+cap'`. A regression test was requiring a denial-of-service primitive, in good
+faith, because "the code is voided" reads like defence in depth. That is the
+most useful thing in this package: **a test can encode a harm as a requirement,
+and the more security-shaped the assertion sounds, the longer it survives.**
+
+### The deliberate edit (SPEC-3 section 4.1)
+
+Stated rather than made quietly, with the before and after in the test file
+itself:
+
+| Before | After |
+|---|---|
+| `status === 429` | `status === 400` |
+| `/Too many attempts/i` | `'Invalid verification code'` |
+| `hasResetCode === false` - *"must be voided at the cap"* | `hasResetCode === true` - **must SURVIVE the cap** |
+| `passwordIsOriginal === true` | **unchanged** - the security property, and it still holds |
+
+The 429 has not disappeared. It moved to the per-address limiter, which produces
+it for EVERY address. SEC-02's control still announces itself; it no longer
+announces who has an account.
+
+### A TEST THAT PASSED WITH A FALSE PREMISE
+
+`auth-characterisation`'s oracle test went green after the limiter landed and
+before it was edited: the known address tripped the new per-address cap at 429,
+and the unknown address - a DIFFERENT address with its own untouched bucket -
+still answered 400. The assertion held and its premise was gone.
+
+**A test can survive the removal of the thing it was written to pin, when what
+it measures is a side effect rather than the property.** It only failed honestly
+once rewritten to drive BOTH addresses to the cap, which is what the finding was
+always about.
+
+### DEPLOY-01, a third time
+
+A per-address cap over a 15-minute window plus a shared, durable Redis store
+made `test:auth` fail on its FIRST request with `429/0` - the previous run's
+budget, on a stable fixture address. The first two instances were per-IP; this
+bucket is one no amount of varying the client address can escape. Fixture
+addresses are now unique per run.
+
+---
+
 ## AV2 - A CORRECT CONTROL, ACTING ON A CORRECT FINDING, BROKE A LIVE PATH
 
 **Its own class. Not AT3, not AU3, and the difference is the useful part.**
