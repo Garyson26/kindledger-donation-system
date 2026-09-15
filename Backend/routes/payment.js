@@ -1,19 +1,113 @@
+/**
+ * =============================================================================
+ * Payments - MIGRATED TO MySQL (SPEC-3 package 3.4)
+ * =============================================================================
+ * NO MONGOOSE. This was the LAST live writer of donations, so migrating it
+ * closes the final `split` entity and completes the 3.2 + 3.3 + 3.4 merge unit
+ * (ADR-057): until now a donation taken through `/initiate` landed in MongoDB
+ * while `routes/donations.js` read MySQL, and was invisible to the admin
+ * console, the receipt and the charts.
+ *
+ * WHAT IS PRESERVED EXACTLY, because `test/payment-callbacks.test.js` is
+ * SEC-01's regression suite and its scenarios must pass unchanged: hash
+ * verification before any state change, the status/endpoint match in both
+ * directions, idempotency on an already-paid donation, the server-priced amount
+ * comparison in integer minor units, PayU's vocabulary stored verbatim with no
+ * invented text, field-level merges rather than subdocument replacement, and
+ * every redirect target and query string.
+ *
+ * WHAT CHANGED, and each is a finding rather than a tidy-up - see the notes at
+ * each site: SEC-06, SEC-07, SEC-11, SEC-14, SEC-19, PAY-01, ADR-012/026,
+ * SPEC-3 section 4.6, and U-2's design half.
+ * =============================================================================
+ */
+
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const payuConfig = require('../config/payu');
-const Donation = require('../models/Donation');
-// models/Category IS DELIBERATELY NOT IMPORTED (AS2). Package 3.1 replaced
-// every use in this file with services/categoryBridge and left the import
-// behind; it was dead, and a dead Mongoose import is the seed of the next
-// crossing - the next person editing this file has `Category` in scope.
-// Found by test/migration-state.test.js, which the AR1 audit could not have
-// found because that audit enumerated CALL SITES and a dead import has none.
-// TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
-// this file is not migrated until a later package, so category reads go through
-// the bridge, which tries MySQL first and falls back to MongoDB with a warning.
-const categoryBridge = require('../services/categoryBridge');
 
+const { donations, categories, toMinorUnits: sharedToMinorUnits } = require('../repositories');
+const { refuse, failed } = require('../utils/respond');
+const { idShape } = require('../services/legacyBridge');
+const authMiddleware = require('../middleware/authMiddleware');
+// SEC-11: built in Phase 2 and never wired (ADR-042's shape - the limiter
+// existing and the limiter being used are different claims). Wired below.
+const { paymentInitiateLimiter } = require('../config/rateLimiters');
+
+// services/categoryBridge IS NO LONGER USED HERE. `category` is
+// MySQL-authoritative (config/migrationState), so this file reads the
+// repository directly and the malformed-id case is handled by checking the id
+// SHAPE before dispatch - which is what the bridge was doing for it. That
+// removes two of the bridge's three remaining call sites; only
+// admin.js's countCategories is left, and ADR-050 retires it in 3.6.
+
+/** BUG-08's ceiling, applied to quantity rather than to a page size (PAY-01). */
+const MAX_QUANTITY = 10_000;
+const MAX_EXTRA_MAJOR = 1_000_000;
+
+/**
+ * The transaction reference sent to PayU and used by the receipt lookup.
+ *
+ * SEC-06. The old scheme was `TXN${Date.now()}${rand(0,999)}` - the timestamp
+ * is recoverable from the value, so the search space collapses to a known
+ * millisecond window times one thousand. It was the ONLY thing protecting
+ * `GET /status/:txnid`, which is unauthenticated.
+ *
+ * 80 bits of randomness, no structure. Kept SHORT deliberately: the previous
+ * scheme produced 16-17 characters and is proven against the live gateway at
+ * that length, so this stays at 23 rather than using a 36-character uuid.
+ *
+ * **UNVERIFIED (AU2): PayU's documented maximum txnid length.** I could not
+ * check it against the gateway from here. 23 characters is shorter than every
+ * limit I am aware of and longer than nothing we have already sent
+ * successfully, but the claim "PayU accepts this" rests on that reasoning and
+ * not on an observation. It is the one thing in this package to confirm against
+ * the PayU sandbox before cutover.
+ */
+function mintTransactionRef() {
+  return 'TXN' + crypto.randomBytes(10).toString('hex');
+}
+
+/**
+ * Optional authentication (BUG-06, fixed rather than inherited).
+ *
+ * `routes/donations.js` had a helper of this name that DELEGATED to
+ * authMiddleware whenever any Authorization header was present - so a donor
+ * whose session had lapsed was refused with a 401 instead of falling through to
+ * a guest donation. That endpoint was deleted in 3.3 and the helper with it;
+ * this one is written the way that one should have been.
+ *
+ * A BAD TOKEN IS A GUEST, NOT A REFUSAL. The endpoint does not require an
+ * identity, so failing to establish one is not an error - and on the donation
+ * path, turning a lapsed session into a refusal loses the donation.
+ */
+function optionalAuth(req, res, next) {
+  const header = req.header('Authorization') || req.headers['authorization'];
+  if (!header) return next();
+
+  // A local response object: authMiddleware refuses by WRITING a response, and
+  // here a refusal must be swallowed rather than sent.
+  let refused = false;
+  const sink = {
+    status() {
+      return sink;
+    },
+    json() {
+      refused = true;
+      return sink;
+    },
+  };
+
+  Promise.resolve(authMiddleware(req, sink, () => {}))
+    .catch(() => {
+      refused = true;
+    })
+    .finally(() => {
+      if (refused) delete req.user;
+      next();
+    });
+}
 
 // Helper function to generate PayU hash
 function generateHash(data) {
@@ -95,129 +189,209 @@ function toMinorUnits(value) {
 }
 
 // Initiate Payment
-router.post('/initiate', async (req, res) => {
+/**
+ * SEC-14: a hash must LOOK like a hash before it is decoded.
+ *
+ * `verifyHash` compares lengths and then calls `Buffer.from(received, 'hex')`.
+ * A 128-character string that is not hex decodes to fewer than 64 bytes, and
+ * `timingSafeEqual` throws a RangeError on a length mismatch - which escapes as
+ * an unhandled rejection and answers 500 instead of refusing.
+ *
+ * The donation stays Pending, so it FAILS CLOSED and no money moves. It is
+ * still wrong: a malformed input from an untrusted source must be a DECISION,
+ * and a test asserting only the donation state cannot tell a refusal from a
+ * crash. That is SEC-14's actual content, and it is why AC1 asks for the
+ * mechanism.
+ */
+function isWellFormedHash(value) {
+  return typeof value === 'string' && /^[0-9a-f]{128}$/i.test(value);
+}
+
+/**
+ * Start a payment.
+ *
+ * SEC-11: rate limited. The limiter has existed since Phase 2 and nothing
+ * imported it, so an unauthenticated caller could create donation rows and
+ * trigger gateway traffic without limit.
+ */
+router.post('/initiate', paymentInitiateLimiter(), optionalAuth, async (req, res) => {
   try {
-    const {
-      firstname,
-      email,
-      phone,
-      productinfo,
-      category,
-      item,
-      quantity,
-      extraAmount,
-      userId // Optional - will be present if user is logged in
-    } = req.body;
+    const { firstname, email, phone, productinfo, category, item, quantity, extraAmount } =
+      req.body || {};
 
-    // Validation
-    if (!firstname || !email) {
-      return res.status(400).json({
-        error: 'Firstname and email are required'
-      });
-    }
-
-    if (!category) {
-      return res.status(400).json({
-        error: 'Category is required'
-      });
-    }
-
-    // Server-side amount calculation — never trust client-supplied amount (BE-CRIT-01)
+    // SEC-07: `userId` IS NOT READ FROM THE BODY.
     //
-    // Via the bridge (ADR-050): categories moved to MySQL in package 3.1 and
-    // this file does not migrate until 3.5. resolveCategory NEVER THROWS on a
-    // malformed id - the previous Category.findById raised a CastError, so a
-    // junk category id produced a 500 here rather than the 400 below. That is
-    // the SEC-14 shape on the pricing path.
-    const dbCategory = await categoryBridge.resolveCategory(category);
-    if (!dbCategory) {
-      return res.status(400).json({ error: 'Invalid category' });
+    // It used to be destructured from `req.body` on an endpoint with no
+    // authentication at all, so anyone on the internet could attribute a
+    // donation to any account they could name - writing rows into a stranger's
+    // donation history. The identity now comes from the token or there is no
+    // identity, which is what `optionalAuth` is for: a guest donation is a
+    // donation with no user, not a donation with a user the caller asserted.
+    const donorUserId = req.user && req.user.id ? req.user.id : null;
+
+    if (!firstname || !email) {
+      return refuse(res, 400, 'Firstname and email are required');
+    }
+    if (!category) {
+      return refuse(res, 400, 'Category is required');
     }
 
-    const qty = Math.max(1, parseInt(quantity, 10) || 1);
-    const extra = Math.max(0, Math.min(1_000_000, parseFloat(extraAmount) || 0));
-    const baseAmt = dbCategory.donationAmount * qty;
-    const totalAmt = +(baseAmt + extra).toFixed(2);
+    // The category, read from MySQL directly. The SHAPE is checked before the
+    // lookup so a malformed id is a 400 rather than a driver error - the job
+    // the bridge was doing here (ADR-050).
+    const shape = idShape(category);
+    const dbCategory =
+      shape === 'objectid'
+        ? await categories.findByLegacyId(String(category).trim())
+        : shape === 'uuid'
+          ? await categories.findById(String(category).trim())
+          : null;
+    if (!dbCategory) {
+      return refuse(res, 400, 'Invalid category');
+    }
 
-    // Generate unique transaction ID
-    const txnid = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    // PAY-01: BOTH inputs are bounded now.
+    //
+    // `extraAmount` was clamped and `quantity` was not, on adjacent lines - and
+    // the asymmetry is the tell: a reviewer reading the pair concludes that
+    // amounts are bounded. `quantity=99999999999999999999` priced a donation at
+    // 1.5e23, and against MySQL it would have been an unauthenticated 500 when
+    // the value failed to convert to integer paise.
+    const qty = Math.min(MAX_QUANTITY, Math.max(1, Number.parseInt(quantity, 10) || 1));
+    const extraMajor = Math.max(0, Math.min(MAX_EXTRA_MAJOR, Number.parseFloat(extraAmount) || 0));
 
-    // Create donation record in database
-    const newDonation = new Donation({
+    // Money in integer minor units from here down (ADR-010). The category price
+    // is ALREADY minor units in MySQL, so the multiplication is exact and there
+    // is no float in the chain at all - the previous version computed
+    // `donationAmount * qty + extra` in floating point and rounded at the edge.
+    const extraMinor = sharedToMinorUnits(extraMajor);
+    if (extraMinor === null) {
+      return refuse(res, 400, 'extraAmount is not a valid amount');
+    }
+    const baseMinor = dbCategory.donationAmountMinor * qty;
+    const totalMinor = baseMinor + extraMinor;
+
+    const txnid = mintTransactionRef();
+
+    const donation = await donations.create({
+      // NO MINTED `legacyId`, AND THIS IS AE1-b's TRIGGER FIRING.
+      //
+      // Categories and users minted ObjectId-shaped legacy ids for one reason:
+      // `Donation.category` and `Donation.userId` were Mongoose ObjectId refs,
+      // and a MySQL-only row could not be referenced by one. THIS LINE IS THE
+      // LAST PLACE THAT MATTERED - it is where a donation referencing them was
+      // written - and it now writes MySQL.
+      //
+      // So a donation created from here has `legacy_id` NULL and is addressed
+      // by its uuid. ADR-051 anticipated exactly this state and warns the ETL
+      // not to read `legacy_id IS NULL` as "created after cutover"; that is now
+      // a live condition rather than a hypothetical one.
+      transactionRef: txnid,
       donorName: firstname,
       donorEmail: email,
-      donorPhone: phone || '',
-      userId: userId || null, // Will be null for guest users
+      donorPhone: phone || null,
+      userId: donorUserId || undefined,
+      categoryId: dbCategory.legacyId || dbCategory.id,
       item: item || productinfo || 'Donation',
-      category: category,
       quantity: qty,
-      amount: totalAmt,
-      baseAmount: baseAmt,
-      extraAmount: extra,
+      baseAmountMinor: baseMinor,
+      extraAmountMinor: extraMinor,
+      amountMinor: totalMinor,
       status: 'Pending',
       paymentStatus: 'Pending',
-      transactionId: txnid
     });
 
-    const savedDonation = await newDonation.save();
+    const externalId = donation.legacyId || donation.id;
 
-    // Prepare payment data
     const paymentData = {
       key: payuConfig.MERCHANT_KEY,
-      txnid: txnid,
-      amount: totalAmt.toFixed(2),
+      txnid,
+      amount: (totalMinor / 100).toFixed(2),
       productinfo: productinfo || 'Donation',
-      firstname: firstname,
-      email: email,
+      firstname,
+      email,
       phone: phone || '9999999999',
       surl: payuConfig.SUCCESS_URL,
       furl: payuConfig.FAILURE_URL,
       curl: payuConfig.CANCEL_URL,
-      notify_url: payuConfig.NOTIFY_URL, // Webhook for automatic status updates
-      // UDF fields for custom data
-      udf1: category || '',
+      notify_url: payuConfig.NOTIFY_URL,
+      udf1: dbCategory.legacyId || dbCategory.id,
       udf2: item || '',
-      udf3: qty.toString(),
-      udf4: savedDonation._id.toString(), // Use the saved donation ID
-      udf5: userId || '' // Store userId for reference
+      udf3: String(qty),
+      udf4: externalId,
+      // U-2's design half: `udf5` carried the client-supplied userId, which
+      // SEC-07 has just removed as an input. It now carries the AUTHENTICATED
+      // user's id, or nothing - so the value in PayU's records is one we
+      // established rather than one the caller asserted.
+      udf5: donorUserId || '',
     };
 
-    // Generate hash
     paymentData.hash = generateHash(paymentData);
 
-    // Return payment data and PayU URL
     res.json({
       success: true,
       paymentData,
       payuUrl: `${payuConfig.PAYU_BASE_URL}/_payment`,
-      donationId: savedDonation._id,
-      message: 'Payment initiated successfully'
+      donationId: externalId,
+      message: 'Payment initiated successfully',
     });
-
   } catch (error) {
-    console.error('Payment initiation error:', error);
-    res.status(500).json({
-      error: 'Failed to initiate payment'
-    });
+    // SEC-19: the detail goes to the log, never to the client.
+    return failed(res, 'Failed to initiate payment', error, { tag: 'payment' });
   }
 });
 
-// Payment Success Callback
+/**
+ * Resolve a donation from a callback, WITHOUT letting a malformed id reach the
+ * database (AD1b).
+ */
+async function resolveDonation(externalId) {
+  const shape = idShape(externalId);
+  if (shape === 'objectid') return donations.findByLegacyId(String(externalId).trim());
+  if (shape === 'uuid') return donations.findById(String(externalId).trim());
+  return null;
+}
+
+/**
+ * SPEC-3 section 4.6: THE ALTERNATE-NAME FALLBACKS ARE DELETED.
+ *
+ * The handlers used to read `paymentData.AMOUNT`, `.STATUS`, `.TXNID`,
+ * `.MIHPAYID`, `udf_4` and `udf[4]` while `verifyHash` read the canonical
+ * lowercase names only. That disagreement is a PARSER DIFFERENTIAL, and it was
+ * safe purely by accident of direction: a payload lacking the lowercase form
+ * hashed differently and was rejected before any fallback was consulted.
+ *
+ * The fallbacks were therefore dead code - but dead code that makes the
+ * differential one edit away from being live. Someone reads SEC-14, decides the
+ * input handling is brittle, makes `verifyHash` case-tolerant, and at that
+ * moment a payload can VERIFY against one field and be PROCESSED from another.
+ * That is a hash-verified authentication bypass assembled from two individually
+ * reasonable changes.
+ *
+ * ADR-026 said the fix is to delete the fallbacks rather than widen the
+ * verifier. Done here. The signed field names are the only field names.
+ */
+const signedDonationId = (d) => d.udf4;
+
+/** Unsigned text, stored verbatim or not at all (ADR-021). Never our words. */
+function payuErrorText(d) {
+  return d.error_Message || d.error || null;
+}
+
+function payuFailureReason(d) {
+  return d.field9 || null;
+}
+
+// =============================================================================
+// POST /success
+// =============================================================================
 router.post('/success', async (req, res) => {
   try {
-    const paymentData = req.body;
+    const paymentData = req.body || {};
 
-    console.log('========================================');
-    console.log('Payment Success Callback - Full Request Body:', JSON.stringify(paymentData, null, 2));
-    console.log('========================================');
-
-    // Verify hash
-    if (!verifyHash(paymentData)) {
-      console.error('✗ Hash verification failed');
+    if (!isWellFormedHash(paymentData.hash) || !verifyHash(paymentData)) {
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
     }
-
-    console.log('✓ Hash verified successfully');
 
     // SEC-01 (1/4): a valid hash is not a successful payment. Refuse anything
     // whose SIGNED status is not a success - notably a genuine, correctly
@@ -227,288 +401,211 @@ router.post('/success', async (req, res) => {
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=payment_not_successful`);
     }
 
-    // Extract donation ID - try multiple possible field names
-    const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
-
+    const donationId = signedDonationId(paymentData);
     if (!donationId) {
-      console.error('✗ No donation ID found in payment data');
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
     }
 
-    // SEC-01 (2/4): load the donation before mutating it, so the signed
-    // amount can be checked against what we priced server-side.
-    const donation = await Donation.findById(donationId);
+    // SEC-01 (2/4): load before mutating, so the signed amount can be checked
+    // against what we priced server-side.
+    const donation = await resolveDonation(donationId);
     if (!donation) {
-      console.error('✗ Donation NOT FOUND in database:', donationId);
+      console.error('Success callback: donation not found', donationId);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
     }
 
-    // SEC-01 (3/4): idempotency. A donation already marked Paid is not
-    // rewritten - a replayed genuine success must not overwrite the original
-    // payment metadata or move paymentDate forward.
+    // SEC-01 (3/4): idempotency. Checked here so an already-paid donation gets
+    // the same success redirect it always did - and ENFORCED in the database by
+    // `onlyIfNotPaid` below, because this read-then-write is exactly what
+    // ADR-012 says cannot be relied upon under two concurrent callbacks.
     if (donation.paymentStatus === 'Paid') {
-      console.log('Success callback: donation already Paid, no-op:', donationId);
       return res.redirect(
         `${payuConfig.FRONTEND_SUCCESS_URL}?txnid=${encodeURIComponent(paymentData.txnid || '')}&amount=${encodeURIComponent(paymentData.amount || '')}&status=success`
       );
     }
 
-    // SEC-01 (4/4): the signed amount must equal the server-priced amount,
-    // compared as integer minor units.
-    const signedMinor = toMinorUnits(paymentData.amount || paymentData.AMOUNT);
-    const expectedMinor = toMinorUnits(donation.amount);
-    if (signedMinor === null || expectedMinor === null || signedMinor !== expectedMinor) {
-      console.error('✗ Amount mismatch', {
+    // SEC-01 (4/4): the signed amount must equal the server-priced amount, as
+    // integer minor units. The stored side is ALREADY integer paise now, so
+    // only the gateway's decimal string is converted - one conversion in the
+    // comparison instead of two.
+    const signedMinor = toMinorUnits(paymentData.amount);
+    if (signedMinor === null || signedMinor !== donation.amountMinor) {
+      console.error('Success callback: amount mismatch', {
         txnid: paymentData.txnid,
         donationId,
         signedMinor,
-        expectedMinor
+        expectedMinor: donation.amountMinor,
       });
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=amount_mismatch`);
     }
 
-    console.log('Updating donation:', donationId);
+    const result = await donations.settlePayment(donation.id, {
+      onlyIfNotPaid: true,
+      status: 'Approved',
+      paymentStatus: 'Paid',
+      transactionRef: paymentData.txnid,
+      mihpayid: paymentData.mihpayid || null,
+      amountMinor: signedMinor,
+      mode: paymentData.mode || null,
+      bankRefNum: paymentData.bank_ref_num || null,
+      // Verbatim. UNSIGNED data (ADR-026) recorded for observability only -
+      // never read it for a state decision.
+      gatewayStatus: paymentData.status,
+      paidAt: new Date(),
+    });
 
-    // Field-level $set, NOT a whole-subdocument assignment (ADR-024 item 2).
-    //
-    // Assigning `paymentDetails: {...}` makes Mongoose REPLACE the entire
-    // subdocument. Since /webhook also writes paymentDetails - including
-    // `status` and `error_Message` - and the two callbacks race with no
-    // ordering guarantee (ADR-012), a /success arriving second used to wipe
-    // whatever the webhook had recorded. Dotted paths merge instead.
-    //
-    // `status` is now written verbatim from the payload rather than omitted, so
-    // the system can be asked what PayU actually sends. It is UNSIGNED data
-    // (ADR-026) recorded for observability only - never read it for a state
-    // decision.
-    const updatedDonation = await Donation.findByIdAndUpdate(
-      donationId,
-      {
-        $set: {
-          status: 'Approved',
-          paymentStatus: 'Paid',
-          transactionId: paymentData.txnid || paymentData.TXNID,
-          'paymentDetails.mihpayid': paymentData.mihpayid || paymentData.MIHPAYID,
-          'paymentDetails.amount': paymentData.amount || paymentData.AMOUNT,
-          'paymentDetails.mode': paymentData.mode || paymentData.MODE,
-          'paymentDetails.bank_ref_num': paymentData.bank_ref_num || paymentData.BANK_REF_NUM,
-          'paymentDetails.status': paymentData.status,
-          'paymentDetails.paymentDate': new Date()
-        }
-      },
-      { new: true, runValidators: false }
-    );
-
-    if (updatedDonation) {
-      console.log('✓ Donation successfully marked as paid:', donationId);
-    } else {
-      console.error('✗ Donation disappeared mid-request:', donationId);
+    if (!result.applied && result.reason === 'already-settled') {
+      // A concurrent callback won. Not an error, and not something to overwrite.
+      console.log('Success callback: already settled by a concurrent write', donationId);
     }
 
-    // Redirect to frontend success page
-    res.redirect(`${payuConfig.FRONTEND_SUCCESS_URL}?txnid=${encodeURIComponent(paymentData.txnid || '')}&amount=${encodeURIComponent(paymentData.amount || '')}&status=${encodeURIComponent(paymentData.status || '')}`);
-
+    res.redirect(
+      `${payuConfig.FRONTEND_SUCCESS_URL}?txnid=${encodeURIComponent(paymentData.txnid || '')}&amount=${encodeURIComponent(paymentData.amount || '')}&status=${encodeURIComponent(paymentData.status || '')}`
+    );
   } catch (error) {
-    console.error('Payment success handler error:', error);
-    console.error('Error stack:', error.stack);
+    console.error('[payment] success handler error:', error && error.stack ? error.stack : error);
     res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
   }
 });
 
-// Payment Failure Callback
+// =============================================================================
+// POST /failure
+// =============================================================================
 router.post('/failure', async (req, res) => {
   try {
-    const paymentData = req.body;
+    const paymentData = req.body || {};
 
-    // Verify hash before mutating any state (BE-CRIT-03)
-    if (!verifyHash(paymentData)) {
+    if (!isWellFormedHash(paymentData.hash) || !verifyHash(paymentData)) {
       console.warn('Failure callback: hash mismatch from', req.ip);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
     }
 
     // SEC-01: refuse a signed SUCCESS payload here. The status must match the
-    // endpoint in both directions, otherwise a genuine success replayed at
-    // this URL would mark a paid donation as Rejected/Failed.
+    // endpoint in both directions, or a genuine success replayed at this URL
+    // would mark a paid donation as Rejected/Failed.
     if (isSuccessStatus(paymentData.status)) {
       console.warn('Failure callback: refusing a signed success payload', paymentData.txnid);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=status_mismatch`);
     }
 
-    // Extract donation ID - try multiple possible field names
-    const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
+    const donationId = signedDonationId(paymentData);
+    const errorMessage = payuErrorText(paymentData);
+    const failureReason = payuFailureReason(paymentData);
 
-    // Store exactly what PayU sent, or nothing. The previous `|| 'Payment
-    // failed'` fallback wrote OUR string into a field meant to hold PayU's,
-    // making the two indistinguishable in the data - so the stored value could
-    // never answer "what did PayU actually say?" (ADR-021).
-    const errorMessage = paymentData.error_Message ||
-                        paymentData.error ||
-                        paymentData.Error_Message ||
-                        paymentData.ERROR_MESSAGE ||
-                        null;
-
-    const failureReason = paymentData.field9 ||
-                         paymentData.field_9 ||
-                         paymentData['field[9]'] ||
-                         null;
-
-    // Update donation status if donationId exists
     if (donationId) {
-      // Field-level $set so a concurrent /webhook write is merged rather than
-      // clobbered (ADR-024 item 2).
-      const updateData = {
-        $set: {
+      const donation = await resolveDonation(donationId);
+      if (!donation) {
+        console.error('Failure callback: donation not found', donationId);
+      } else {
+        // ADR-012: a donation already Paid is TERMINAL. A late or replayed
+        // failure must not walk it back, and `onlyIfNotPaid` is what makes that
+        // true under concurrency rather than merely intended.
+        await donations.settlePayment(donation.id, {
+          onlyIfNotPaid: true,
           status: 'Rejected',
           paymentStatus: 'Failed',
-          transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
+          transactionRef: paymentData.txnid || undefined,
           failureReason: failureReason || errorMessage,
-          errorMessage: errorMessage,
-          'paymentDetails.mihpayid': paymentData.mihpayid || paymentData.MIHPAYID || null,
-          'paymentDetails.amount': paymentData.amount || paymentData.AMOUNT || 0,
-          'paymentDetails.mode': paymentData.mode || paymentData.MODE || null,
-          'paymentDetails.bank_ref_num': paymentData.bank_ref_num || paymentData.BANK_REF_NUM || null,
-          'paymentDetails.paymentDate': new Date(),
-          // Verbatim, no 'failure' fallback. This is PayU's vocabulary.
-          'paymentDetails.status': paymentData.status,
-          'paymentDetails.error_Message': errorMessage
-        }
-      };
-
-      try {
-        const updatedDonation = await Donation.findByIdAndUpdate(
-          donationId,
-          updateData,
-          { new: true }
-        );
-
-        if (!updatedDonation) {
-          console.error('Failure callback: donation not found', donationId);
-        }
-      } catch (updateError) {
-        console.error('Failure callback: DB update error', updateError.message);
+          errorMessage,
+          mihpayid: paymentData.mihpayid || null,
+          amountMinor: toMinorUnits(paymentData.amount),
+          mode: paymentData.mode || null,
+          bankRefNum: paymentData.bank_ref_num || null,
+          gatewayStatus: paymentData.status,
+          detailErrorMessage: errorMessage,
+          paidAt: new Date(),
+        });
       }
     }
 
-    // Redirect to frontend failure page
     // The friendly fallback belongs HERE, at the display boundary - not in the
     // stored value. Storing it would contaminate PayU's vocabulary; omitting it
     // here would show the donor the string "null".
-    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&error=${encodeURIComponent(errorMessage || 'Payment failed')}`);
-
+    res.redirect(
+      `${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&error=${encodeURIComponent(errorMessage || 'Payment failed')}`
+    );
   } catch (error) {
-    console.error('Payment failure handler error:', error);
+    console.error('[payment] failure handler error:', error && error.message ? error.message : error);
     res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
   }
 });
 
-// Payment Cancel Callback
+// =============================================================================
+// POST /cancel
+// =============================================================================
 router.post('/cancel', async (req, res) => {
   try {
-    const paymentData = req.body;
+    const paymentData = req.body || {};
 
-    // Verify hash before mutating any state (BE-CRIT-03)
-    if (!verifyHash(paymentData)) {
+    if (!isWellFormedHash(paymentData.hash) || !verifyHash(paymentData)) {
       console.warn('Cancel callback: hash mismatch from', req.ip);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=invalid_hash`);
     }
 
-    // SEC-01: refuse a signed SUCCESS payload here, for the same reason as
-    // /failure - a paid donation must not be walked back to Cancelled.
     if (isSuccessStatus(paymentData.status)) {
       console.warn('Cancel callback: refusing a signed success payload', paymentData.txnid);
       return res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=status_mismatch`);
     }
 
-    // Extract donation ID - try multiple possible field names
-    const donationId = paymentData.udf4 || paymentData.udf_4 || paymentData['udf[4]'];
+    const donationId = signedDonationId(paymentData);
 
-    // Update donation status if donationId exists
     if (donationId) {
-      // Store exactly what PayU sent, or nothing. The previous
-      // `|| 'Payment cancelled by user'` fallback wrote our own string into a
-      // field meant to hold PayU's (ADR-021).
-      const errorMessage = paymentData.error_Message ||
-                          paymentData.error ||
-                          paymentData.Error_Message ||
-                          paymentData.ERROR_MESSAGE ||
-                          null;
+      const errorMessage = payuErrorText(paymentData);
+      const failureReason = payuFailureReason(paymentData);
+      const donation = await resolveDonation(donationId);
 
-      const failureReason = paymentData.field9 ||
-                           paymentData.field_9 ||
-                           paymentData['field[9]'] ||
-                           null;
-
-      try {
-        // Field-level $set so a concurrent /webhook write is merged rather
-        // than clobbered (ADR-024 item 2).
-        const updatedDonation = await Donation.findByIdAndUpdate(
-          donationId,
-          {
-            $set: {
-              status: 'Pending',
-              paymentStatus: 'Cancelled',
-              transactionId: paymentData.txnid || paymentData.TXNID || 'N/A',
-              failureReason: failureReason || errorMessage,
-              errorMessage: errorMessage,
-              'paymentDetails.mihpayid': paymentData.mihpayid || paymentData.MIHPAYID || null,
-              'paymentDetails.amount': paymentData.amount || paymentData.AMOUNT || 0,
-              'paymentDetails.mode': paymentData.mode || paymentData.MODE || null,
-              'paymentDetails.bank_ref_num': paymentData.bank_ref_num || paymentData.BANK_REF_NUM || null,
-              'paymentDetails.paymentDate': new Date(),
-              // Verbatim, no 'cancelled' fallback. This is PayU's vocabulary,
-              // and per ADR-021 a real cancellation arrives as status=failure.
-              'paymentDetails.status': paymentData.status,
-              'paymentDetails.error_Message': errorMessage
-            }
-          },
-          { new: true }
-        );
-
-        if (!updatedDonation) {
-          console.error('Cancel callback: donation not found', donationId);
-        }
-      } catch (updateError) {
-        console.error('Cancel callback: DB update error', updateError.message);
+      if (!donation) {
+        console.error('Cancel callback: donation not found', donationId);
+      } else {
+        await donations.settlePayment(donation.id, {
+          onlyIfNotPaid: true,
+          status: 'Pending',
+          paymentStatus: 'Cancelled',
+          transactionRef: paymentData.txnid || undefined,
+          failureReason: failureReason || errorMessage,
+          errorMessage,
+          mihpayid: paymentData.mihpayid || null,
+          amountMinor: toMinorUnits(paymentData.amount),
+          mode: paymentData.mode || null,
+          bankRefNum: paymentData.bank_ref_num || null,
+          // Verbatim, no 'cancelled' fallback: per ADR-021 a real cancellation
+          // arrives as status=failure, and inventing the word would erase that.
+          gatewayStatus: paymentData.status,
+          detailErrorMessage: errorMessage,
+          paidAt: new Date(),
+        });
       }
     }
 
-    // Redirect to frontend
-    res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&status=cancelled`);
-
+    res.redirect(
+      `${payuConfig.FRONTEND_FAILURE_URL}?txnid=${encodeURIComponent(paymentData.txnid || 'N/A')}&status=cancelled`
+    );
   } catch (error) {
-    console.error('Payment cancel handler error:', error);
+    console.error('[payment] cancel handler error:', error && error.message ? error.message : error);
     res.redirect(`${payuConfig.FRONTEND_FAILURE_URL}?error=processing_error`);
   }
 });
 
-// PayU Webhook/Notify URL - This is called by PayU automatically
+// =============================================================================
+// POST /webhook - called by PayU's servers, not the browser
+// =============================================================================
 router.post('/webhook', async (req, res) => {
   try {
-    const paymentData = req.body;
+    const paymentData = req.body || {};
 
-    console.log('PayU Webhook received:', paymentData);
-
-    // Verify hash for security
-    const isValid = verifyHash(paymentData);
-
-    if (!isValid) {
+    if (!isWellFormedHash(paymentData.hash) || !verifyHash(paymentData)) {
       console.error('Webhook hash verification failed');
-      return res.status(400).json({ error: 'Invalid hash' });
+      return refuse(res, 400, 'Invalid hash');
     }
 
-    // Extract donation ID from udf4
-    const donationId = paymentData.udf4;
-
+    const donationId = signedDonationId(paymentData);
     if (!donationId) {
-      console.error('Donation ID not found in webhook data');
-      return res.status(400).json({ error: 'Donation ID missing' });
+      return refuse(res, 400, 'Donation ID missing');
     }
 
-    // Determine status based on PayU response
     let paymentStatus = 'Pending';
     let donationStatus = 'Pending';
-
-    switch (paymentData.status?.toLowerCase()) {
+    switch (String(paymentData.status || '').toLowerCase()) {
       case 'success':
         paymentStatus = 'Paid';
         donationStatus = 'Approved';
@@ -517,136 +614,143 @@ router.post('/webhook', async (req, res) => {
         paymentStatus = 'Failed';
         donationStatus = 'Rejected';
         break;
-      case 'pending':
-      case 'in progress':
-        paymentStatus = 'Pending';
-        donationStatus = 'Pending';
-        break;
       case 'cancelled':
       case 'cancel':
         paymentStatus = 'Cancelled';
         donationStatus = 'Pending';
         break;
+      case 'pending':
+      case 'in progress':
       default:
         paymentStatus = 'Pending';
         donationStatus = 'Pending';
     }
 
-    // Prepare update data
-    // Field-level $set here too. Fixing only /success would leave the reverse
-    // ordering lossy: a webhook arriving second would replace the subdocument
-    // and drop whatever /success had written. Both writers must merge for the
-    // race to be harmless (ADR-024 item 2).
-    const updateData = {
-      $set: {
-        paymentStatus,
-        status: donationStatus,
-        transactionId: paymentData.txnid,
-        'paymentDetails.mihpayid': paymentData.mihpayid,
-        'paymentDetails.amount': paymentData.amount,
-        'paymentDetails.mode': paymentData.mode,
-        'paymentDetails.bank_ref_num': paymentData.bank_ref_num,
-        'paymentDetails.paymentDate': new Date(),
-        'paymentDetails.status': paymentData.status,
-        'paymentDetails.error_Message': paymentData.error_Message || paymentData.error || null
-      }
+    const donation = await resolveDonation(donationId);
+    if (!donation) {
+      console.error('Webhook: donation not found', donationId);
+      return refuse(res, 404, 'Donation not found');
+    }
+
+    const errorMessage = payuErrorText(paymentData);
+    const failureReason = payuFailureReason(paymentData);
+
+    const fields = {
+      onlyIfNotPaid: true,
+      status: donationStatus,
+      paymentStatus,
+      transactionRef: paymentData.txnid || undefined,
+      mihpayid: paymentData.mihpayid || null,
+      amountMinor: toMinorUnits(paymentData.amount),
+      mode: paymentData.mode || null,
+      bankRefNum: paymentData.bank_ref_num || null,
+      gatewayStatus: paymentData.status,
+      detailErrorMessage: errorMessage,
+      paidAt: new Date(),
     };
 
-    // Store exact error message from PayU as-is
-    if (paymentStatus === 'Failed') {
-      const errorMessage = paymentData.error_Message ||
-                          paymentData.error ||
-                          paymentData.Error_Message ||
-                          paymentData.ERROR_MESSAGE ||
-                          'Payment failed';
-
-      const failureReason = paymentData.field9 ||
-                           paymentData.field_9 ||
-                           paymentData['field[9]'] ||
-                           '';
-
-      // Must target $set: an update document may not mix operator and
-      // non-operator keys - MongoDB rejects the whole update.
-      updateData.$set.failureReason = failureReason || errorMessage;
-      updateData.$set.errorMessage = errorMessage;
-      console.log('Payment failed. Error:', errorMessage, 'Reason:', failureReason);
-    } else if (paymentStatus === 'Cancelled') {
-      const cancelReason = paymentData.error_Message ||
-                          paymentData.error ||
-                          paymentData.Error_Message ||
-                          paymentData.ERROR_MESSAGE ||
-                          'Payment cancelled by user';
-
-      updateData.$set.failureReason = cancelReason;
-      updateData.$set.errorMessage = cancelReason;
-      console.log('Payment cancelled. Reason:', cancelReason);
+    // ADR-021: PayU's words or nothing. The Mongoose version wrote our own
+    // 'Payment failed' / 'Payment cancelled by user' into these columns when
+    // the gateway said nothing, which made the stored value unable to answer
+    // "what did PayU actually say?".
+    if (paymentStatus === 'Failed' || paymentStatus === 'Cancelled') {
+      fields.failureReason = failureReason || errorMessage;
+      fields.errorMessage = errorMessage;
     }
 
-    // Update donation in database
-    const updatedDonation = await Donation.findByIdAndUpdate(
-      donationId,
-      updateData,
-      { new: true }
-    );
+    const result = await donations.settlePayment(donation.id, fields);
 
-    if (!updatedDonation) {
-      console.error('Donation not found:', donationId);
-      return res.status(404).json({ error: 'Donation not found' });
-    }
-
-    console.log('Donation updated via webhook:', updatedDonation._id, 'Status:', paymentStatus);
-
-    // Respond to PayU
     res.status(200).json({
       success: true,
       message: 'Webhook processed successfully',
-      donationId: updatedDonation._id,
-      paymentStatus
+      donationId: donation.legacyId || donation.id,
+      paymentStatus: result.applied ? paymentStatus : result.donation.paymentStatus,
     });
-
   } catch (error) {
-    console.error('Webhook processing error:', error);
-    res.status(500).json({
-      error: 'Webhook processing failed',
-      details: error.message
-    });
+    // SEC-19: `details: error.message` is gone. It handed the caller the store,
+    // the driver and the column on any internal failure.
+    return failed(res, 'Webhook processing failed', error, { tag: 'payment' });
   }
 });
 
-// Check Payment Status
+// =============================================================================
+// GET /status/:txnid - the donor's receipt lookup
+// =============================================================================
+/**
+ * SEC-06, closed in two moves, and PAY-02 repaired as a side effect.
+ *
+ * 1. THE REFERENCE IS NO LONGER GUESSABLE. `TXN${Date.now()}${rand(0,999)}`
+ *    made the timestamp recoverable from the value, so the search space was a
+ *    known millisecond window times one thousand. It is now 80 random bits.
+ *
+ * 2. THE RESPONSE IS A RECEIPT, NOT THE DONOR RECORD. It used to return the
+ *    whole populated donation - donor name, EMAIL, PHONE, the linked user - to
+ *    a caller with no credential at all. A receipt needs the amount, the
+ *    category, the state and the date. The donor's own name is kept because it
+ *    is what makes a receipt recognisable; their email, phone and account are
+ *    not, and nobody needs them to confirm a payment went through.
+ *
+ * WHY NOT SIMPLY AUTHENTICATE IT: guest donations have no account, and
+ * requiring a login to see a receipt would lock out exactly the donors who
+ * cannot get one. The reference IS the capability; the fix is to make it
+ * unguessable and to narrow what it grants.
+ *
+ * THE RESIDUAL, STATED: the reference still travels in a URL - every callback
+ * redirects to `FRONTEND_SUCCESS_URL?txnid=...` - so it reaches browser
+ * history, the `Referer` sent to third parties on the success page, and any
+ * analytics there. Anyone holding it sees a receipt. That is inherent to a
+ * capability URL and is now bounded by what the receipt contains.
+ *
+ * PAY-02: this handler used `.populate('userId')`, which threw
+ * `Schema hasn't been registered for model "User"` on every request after AS7
+ * removed the last Mongoose User import. There is no populate here at all.
+ */
 router.get('/status/:txnid', async (req, res) => {
   try {
-    const { txnid } = req.params;
-
-    // Find donation by transaction ID
-    const donationDoc = await Donation.findOne({ transactionId: txnid })
-      .populate('userId', 'name email');
-    // populate('category') removed: a category created after package 3.1 has no
-    // MongoDB row, so populate would resolve it to null and the receipt would
-    // show no category at all.
-    const donation = donationDoc ? await categoryBridge.attachCategories(donationDoc) : null;
-
+    const donation = await donations.findByTransactionRef(String(req.params.txnid || '').trim());
     if (!donation) {
-      return res.status(404).json({
-        error: 'Transaction not found'
-      });
+      return refuse(res, 404, 'Transaction not found');
     }
 
     res.json({
       success: true,
-      donation,
+      donation: {
+        _id: donation.legacyId || donation.id,
+        donorName: donation.donorName,
+        amount: donation.amountMinor / 100,
+        currency: donation.currency,
+        quantity: donation.quantity,
+        item: donation.item,
+        date: donation.donatedAt,
+        transactionId: donation.transactionRef,
+        status: donation.status,
+        paymentStatus: donation.paymentStatus,
+        category: donation.category
+          ? { _id: donation.category.legacyId || donation.category.id, name: donation.category.name }
+          : null,
+        paymentDetails: donation.paymentDetails
+          ? {
+              // U-2's design half: what a reconciliation against PayU's
+              // `verify_payment` API needs, and nothing else. `mihpayid` is the
+              // gateway's own reference and `bank_ref_num` is the bank's; with
+              // the amount and the date they are enough to match a payment
+              // without the outbound call this phase does not make.
+              mihpayid: donation.paymentDetails.mihpayid,
+              bank_ref_num: donation.paymentDetails.bankRefNum,
+              mode: donation.paymentDetails.mode,
+              status: donation.paymentDetails.gatewayStatus,
+              paymentDate: donation.paymentDetails.paidAt,
+            }
+          : null,
+      },
       paymentStatus: donation.paymentStatus,
-      status: donation.status
+      status: donation.status,
     });
-
   } catch (error) {
-    console.error('Payment status check error:', error);
-    res.status(500).json({
-      error: 'Failed to check payment status',
-      details: error.message
-    });
+    return failed(res, 'Failed to check payment status', error, { tag: 'payment' });
   }
 });
 
 module.exports = router;
+
 

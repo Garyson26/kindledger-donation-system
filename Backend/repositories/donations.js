@@ -13,6 +13,9 @@
 'use strict';
 
 const { client, newUuid, fromBigInt, iso } = require('./_shared');
+// settlePayment opens its own transaction when the caller has not: the guarded
+// update and the payment-detail write must not be separable (ADR-012).
+const { withTransaction } = require('../config/prisma');
 
 // What every read returns. Kept in one place so field naming is translated once
 // (SPEC-2 section 4.2) rather than in every route in Phase 3.
@@ -266,6 +269,100 @@ async function updatePayment(id, fields, tx) {
   }
 
   return findById(id, tx);
+}
+
+/**
+ * Settle a payment ATOMICALLY, applying the change only once.
+ *
+ * ADR-012 and ADR-026, and this is the finding rather than a refactor. The
+ * Mongoose version did:
+ *
+ *     const donation = await Donation.findById(id);
+ *     if (donation.paymentStatus === 'Paid') return;   // <-- read
+ *     await Donation.findByIdAndUpdate(id, {...});     // <-- write
+ *
+ * **A READ-THEN-WRITE IS NOT IDEMPOTENT UNDER CONCURRENCY.** PayU sends
+ * `/success` from the donor's browser and `/webhook` from its own servers with
+ * no ordering guarantee, so two callbacks for one donation routinely arrive at
+ * the same moment. Both read `Pending`, both decide to write, and the second
+ * overwrites the first's `paid_at` and payment metadata - which is the exact
+ * corruption SEC-01's idempotency check was added to prevent. The check was
+ * correct in its intent and unenforceable in its implementation.
+ *
+ * THE GUARD IS NOW IN THE `WHERE` CLAUSE. A conditional UPDATE is decided by
+ * the database, once, under its own row lock:
+ *
+ *     UPDATE donations SET ... WHERE uuid = ? AND payment_status <> 'Paid'
+ *
+ * `count === 0` means somebody else got there first. That is a FACT rather than
+ * an inference, and it is reported as `applied: false` so the caller can answer
+ * the same way it always did without pretending it did the work.
+ *
+ * The whole thing runs in one transaction with the payment-detail upsert,
+ * because a settled donation whose detail row failed to write is a reconciliation
+ * problem that surfaces months later (U-2).
+ *
+ * @returns {{applied: boolean, reason?: string, donation: object|null}}
+ */
+async function settlePayment(externalId, fields, tx) {
+  const run = async (db) => {
+    const target = await db.donation.findFirst({
+      where: { OR: [{ uuid: String(externalId) }, { legacyId: String(externalId) }] },
+      select: { id: true, uuid: true, paymentStatus: true },
+    });
+    if (!target) return { applied: false, reason: 'not-found', donation: null };
+
+    const donationScalars = {};
+    if (fields.status !== undefined) donationScalars.status = fields.status;
+    if (fields.paymentStatus !== undefined) donationScalars.paymentStatus = fields.paymentStatus;
+    if (fields.transactionRef !== undefined) donationScalars.transactionRef = fields.transactionRef;
+    if (fields.failureReason !== undefined) donationScalars.failureReason = fields.failureReason;
+    if (fields.errorMessage !== undefined) donationScalars.errorMessage = fields.errorMessage;
+
+    // THE GUARD. `onlyIfNotPaid` is what makes this idempotent: a donation that
+    // is already Paid is terminal, and no later callback may move it.
+    const where = { id: target.id };
+    if (fields.onlyIfNotPaid) where.paymentStatus = { not: 'Paid' };
+
+    const res = await db.donation.updateMany({ where, data: donationScalars });
+    if (res.count === 0) {
+      return {
+        applied: false,
+        reason: 'already-settled',
+        donation: await findById(target.uuid, db),
+      };
+    }
+
+    const detail = {};
+    if (fields.mihpayid !== undefined) detail.mihpayid = fields.mihpayid;
+    if (fields.amountMinor !== undefined) {
+      detail.amountMinor = fields.amountMinor === null ? null : BigInt(fields.amountMinor);
+    }
+    if (fields.mode !== undefined) detail.mode = fields.mode;
+    if (fields.bankRefNum !== undefined) detail.bankRefNum = fields.bankRefNum;
+    if (fields.gatewayStatus !== undefined) detail.gatewayStatus = fields.gatewayStatus;
+    if (fields.detailErrorMessage !== undefined) detail.errorMessage = fields.detailErrorMessage;
+    if (fields.paidAt !== undefined) {
+      detail.paidAt = fields.paidAt === null ? null : new Date(fields.paidAt);
+    }
+
+    if (Object.keys(detail).length > 0) {
+      // MERGE, never replace (ADR-024). /success and /webhook each write a
+      // different subset, and whichever arrives second must not erase the other.
+      await db.donationPaymentDetail.upsert({
+        where: { donationId: target.id },
+        create: { donationId: target.id, ...detail },
+        update: detail,
+      });
+    }
+
+    return { applied: true, donation: await findById(target.uuid, db) };
+  };
+
+  // Enrol in the caller's transaction if there is one; otherwise open our own,
+  // because the guarded update and the detail write must not be separable.
+  if (tx) return run(tx);
+  return withTransaction((t) => run(t));
 }
 
 /**
@@ -633,6 +730,7 @@ module.exports = {
   findByTransactionRef,
   findByLegacyId,
   updatePayment,
+  settlePayment,
   listPaymentStatusesInUse,
   listStatusesInUse,
   countOlderThan,

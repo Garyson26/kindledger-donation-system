@@ -15,8 +15,11 @@
  * `GET /status/:txnid`. Between them they are the two ends of the money path -
  * the only live creator of donations, and the only unauthenticated read of one.
  *
- * WHAT IS PINNED HERE IS MOSTLY WRONG BEHAVIOUR, and deliberately so:
- * SEC-06, SEC-07, SEC-11, SEC-19 and PAY-01 all live in these two handlers.
+ * WRITTEN AGAINST THE MONGOOSE IMPLEMENTATION AND NOW ASSERTED AGAINST THE
+ * MySQL ONE. Eight assertions changed; each is marked `CHANGED IN 3.4` with the
+ * finding that caused it. Seven of the eight are QUIRKs being closed - SEC-06
+ * twice, SEC-07, PAY-01, PAY-02 and ADR-057 - and they were pinned as WRONG
+ * behaviour on purpose, so fixing them HAD to break this file.
  *
  * THE SEAM SPANS BOTH STORES. `donation` is the last `split` entity - this file
  * writes MongoDB while `routes/donations.js` reads MySQL - so a seam that hid
@@ -91,8 +94,12 @@ const store = {
 
   /** Where does a donation created through /initiate actually land? */
   async readEither(externalId) {
-    const mysql = await donations.findByLegacyId(String(externalId));
-    if (mysql) return { store: 'mysql', row: mysql };
+    // CHANGED IN 3.4: donations created here are addressed by uuid now, because
+    // payment.js stopped minting a legacy_id when AE1-b's trigger fired.
+    const byUuid = await donations.findById(String(externalId));
+    if (byUuid) return { store: 'mysql', row: { ...byUuid, userId: byUuid.donor.user ? byUuid.donor.user.legacyId || byUuid.donor.user.id : null } };
+    const byLegacy = await donations.findByLegacyId(String(externalId));
+    if (byLegacy) return { store: 'mysql', row: { ...byLegacy, userId: byLegacy.donor.user ? byLegacy.donor.user.legacyId || byLegacy.donor.user.id : null } };
     let doc = null;
     try {
       doc = await MongoDonation.findById(externalId);
@@ -104,6 +111,8 @@ const store = {
       store: 'mongodb',
       row: {
         id: doc._id.toString(),
+        amountMinor: Math.round((doc.amount || 0) * 100),
+        transactionRef: doc.transactionId,
         donorName: doc.donorName,
         donorEmail: doc.donorEmail,
         donorPhone: doc.donorPhone,
@@ -134,8 +143,23 @@ const store = {
 };
 
 // -----------------------------------------------------------------------------
-async function call(method, path, { body, token } = {}) {
-  const headers = {};
+/**
+ * A fresh client address per request (CHANGED IN 3.4).
+ *
+ * SEC-11 wired `paymentInitiateLimiter` to `/initiate`, and the suite
+ * immediately throttled ITSELF - twenty calls a minute, and this file makes
+ * more. The established pattern from `auth-reset.test.js`: give each request
+ * its own X-Forwarded-For so the limiter's budget cannot mask what a test is
+ * measuring. Express reads it because `trust proxy` is 1.
+ *
+ * The limiter is asserted DELIBERATELY in its own test below, with a fixed
+ * address, rather than incidentally through every other test failing.
+ */
+let ipCounter = 0;
+const nextIp = () => `203.0.113.${(ipCounter++ % 250) + 1}`;
+
+async function call(method, path, { body, token, clientIp } = {}) {
+  const headers = { 'X-Forwarded-For': clientIp || nextIp() };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${base}${path}`, {
@@ -259,17 +283,55 @@ after(async () => {
 // POST /initiate - the only live creator of donations
 // =============================================================================
 
-test('QUIRK (SEC-11): /initiate is UNAUTHENTICATED and unthrottled', async () => {
-  // Anyone on the internet can create donation rows, without limit. The
-  // `paymentInitiateLimiter` was built in Phase 2 and never wired (ADR-042's
-  // shape: the store existing and the store being used are different claims).
-  const created = [];
-  for (let i = 0; i < 5; i += 1) {
-    const res = await initiate({ email: `${TAG}-flood${i}@invalid.test` });
-    assert.equal(res.status, 200, `request ${i}: ${res.raw.slice(0, 160)}`);
-    created.push(res.body.donationId);
+test('SEC-11 CLOSED: /initiate is rate limited per client (CHANGED IN 3.4)', async () => {
+  // WAS: anyone on the internet could create donation rows without limit. The
+  // limiter was built in Phase 2 and nothing imported it - ADR-042's shape
+  // exactly, where the limiter existing and the limiter being used are
+  // different claims.
+  //
+  // The endpoint stays UNAUTHENTICATED, deliberately: requiring a login to
+  // donate would lose every guest donation, which is most of them. A limiter is
+  // the control that fits an endpoint that must stay open.
+  // A FRESH ADDRESS PER RUN. The Redis limiter is shared and persistent, so a
+  // fixed address inherits the previous run's counter and the suite fails on
+  // its first request - which is DEPLOY-01's shape seen from inside the tests,
+  // and the reason RATE_LIMIT_PREFIX exists.
+  const octet = crypto.randomInt(1, 250);
+  const ip = `198.51.100.${octet}`;
+  const otherIp = `198.51.100.${(octet % 250) + 1}`;
+  let refused = null;
+  let accepted = 0;
+
+  for (let i = 0; i < 25 && refused === null; i += 1) {
+    const res = await call('POST', '/api/payment/initiate', {
+      clientIp: ip,
+      body: {
+        firstname: 'ZZZ SYNTHETIC',
+        email: `${TAG}-flood${i}@invalid.test`,
+        productinfo: 'Donation',
+        category: categoryId,
+      },
+    });
+    if (res.status === 429) refused = res;
+    else accepted += 1;
   }
-  assert.equal(new Set(created).size, 5, 'CURRENT: five unauthenticated writes, no throttle');
+
+  assert.ok(refused, 'the limiter must fire within 25 requests from one address');
+  assert.ok(accepted > 0, 'and it must not refuse the first one');
+  assert.equal(typeof refused.body.error, 'string', 'the refusal names a reason (AC1)');
+
+  // THE CONTROL: a DIFFERENT address is unaffected, so the limiter is keying on
+  // the client and not simply exhausted globally.
+  const other = await call('POST', '/api/payment/initiate', {
+    clientIp: otherIp,
+    body: {
+      firstname: 'ZZZ SYNTHETIC',
+      email: `${TAG}-other@invalid.test`,
+      productinfo: 'Donation',
+      category: categoryId,
+    },
+  });
+  assert.equal(other.status, 200, 'a different client still gets through');
 });
 
 test('/initiate requires firstname, email and a resolvable category', async () => {
@@ -292,8 +354,9 @@ test('BE-CRIT-01: the amount is computed SERVER-SIDE and a client amount is igno
     'the category price, not the client value'
   );
 
-  const { row } = await store.readEither(res.body.donationId);
-  assert.equal(row.amountMajor, categoryAmount);
+  const located = await store.readEither(res.body.donationId);
+  assert.equal(located.store, 'mysql', 'CHANGED IN 3.4');
+  assert.equal(located.row.amountMinor, Math.round(categoryAmount * 100));
 });
 
 test('AE4: what /initiate ACTUALLY returns', async () => {
@@ -323,41 +386,107 @@ test('AE4: what /initiate ACTUALLY returns', async () => {
   assert.equal(d.udf4, res.body.donationId);
 });
 
-test('QUIRK (SEC-06): the transaction id is GUESSABLE - TXN<epoch-ms><0..999>', async () => {
-  // It is the only thing protecting GET /status/:txnid, which is
-  // unauthenticated. Pinned as a SHAPE rather than a value.
-  const res = await initiate();
-  const txnid = res.body.paymentData.txnid;
-  assert.match(txnid, /^TXN\d{16,17}$/, 'CURRENT: TXN + Date.now() + a 0-999 suffix');
+test('SEC-06 CLOSED (1/2): the transaction reference is UNGUESSABLE (CHANGED IN 3.4)', async () => {
+  // WAS: `TXN${Date.now()}${rand(0,999)}`. The timestamp was recoverable from
+  // the value, so the search space collapsed to a known millisecond window times
+  // one thousand - and it was the ONLY thing protecting an unauthenticated
+  // endpoint that returned the donor's record.
+  const first = (await initiate()).body.paymentData.txnid;
+  const second = (await initiate()).body.paymentData.txnid;
 
-  const epoch = Number(txnid.slice(3, 16));
-  assert.ok(
-    Math.abs(Date.now() - epoch) < 60_000,
-    'CURRENT: the timestamp is recoverable from the id, so the search space is ' +
-      'a known millisecond window times one thousand'
-  );
+  assert.match(first, /^TXN[0-9a-f]{20}$/, '80 random bits, no structure');
+  assert.notEqual(first, second);
+
+  // THE ASSERTION THAT MATTERS: no timestamp is recoverable. The old scheme put
+  // 13 digits of epoch milliseconds in a fixed position; if any 13-digit run
+  // here decodes to a plausible time, the entropy claim is wrong.
+  const digits = first.slice(3).replace(/[a-f]/g, '');
+  const now = Date.now();
+  for (let i = 0; i + 13 <= digits.length; i += 1) {
+    const candidate = Number(digits.slice(i, i + 13));
+    assert.ok(
+      Math.abs(now - candidate) > 86_400_000,
+      `a 13-digit run decodes to within a day of now (${candidate}) - the ` +
+        'reference is carrying a timestamp again'
+    );
+  }
+
+  // And it is short: the previous scheme was 16-17 characters and is proven
+  // against the live gateway at that length. See the note in payment.js on the
+  // one thing to confirm against the PayU sandbox before cutover.
+  assert.ok(first.length <= 25, `txnid must stay short for PayU: ${first.length}`);
 });
 
-test('QUIRK (SEC-07): `userId` is taken from the BODY on an unauthenticated endpoint', async () => {
-  // Anyone can attribute a donation to any account they can name. The victim
-  // cannot read it back - GET /donations/:id matches ownership and the donation
-  // is theirs, not the attacker's - so this is integrity and nuisance rather
-  // than disclosure. The severity is right; what the label hides is that NO
-  // CREDENTIAL IS REQUIRED.
+test('SEC-07 CLOSED: a forged `userId` in the body is IGNORED (CHANGED IN 3.4)', async () => {
+  // WAS: `userId` destructured from req.body on an endpoint with no
+  // authentication, so anyone on the internet could write rows into a
+  // stranger's donation history. The identity now comes from the token or there
+  // is no identity.
   const victim = await store.createUser('victim');
 
   const res = await initiate({ userId: victim.externalId });
   assert.equal(res.status, 200, res.raw.slice(0, 200));
 
   const { row } = await store.readEither(res.body.donationId);
+  assert.equal(row.userId, null, 'the forged attribution is ignored - it is a guest donation');
   assert.equal(
-    row.userId,
-    victim.externalId,
-    "CURRENT: the donation is attributed to a user the caller never authenticated as"
+    res.body.paymentData.udf5,
+    '',
+    'and nothing the caller asserted is passed on to PayU either'
   );
+
+  // THE CONTROL: an AUTHENTICATED caller IS attributed, so the assertion above
+  // is about trusting the token rather than about attribution being broken.
+  const token = jwt.sign(
+    { userId: victim.externalId, role: 'user', tokenVersion: 0 },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+  const authed = await post(
+    '/api/payment/initiate',
+    {
+      firstname: 'ZZZ SYNTHETIC',
+      email: `${TAG}-authed@invalid.test`,
+      productinfo: 'Donation',
+      category: categoryId,
+    },
+    token
+  );
+  assert.equal(authed.status, 200, authed.raw.slice(0, 200));
+  const attributed = await store.readEither(authed.body.donationId);
+  assert.equal(attributed.row.userId, victim.externalId, 'CONTROL: a real token IS attributed');
 });
 
-test('QUIRK (PAY-01): `quantity` is UNBOUNDED while `extraAmount` is clamped', async () => {
+test('BUG-06 fixed properly here: a LAPSED token is a guest, not a refusal (CHANGED IN 3.4)', async () => {
+  // routes/donations.js had an `optionalAuth` that delegated to authMiddleware
+  // whenever any Authorization header was present, so a donor whose session had
+  // expired was refused with a 401 instead of falling through to a guest
+  // donation. That endpoint was deleted in 3.3; this one is written the way that
+  // one should have been - on the donation path, turning a lapsed session into a
+  // refusal loses the donation.
+  const user = await store.createUser('lapsed');
+  const expired = jwt.sign(
+    { userId: user.externalId, role: 'user', tokenVersion: 0 },
+    process.env.JWT_SECRET,
+    { expiresIn: '-1h' }
+  );
+
+  const res = await post(
+    '/api/payment/initiate',
+    {
+      firstname: 'ZZZ SYNTHETIC',
+      email: `${TAG}-lapsed@invalid.test`,
+      productinfo: 'Donation',
+      category: categoryId,
+    },
+    expired
+  );
+  assert.equal(res.status, 200, `a lapsed session must still be able to donate: ${res.raw.slice(0, 200)}`);
+  const { row } = await store.readEither(res.body.donationId);
+  assert.equal(row.userId, null, 'as a guest');
+});
+
+test('PAY-01 CLOSED: BOTH quantity and extraAmount are bounded (CHANGED IN 3.4)', async () => {
   // Two adjacent lines, one with a ceiling and one without. The asymmetry is the
   // tell: a reviewer reading the pair concludes that amounts are bounded.
   const clamped = await initiate({ extraAmount: 999_999_999 });
@@ -367,12 +496,20 @@ test('QUIRK (PAY-01): `quantity` is UNBOUNDED while `extraAmount` is clamped', a
     'extraAmount IS clamped, to 1,000,000'
   );
 
-  const unbounded = await initiate({ quantity: 1_000_000 });
+  // WAS: no ceiling at all. `quantity=99999999999999999999` priced a donation
+  // at 1.5e23 on an unauthenticated endpoint, and against MySQL it would have
+  // been an unauthenticated 500 when the value failed to convert to paise.
+  const bounded = await initiate({ quantity: 1_000_000 });
   assert.equal(
-    Number(unbounded.body.paymentData.amount),
-    categoryAmount * 1_000_000,
-    'CURRENT: quantity has no ceiling at all'
+    Number(bounded.body.paymentData.amount),
+    categoryAmount * 10_000,
+    'clamped to MAX_QUANTITY'
   );
+
+  // The value that used to produce 1.5e23.
+  const absurd = await initiate({ quantity: '99999999999999999999' });
+  assert.equal(absurd.status, 200, absurd.raw.slice(0, 160));
+  assert.equal(Number(absurd.body.paymentData.amount), categoryAmount * 10_000);
 
   // And the floor is enforced, so the fix is genuinely a missing ceiling and
   // not a missing bound.
@@ -382,19 +519,19 @@ test('QUIRK (PAY-01): `quantity` is UNBOUNDED while `extraAmount` is clamped', a
   assert.equal(Number(negative.body.paymentData.amount), categoryAmount);
 });
 
-test('QUIRK (ADR-057): a donation created here lands in MONGODB', async () => {
-  // The last split entity, stated as a test. routes/donations.js reads MySQL as
-  // of package 3.3, so a donation taken through the live money path is
-  // INVISIBLE to the admin list, the receipt and the charts until this package
-  // lands. It is why 3.3 and 3.4 are one merge.
+test('ADR-057 CLOSED: a donation created here lands in MySQL, where readers look (CHANGED IN 3.4)', async () => {
+  // WAS: MongoDB. routes/donations.js has read MySQL since package 3.3, so
+  // every donation taken through the live money path was invisible to the admin
+  // list, the receipt and the charts. It is why 3.3 and 3.4 are one merge, and
+  // this assertion flipping is that merge unit being discharged.
   const res = await initiate({ email: `${TAG}-split@invalid.test` });
   const located = await store.readEither(res.body.donationId);
-  assert.equal(located.store, 'mongodb', 'CURRENT: the live writer writes MongoDB');
-  assert.equal(
-    await donations.findByLegacyId(res.body.donationId),
-    null,
-    'CURRENT: and MySQL - which every reader now uses - has never heard of it'
-  );
+  assert.equal(located.store, 'mysql', 'the live writer writes MySQL');
+
+  // And it is visible to the READER, which is the thing that actually mattered.
+  const seen = await donations.findById(res.body.donationId);
+  assert.ok(seen, 'the donation routes/donations.js reads can see it');
+  assert.equal(seen.donorEmail, `${TAG}-split@invalid.test`);
 });
 
 test('a donation is created Pending, with the donor details it was given', async () => {
@@ -410,35 +547,23 @@ test('a donation is created Pending, with the donor details it was given', async
   assert.equal(row.donorPhone, '9876543210');
   assert.equal(row.status, 'Pending');
   assert.equal(row.paymentStatus, 'Pending');
-  assert.equal(row.transactionId, res.body.paymentData.txnid);
+  assert.equal(row.transactionRef, res.body.paymentData.txnid, 'CHANGED IN 3.4: column renamed');
 });
 
 // =============================================================================
 // GET /status/:txnid - SEC-06
 // =============================================================================
 
-test('QUIRK (PAY-02): /status is BROKEN - it 500s on every request', async () => {
-  // NOT WHAT THIS TEST WAS WRITTEN TO ASSERT, and finding that out is why AU1
-  // said to extend the baseline before touching anything.
+test('PAY-02 CLOSED, and SEC-06 with it: /status returns a RECEIPT (CHANGED IN 3.4)', async () => {
+  // PAY-02 WAS: 500 on every request. `.populate('userId')` needed the Mongoose
+  // User model registered, and AS7 removed the last import registering it. There
+  // is no populate here at all now.
   //
-  // The handler does `.populate('userId', 'name email')`, which needs the
-  // Mongoose `User` model REGISTERED in the process. Package AS7 removed
-  // `const User = require("../models/User")` from routes/admin.js as a DEAD
-  // IMPORT - the binding genuinely was unused - and that require() was the only
-  // thing registering the model at app boot.
-  //
-  //   models registered at boot: Donation
-  //   User registered? false
-  //
-  // AN UNUSED BINDING IS NOT AN UNUSED IMPORT. In a module system with side
-  // effects, `require()` does work, and a "dead" import can be load-bearing
-  // through a global registry that no reference-level analysis can see. The AT4
-  // gate correctly said admin.js must not import a migrated model; the REMEDY
-  // I applied had a consequence the gate does not model.
-  //
-  // This is repaired by THIS package - payment.js stops using Mongoose
-  // entirely - and it never ships broken, because 3.3 and 3.4 are one merge
-  // unit. It is pinned rather than hot-fixed so the repair is visible.
+  // SEC-06 WAS: the whole populated donation - donor name, EMAIL, PHONE, the
+  // linked user - to a caller with no credential. It was MASKED by PAY-02, and
+  // the map has seen that shape before: SEC-03 was "unreachable only because
+  // MongoDB rejects the application's credentials - an availability failure
+  // standing in for an access control". Not a defence then, not one now.
   const res = await initiate({
     firstname: 'ZZZ Private Donor',
     email: `${TAG}-pii@invalid.test`,
@@ -447,40 +572,82 @@ test('QUIRK (PAY-02): /status is BROKEN - it 500s on every request', async () =>
   const txnid = res.body.paymentData.txnid;
 
   const status = await get(`/api/payment/status/${txnid}`);
-  assert.equal(status.status, 500, 'CURRENT: every call fails');
-  assert.match(
-    status.body.details || '',
-    /Schema hasn't been registered for model "User"/,
-    'CURRENT: and SEC-19 hands the reason to the client'
-  );
+  assert.equal(status.status, 200, status.raw.slice(0, 200));
+
+  const d = status.body.donation;
+  assert.equal(d.donorName, 'ZZZ Private Donor', 'the name stays - it is what makes a receipt recognisable');
+  assert.equal(typeof d.amount, 'number');
+  assert.equal(d.paymentStatus, 'Pending');
+
+  // THE ASSERTIONS THAT MATTER: what is NO LONGER returned.
+  assert.equal('donorEmail' in d, false, 'the donor EMAIL is gone');
+  assert.equal('donorPhone' in d, false, 'the donor PHONE is gone');
+  assert.equal('userId' in d, false, 'and the linked account is gone');
+  assert.equal('donor' in d, false);
+
+  // Asserted over the whole serialised body, not field by field, so a leak in a
+  // nested object cannot slip through (AP1).
+  assert.doesNotMatch(status.raw, /@invalid\.test/, 'no email address anywhere in the response');
+  assert.doesNotMatch(status.raw, /9123456780/, 'no phone number anywhere in the response');
+
+  // A donation nobody has paid for has no payment details at all.
+  assert.equal(d.paymentDetails, null, 'nothing invented for a Pending donation');
 });
 
-test('SEC-06 IS CURRENTLY MASKED BY PAY-02, which is not the same as fixed', async () => {
-  // The endpoint returns the WHOLE donation - name, email, phone, amount - to a
-  // caller with no credential. Right now it cannot, because it 500s first.
+test('U-2 (design half): a SETTLED receipt carries what reconciliation needs (3.4)', async () => {
+  // U-2 is the `verify_payment` reconciliation, and the outbound call is a
+  // later package. What 3.4 owes is that the handler RECORDS ENOUGH TO
+  // RECONCILE LATER - so this asserts the fields are present and no more.
   //
-  // THE MAP HAS SEEN THIS EXACT SHAPE BEFORE. SEC-03, the authentication
-  // bypass, was recorded as "currently unreachable ONLY because MongoDB rejects
-  // the application's credentials - an availability failure standing in for an
-  // access control". The same sentence applies here, and it was not a defence
-  // then either: restore the dependency and the finding is live again.
-  //
-  // So this asserts the MECHANISM is still present, without depending on the
-  // broken path - by reading what the handler selects. When PAY-02 is repaired
-  // in this package, the test above changes and this one gains teeth.
-  const src = require('node:fs').readFileSync(
-    require('node:path').join(__dirname, '..', 'routes', 'payment.js'),
-    'utf8'
+  // `mihpayid` is PayU's own reference and `bank_ref_num` is the bank's; with
+  // the amount and the date they are enough to match a payment against a
+  // gateway statement without any outbound call at all.
+  const res = await initiate({ email: `${TAG}-settled@invalid.test` });
+  const txnid = res.body.paymentData.txnid;
+
+  const payload = {
+    txnid,
+    status: 'success',
+    amount: Number(res.body.paymentData.amount).toFixed(2),
+    productinfo: 'Donation',
+    firstname: 'ZZZ SYNTHETIC',
+    email: `${TAG}-settled@invalid.test`,
+    udf4: res.body.donationId,
+    mihpayid: 'MIH-RECONCILE-1',
+    mode: 'CC',
+    bank_ref_num: '123456789',
+  };
+  payload.hash = responseHash(payload);
+
+  const settled = await fetch(`${base}/api/payment/success`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextIp() },
+    redirect: 'manual',
+    body: JSON.stringify(payload),
+  });
+  assert.ok(settled.status >= 300 && settled.status < 400, `expected a redirect: ${settled.status}`);
+  assert.doesNotMatch(settled.headers.get('location') || '', /error=/, 'the payment was accepted');
+
+  const status = await get(`/api/payment/status/${txnid}`);
+  assert.equal(status.status, 200, status.raw.slice(0, 200));
+  assert.equal(status.body.donation.paymentStatus, 'Paid');
+
+  assert.deepEqual(
+    Object.keys(status.body.donation.paymentDetails).sort(),
+    ['bank_ref_num', 'mihpayid', 'mode', 'paymentDate', 'status'],
+    'exactly the reconciliation fields, and nothing else'
   );
-  const handler = src.slice(src.indexOf("router.get('/status/:txnid'"));
-  assert.ok(
-    !/authMiddleware|adminAuth/.test(handler.slice(0, 400)),
-    'CURRENT: no authentication on the status route'
+  assert.equal(status.body.donation.paymentDetails.mihpayid, 'MIH-RECONCILE-1');
+  assert.equal(status.body.donation.paymentDetails.bank_ref_num, '123456789');
+  assert.equal(
+    status.body.donation.paymentDetails.status,
+    'success',
+    "PayU own vocabulary, stored verbatim (ADR-021)"
   );
-  assert.ok(
-    /res\.json\(\{\s*success: true,\s*donation,/.test(handler),
-    'CURRENT: the whole donation object is returned, not a projection'
-  );
+
+  // And the receipt STILL leaks no PII after settlement - the projection is not
+  // something that only holds before a payment lands.
+  assert.doesNotMatch(status.raw, /@invalid\.test/);
 });
 
 test('SEC-06: the txnid travels in the URL, which is where the leak comes from', async () => {
@@ -552,4 +719,53 @@ test('QUIRK (SEC-19): the webhook and cancel handlers return err.message', async
     /details:\s*error\.message/.test(src),
     'CURRENT: at least one handler returns the internal error text to the client'
   );
+});
+
+// =============================================================================
+// AK3 / AM1 - a donation that exists in MONGODB and was never migrated
+// =============================================================================
+
+test('AK3: an UN-MIGRATED donation is ABSENT from the receipt lookup', async () => {
+  // ADR-056: a read-through bridge does not make a route migration additive,
+  // and donations never had a bridge at all. A donation written to MongoDB and
+  // not carried across is INVISIBLE to this file - not an error, absent.
+  //
+  // AM1: created HERE, after any ETL run, and asserted to have no MySQL row
+  // BEFORE the endpoint is exercised. If it ever has one, the setup migrated it
+  // and everything below passes for the wrong reason.
+  const txnid = 'TXN' + crypto.randomBytes(10).toString('hex');
+  const doc = await MongoDonation.create({
+    donorName: 'ZZZ Legacy Donor',
+    donorEmail: `${TAG}-unmigrated@invalid.test`,
+    category: new mongoose.Types.ObjectId(),
+    quantity: 1,
+    amount: 4242,
+    status: 'Pending',
+    paymentStatus: 'Pending',
+    date: new Date(),
+    transactionId: txnid,
+  });
+
+  assert.equal(
+    await donations.findByTransactionRef(txnid),
+    null,
+    'SETUP ERROR: the AK3 fixture has a MySQL row, so it was migrated after all'
+  );
+
+  const status = await get(`/api/payment/status/${txnid}`);
+  assert.notEqual(Math.floor(status.status / 100), 5, `must not 500: ${status.raw.slice(0, 160)}`);
+  assertRefused(status, 404);
+
+  // THE CONTROL. The same lookup for a MIGRATED donation works, so the 404
+  // above is about migration state and not about the endpoint being broken.
+  const live = await initiate({ email: `${TAG}-ak3control@invalid.test` });
+  const control = await get(`/api/payment/status/${live.body.paymentData.txnid}`);
+  assert.equal(
+    control.status,
+    200,
+    'CONTROL FAILED: a MySQL donation is not found either, so the assertion ' +
+      'above proves nothing'
+  );
+
+  await MongoDonation.deleteOne({ _id: doc._id });
 });

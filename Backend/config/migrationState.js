@@ -101,15 +101,21 @@ const ENTITIES = {
   },
 
   donation: {
-    store: SPLIT,
+    // WAS `split` until package 3.4. routes/payment.js was the last MongoDB
+    // writer AND the only live creator of donations, so until it migrated every
+    // donation taken through the money path was invisible to the admin console,
+    // the receipt and the charts (ADR-057). This transition is what completes
+    // the 3.2 + 3.3 + 3.4 merge unit.
+    store: MYSQL,
     model: 'Donation',
     etlMigrates: true,
     reason:
-      'ADR-057. routes/donations.js reads and writes MySQL (package 3.3); ' +
-      'routes/payment.js:141,157,279,373,439,581 still writes MongoDB, and it ' +
-      'is the only live creator of donations. routes/admin.js:27,32 still ' +
-      'counts MongoDB.',
-    mongooseAllowed: ['etl/', 'routes/payment.js', 'routes/admin.js', 'scripts/seedDatabase.js', 'test/'],
+      'Migrated across packages 3.3 and 3.4. routes/donations.js, ' +
+      'routes/payment.js and routes/admin.js all read and write MySQL. ' +
+      'scripts/seedDatabase.js still writes MongoDB donations, but it is a ' +
+      'development seeder behind NODE_ENV!=production AND ALLOW_SEED=true, so ' +
+      'it cannot write a deployed store.',
+    mongooseAllowed: ['etl/', 'scripts/seedDatabase.js', 'test/'],
   },
 
   pendingSignup: {

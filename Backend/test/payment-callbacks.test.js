@@ -73,8 +73,17 @@ process.env.CANCEL_URL = 'http://localhost/api/payment/cancel';
 process.env.NOTIFY_URL = 'http://localhost/api/payment/webhook';
 
 const mongoose = require('mongoose');
-const Donation = require('../models/Donation');
-const Category = require('../models/Category');
+// MIGRATED TO MySQL IN PACKAGE 3.4 (SPEC-2 section 4.1).
+//
+// THE SCENARIOS BELOW ARE UNTOUCHED. SPEC-3 section 4.1 requires this suite -
+// SEC-01's regression suite - to pass UNCHANGED through the migration, and the
+// seam pattern is what makes that possible: the store is five function bodies,
+// and every assertion is about behaviour the store does not determine. A diff
+// against the previous commit should show changes ONLY between here and the end
+// of `store`.
+const donations = require('../repositories/donations');
+const categories = require('../repositories/categories');
+const prismaModule = require('../config/prisma');
 
 let server;
 let base;
@@ -87,61 +96,76 @@ const DONOR_EMAIL_PREFIX = 'zzz-payment-test';
 
 const store = {
   async reset() {
-    await Donation.deleteMany({ donorEmail: new RegExp('^' + DONOR_EMAIL_PREFIX) });
-    await Category.deleteMany({ name: new RegExp('^ZZZ PAYMENT TEST') });
+    await donations.deleteByDonorEmailPrefix(DONOR_EMAIL_PREFIX);
+    await categories.deleteByNamePrefix('ZZZ PAYMENT TEST');
   },
 
   async createCategory(amountMajor, suffix = '') {
-    const doc = await Category.create({
+    const row = await categories.create({
       name: CATEGORY_NAME + suffix,
-      sortDescription: 'fixture',
-      donationAmount: amountMajor,
+      shortDescription: 'fixture',
+      donationAmountMinor: Math.round(amountMajor * 100),
       descriptions: [],
-      displayOrder: 0,
     });
-    return { id: doc._id.toString(), amountMajor: doc.donationAmount };
+    return { id: row.id, amountMajor: row.donationAmountMinor / 100 };
   },
 
   async createDonation({ categoryId, amountMajor, tag }) {
-    const doc = await Donation.create({
+    const minor = Math.round(amountMajor * 100);
+    const row = await donations.create({
       donorName: 'ZZZ SYNTHETIC TEST DO NOT PROCESS',
       donorEmail: `${DONOR_EMAIL_PREFIX}-${tag}@invalid.test`,
-      category: categoryId,
+      categoryId,
       quantity: 1,
-      amount: amountMajor,
-      baseAmount: amountMajor,
-      extraAmount: 0,
+      baseAmountMinor: minor,
+      extraAmountMinor: 0,
+      amountMinor: minor,
       status: 'Pending',
       paymentStatus: 'Pending',
-      transactionId: 'TXN' + crypto.randomBytes(6).toString('hex'),
+      transactionRef: 'TXN' + crypto.randomBytes(6).toString('hex'),
     });
-    return { id: doc._id.toString(), txnid: doc.transactionId, amountMajor };
+    return { id: row.id, txnid: row.transactionRef, amountMajor };
   },
 
   /** Plain normalised view. No storage types leak past this function. */
   async readDonation(id) {
-    const d = await Donation.findById(id);
+    const d = await donations.findById(id);
     if (!d) return null;
     const pd = d.paymentDetails || {};
     return {
-      id: d._id.toString(),
+      id: d.id,
       status: d.status,
       paymentStatus: d.paymentStatus,
-      amountMajor: d.amount,
+      amountMajor: d.amountMinor / 100,
       failureReason: d.failureReason ?? null,
       errorMessage: d.errorMessage ?? null,
-      gatewayStatus: pd.status ?? null,
+      gatewayStatus: pd.gatewayStatus ?? null,
       mihpayid: pd.mihpayid ?? null,
       mode: pd.mode ?? null,
-      bankRefNum: pd.bank_ref_num ?? null,
-      detailErrorMessage: pd.error_Message ?? null,
-      paidAt: pd.paymentDate ? new Date(pd.paymentDate).toISOString() : null,
+      bankRefNum: pd.bankRefNum ?? null,
+      detailErrorMessage: pd.errorMessage ?? null,
+      paidAt: pd.paidAt ?? null,
     };
   },
 
   /** Seeds one paymentDetails field, simulating an earlier writer. */
   async seedPaymentDetail(id, field, value) {
-    await Donation.findByIdAndUpdate(id, { $set: { [`paymentDetails.${field}`]: value } });
+    // The seam translates the Mongoose subdocument names the scenarios use into
+    // the column names the repository takes. Doing it here rather than in the
+    // scenarios is the whole point of the seam.
+    const map = {
+      mihpayid: 'mihpayid',
+      mode: 'mode',
+      bank_ref_num: 'bankRefNum',
+      status: 'gatewayStatus',
+      error_Message: 'detailErrorMessage',
+      amount: 'amountMinor',
+      paymentDate: 'paidAt',
+    };
+    const key = map[field];
+    if (!key) throw new Error(`seedPaymentDetail: unmapped field '${field}'`);
+    const v = key === 'amountMinor' ? Math.round(Number(value) * 100) : value;
+    await donations.updatePayment(id, { [key]: v });
   },
 };
 

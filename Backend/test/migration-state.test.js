@@ -95,6 +95,30 @@ function authoriseAll() {
   }
 }
 
+/**
+ * Temporarily declare an entity not-migrated.
+ *
+ * NEEDED FROM PACKAGE 3.4 ONWARDS, and that is worth stating. The migration is
+ * complete, so the SAFETY gate refuses nothing in normal operation and there is
+ * no naturally-unsafe entity left to test it against. The condition has to be
+ * constructed - which means the gate is from here on EXERCISED ONLY BY THESE
+ * TESTS.
+ *
+ * That is AU3's "control validated only where nothing is at stake", seen coming
+ * rather than in hindsight: a gate the system never triggers is one refactor
+ * away from being deleted as dead code, and this suite is the only thing that
+ * would notice.
+ */
+async function withStore(entity, store, fn) {
+  const original = migrationState.ENTITIES[entity].store;
+  migrationState.ENTITIES[entity].store = store;
+  try {
+    return await fn();
+  } finally {
+    migrationState.ENTITIES[entity].store = original;
+  }
+}
+
 function deauthoriseAll() {
   for (const job of destructiveJobs.jobNames()) {
     delete process.env[destructiveJobs.definitionOf(job).env];
@@ -195,37 +219,48 @@ test('THE SELF-CHECK: no file outside the allowlist imports a migrated model', (
   );
 });
 
-test('CONTROL: the self-check FAILS when the declaration overstates reality', () => {
+test('CONTROL: the self-check FAILS when the allowlist does not cover an importer', () => {
   // Without this, the test above passes whether or not it can detect anything.
   //
-  // CHANGED IN AS7. The control used to use `user`/`routes/admin.js`, and AS7
-  // migrated that file - so the example it relied on stopped existing. THE
-  // CONTROL HAD TO MOVE WITH THE MIGRATION, which is worth noting: a control
-  // that names a specific violation expires when that violation is fixed, and a
-  // control nobody notices has expired is worse than none.
+  // CHANGED TWICE NOW, AND THE SECOND TIME IS THE INTERESTING ONE. The control
+  // first used `user`/`routes/admin.js`; AS7 migrated that file and the example
+  // stopped existing. It then used `donation`/`routes/payment.js`; package 3.4
+  // migrated THAT file, and the example stopped existing again.
   //
-  // `donation` is the remaining `split` - routes/payment.js still writes
-  // MongoDB. Declaring it `mysql` is the dangerous edit now.
-  const state = migrationState.stateFor('donation');
-  assert.equal(state.store, migrationState.SPLIT, 'precondition: donation is split');
+  // A CONTROL THAT NAMES A SPECIFIC VIOLATION HAS A LIFETIME, and this one
+  // expired twice in two packages. Rewritten to depend on no violation at all:
+  // it takes an entity that IS correctly declared, removes one entry from its
+  // allowlist, and asserts the files that entry was covering are then reported.
+  // Nothing about the migration's progress can retire that.
+  const entity = 'donation';
+  const state = migrationState.stateFor(entity);
+  assert.equal(state.store, migrationState.MYSQL, 'precondition');
 
   const importers = importersOf(state.model);
-  assert.ok(
-    importers.includes('routes/payment.js'),
-    'CONTROL FAILED: routes/payment.js does not import models/Donation, so the ' +
-      'scan is not finding what it claims to find'
-  );
+  assert.ok(importers.length > 0, `CONTROL FAILED: nothing imports models/${state.model}, so the scan finds nothing`);
 
-  // The check the previous test would run, with `donation` pretended to be
-  // mysql and payment.js NOT allowlisted.
-  const without = state.mongooseAllowed.filter((p) => p !== 'routes/payment.js');
-  const wouldViolate = importers.filter((f) => !without.some((prefix) => f.startsWith(prefix)));
+  // Every importer is allowlisted today - that is what the test above asserts.
+  for (const f of importers) {
+    assert.ok(
+      state.mongooseAllowed.some((prefix) => f.startsWith(prefix)),
+      `precondition: ${f} should already be allowlisted`
+    );
+  }
 
-  assert.ok(
-    wouldViolate.includes('routes/payment.js'),
-    'CONTROL FAILED: declaring `donation` mysql would NOT be caught, so the ' +
-      'self-check above proves nothing'
-  );
+  // Remove ONE allowlist entry and the files it covered must be reported.
+  for (const dropped of state.mongooseAllowed) {
+    const narrowed = state.mongooseAllowed.filter((p) => p !== dropped);
+    const covered = importers.filter((f) => f.startsWith(dropped));
+    if (covered.length === 0) continue;
+
+    const violations = importers.filter((f) => !narrowed.some((prefix) => f.startsWith(prefix)));
+    assert.deepEqual(
+      violations.sort(),
+      covered.sort(),
+      `CONTROL FAILED: dropping '${dropped}' from the allowlist did not surface ` +
+        'the files it covers, so the self-check above proves nothing'
+    );
+  }
 });
 
 test('`split` is not `mysql`: an entity with a live MongoDB writer is not migrated', () => {
@@ -233,19 +268,24 @@ test('`split` is not `mysql`: an entity with a live MongoDB writer is not migrat
   // harm. CHANGED IN AS7: `user` left this list when routes/admin.js migrated
   // and ADMIN-01 closed. `donation` remains, because routes/payment.js is still
   // the only live creator of donations and it still writes MongoDB.
-  assert.equal(migrationState.isMysqlAuthoritative('donation'), false);
-  assert.equal(migrationState.isMysqlAuthoritative('user'), true, 'CHANGED IN AS7');
-  assert.equal(migrationState.isMysqlAuthoritative('pendingSignup'), true);
-  assert.equal(migrationState.isMysqlAuthoritative('category'), true);
+  // CHANGED IN 3.4: `donation` was the last one, and the migration is complete.
+  // The list is now empty, which is the state this whole sequence was aiming at
+  // - and it means the SAFETY gate refuses nothing in normal operation from
+  // here on. That is why AT1's separate authorisation gate matters more after
+  // this package than before it, not less.
+  for (const e of migrationState.entityNames()) {
+    assert.equal(migrationState.isMysqlAuthoritative(e), true, `${e} should be mysql`);
+  }
+  assert.deepEqual(migrationState.pendingMigration(), []);
 
-  // And the reason is recorded, not just the verdict - a bare 'split' would be
-  // the next inherited claim.
-  for (const e of migrationState.pendingMigration()) {
-    assert.match(
-      migrationState.stateFor(e).reason,
-      /\.js/,
-      `${e} is declared not-migrated but its reason names no file. State the ` +
-        'writer, or the next reader has to rediscover it.'
+  // Every entity states its reason with a file reference, migrated or not - a
+  // bare verdict would be the next inherited claim.
+  for (const e of migrationState.entityNames()) {
+    const reason = migrationState.stateFor(e).reason;
+    assert.ok(
+      /\.js/.test(reason) || /by construction/.test(reason),
+      `${e}'s reason names no file. State the writer, or the next reader has ` +
+        'to rediscover it.'
     );
   }
 });
@@ -279,7 +319,7 @@ async function makeAncientDonation(tag) {
   });
 }
 
-test('AS2: the retention purge REFUSES mid-migration, and the rows survive', async () => {
+test('AS2: the retention purge REFUSES while an entity is mid-migration (CONSTRUCTED IN 3.4)', async () => {
   // The scenario the finding is about: an operator sets SCHEDULER_ENABLED=true
   // before the donation write path has migrated. Before AS2 the only thing
   // standing in the way was that the variable defaults to false.
@@ -291,19 +331,21 @@ test('AS2: the retention purge REFUSES mid-migration, and the rows survive', asy
   );
   assert.ok(before > 0, 'precondition: there is something the purge would delete');
 
-  await assert.rejects(
-    () => scheduler.purgeOldDonations({ dryRun: false }),
-    (err) => {
-      assert.equal(err.code, 'ERR_NOT_AUTHORITATIVE', 'refusal must be typed');
-      assert.equal(err.entity, 'donation');
-      assert.equal(err.state, 'split');
-      assert.match(err.message, /REFUSED/);
-      // The message must name the file, not just the state - an operator
-      // reading it at 02:00 needs to know what to migrate.
-      assert.match(err.message, /payment\.js/, 'the refusal names the live writer');
-      return true;
-    }
-  );
+  // CHANGED IN 3.4. `donation` reached `mysql` in this package, so "mid-migration"
+  // no longer describes the system and the state is constructed. The gate's
+  // BEHAVIOUR is unchanged; only the availability of a natural subject is.
+  await withStore('donation', migrationState.SPLIT, async () => {
+    await assert.rejects(
+      () => scheduler.purgeOldDonations({ dryRun: false }),
+      (err) => {
+        assert.equal(err.code, 'ERR_NOT_AUTHORITATIVE', 'refusal must be typed');
+        assert.equal(err.entity, 'donation');
+        assert.equal(err.state, 'split');
+        assert.match(err.message, /REFUSED/);
+        return true;
+      }
+    );
+  });
 
   // THE ASSERTION THAT MATTERS: nothing was deleted.
   assert.equal(
@@ -314,7 +356,7 @@ test('AS2: the retention purge REFUSES mid-migration, and the rows survive', asy
   assert.ok(await donations.findByLegacyId(row.legacyId), 'the fixture survived');
 });
 
-test('AS2: a DRY RUN is still allowed in the same state', async () => {
+test('AS2: a DRY RUN is still allowed, and reports the store (CHANGED IN 3.4)', async () => {
   // Refusing the preview would remove information for no safety gain: counting
   // is not destructive, and the dry run is how an operator learns what the
   // purge would do once the entity has migrated.
@@ -326,13 +368,14 @@ test('AS2: a DRY RUN is still allowed in the same state', async () => {
   assert.ok(result.candidates > 0, 'it still counts');
   assert.equal(
     result.authoritativeStore,
-    'split',
-    'and it reports WHY a real run would refuse, rather than leaving the ' +
-      'operator to discover it by trying'
+    'mysql',
+    'CHANGED IN 3.4: the migration is complete, so a dry run now reports a ' +
+      'store that would NOT refuse. The value is still reported rather than ' +
+      'dropped, because the day it says anything else an operator needs to see it'
   );
 });
 
-test('AS7 MADE THE INACTIVE-ACCOUNT PURGE LIVE (CHANGED IN AS7)', async () => {
+test('AS7 made the account purge SAFE; AT1 keeps it UNAUTHORISED (CHANGED IN 3.4)', async () => {
   // WAS: refused, because `user` was `split` - routes/admin.js still wrote
   // MongoDB (ADMIN-01), so purging from MySQL would have deleted migrated
   // history while live accounts accumulated in the other store.
@@ -354,17 +397,32 @@ test('AS7 MADE THE INACTIVE-ACCOUNT PURGE LIVE (CHANGED IN AS7)', async () => {
   assert.equal(result.authoritativeStore, 'mysql');
   assert.equal(result.deleted, 0, 'a dry run still deletes nothing');
 
-  // It no longer refuses. Asserted through the gate directly rather than by
-  // running a real purge, because this suite has no business deleting accounts
-  // it did not create.
+  // SAFETY no longer refuses it - that is what AS7 changed, and it is what
+  // prompted AT1.
   assert.doesNotThrow(() => migrationState.assertDeletable('user', 'the inactive-account purge'));
 
-  // And `donation` still refuses, so the gate is still doing its job per-entity
-  // rather than having been switched off wholesale.
-  assert.throws(
-    () => migrationState.assertDeletable('donation', 'the retention purge'),
-    (err) => err.code === 'ERR_NOT_AUTHORITATIVE'
-  );
+  // CHANGED IN 3.4: `donation` used to be the counter-example here, and it
+  // reached `mysql` in this package. THE POINT SURVIVES IN A BETTER FORM - the
+  // purge is safe and STILL DOES NOT RUN, because nothing authorised it. Before
+  // AT1 this transition alone would have made it live.
+  // This suite authorises every job in `before()` so that it can test the
+  // SAFETY gate in isolation, so the authorisation gate has to be un-set here
+  // to observe it - which is itself the separation working: one suite cannot
+  // accidentally assert both.
+  const destructiveJobs = require('../config/destructiveJobs');
+  const env = destructiveJobs.definitionOf('inactive-account-purge').env;
+  const previous = process.env[env];
+  delete process.env[env];
+  try {
+    assert.equal(destructiveJobs.isAuthorised('inactive-account-purge'), false);
+    assert.throws(
+      () => destructiveJobs.assertRunnable('inactive-account-purge', 'probe'),
+      (err) => err.code === 'ERR_JOB_NOT_AUTHORISED'
+    );
+  } finally {
+    if (previous === undefined) delete process.env[env];
+    else process.env[env] = previous;
+  }
 });
 
 test('AS2: the pending-signup sweep is ALLOWED - the gate is per-entity', async () => {
@@ -385,10 +443,13 @@ test('SCHEDULER_ENABLED cannot turn the gate off', async () => {
   try {
     assert.equal(scheduler.enabled(), true, 'precondition: the scheduler is enabled');
     await makeAncientDonation('enabled');
-    await assert.rejects(
-      () => scheduler.purgeOldDonations({ dryRun: false }),
-      (err) => err.code === 'ERR_NOT_AUTHORITATIVE'
-    );
+    // CHANGED IN 3.4: constructed, because there is no unsafe entity left.
+    await withStore('donation', migrationState.SPLIT, async () => {
+      await assert.rejects(
+        () => scheduler.purgeOldDonations({ dryRun: false }),
+        (err) => err.code === 'ERR_NOT_AUTHORITATIVE'
+      );
+    });
   } finally {
     if (previous === undefined) delete process.env.SCHEDULER_ENABLED;
     else process.env.SCHEDULER_ENABLED = previous;
@@ -448,9 +509,19 @@ test('the set of Mongoose models registered at boot is DECLARED, not incidental'
 
   // WHAT EACH ONE IS DOING THERE. A model on this list with no reason is a
   // coupling nobody chose.
-  const expected = {
-    Donation: 'routes/payment.js - the live donation writer, until package 3.4',
-  };
+  //
+  // CHANGED IN 3.4, AND THIS IS THE MILESTONE. `Donation` was the last entry -
+  // registered by routes/payment.js, the final live Mongoose writer. THE
+  // APPLICATION NOW LOADS NO MONGOOSE MODEL AT ALL.
+  //
+  // Mongoose itself is still connected (config/db.js) and the models still
+  // exist on disk for the ETL and the seeders; removing those is package 3.6.
+  // What this asserts is narrower and more useful: no REQUEST PATH can reach a
+  // Mongoose model, because none is loaded.
+  //
+  // An empty expectation is a strong one. Anything appearing here is a route
+  // reaching back to the old store, and the message below says so.
+  const expected = {};
 
   assert.deepEqual(
     registered,

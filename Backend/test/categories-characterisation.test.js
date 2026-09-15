@@ -126,10 +126,17 @@ const store = {
    */
   async readCategory(externalId) {
     if (!externalId) return null;
-    const row = await categories.findByLegacyId(String(externalId));
+    // SEAM CHANGE IN 3.4: BOTH id forms. AE1-b's trigger fired with
+    // package 3.4, so categories created through the route no longer have a
+    // legacy id and are addressed by uuid. Migrated ones still carry the
+    // ObjectId, and both circulate for the rest of Phase 3 (ADR-051) - so the
+    // seam resolves either, which is exactly what the routes do.
+    const row =
+      (await categories.findByLegacyId(String(externalId))) ||
+      (await categories.findById(String(externalId)));
     if (!row) return null;
     return {
-      id: row.legacyId,
+      id: row.legacyId || row.id,
       uuid: row.id,
       name: row.name,
       sortDescription: row.shortDescription,
@@ -142,7 +149,7 @@ const store = {
 
   async readCategoryByName(name) {
     const row = await categories.findByName(name);
-    return row ? this.readCategory(row.legacyId) : null;
+    return row ? this.readCategory(row.legacyId || row.id) : null;
   },
 
   async countCategories() {

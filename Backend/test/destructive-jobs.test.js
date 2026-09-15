@@ -180,36 +180,48 @@ test('every job states what leaving it OFF costs', () => {
 // THE CENTRAL ASSERTION (AT1)
 // =============================================================================
 
-test('AT1: moving an entity to `mysql` does NOT make its purge runnable', async () => {
-  // THE FINDING, STATED AS A TEST. AS7 moved `user` to mysql and the
-  // inactive-account purge went live with it. This asserts that the same
-  // transition for `donation` - which package 3.4 performs - cannot do that.
+test('AT1, EMPIRICALLY: donation moved to `mysql` and its purge is STILL not runnable', async () => {
+  // CHANGED IN 3.4, AND THIS IS THE POINT OF THE CHANGE.
+  //
+  // This test used to SIMULATE the transition, because `donation` was still
+  // `split` and waiting for package 3.4 to find out was the exact sequence that
+  // produced the finding. Package 3.4 has now performed the real transition, so
+  // the simulation is gone: the assertion is made against the actual state of
+  // the system, which is what the simulation stood in for.
+  //
+  // AS7 moved `user` to mysql and the inactive-account purge went live with it,
+  // decided by nobody. 3.4 moves `donation` - the second and last such
+  // transition - and nothing goes live.
   await makeAncientDonation('transition');
 
-  // Precondition: donation is split, so today it refuses on SAFETY.
-  assert.equal(migrationState.storeFor('donation'), migrationState.SPLIT);
+  // THE REAL STATE, not a fixture: every entity is now MySQL-authoritative.
+  assert.equal(migrationState.storeFor('donation'), migrationState.MYSQL);
+  assert.deepEqual(
+    migrationState.pendingMigration(),
+    [],
+    'precondition: the migration is complete, so SAFETY refuses nothing anywhere'
+  );
 
-  await withStore('donation', migrationState.MYSQL, async () => {
-    // The safety gate now passes, exactly as it will after package 3.4.
-    assert.doesNotThrow(() => migrationState.assertDeletable('donation', 'probe'));
+  // The safety gate passes. It is the only gate that was ever going to.
+  assert.doesNotThrow(() => migrationState.assertDeletable('donation', 'probe'));
 
-    // AND THE JOB STILL DOES NOT RUN.
-    await assert.rejects(
-      () => scheduler.purgeOldDonations({ dryRun: false }),
-      (err) => {
-        assert.equal(
-          err.code,
-          'ERR_JOB_NOT_AUTHORISED',
-          'the refusal must be about AUTHORISATION, not safety - if this is ' +
-            'ERR_NOT_AUTHORITATIVE the two gates have been collapsed again'
-        );
-        assert.equal(err.job, 'retention-purge');
-        return true;
-      }
-    );
-  });
+  // AND THE JOB STILL DOES NOT RUN.
+  await assert.rejects(
+    () => scheduler.purgeOldDonations({ dryRun: false }),
+    (err) => {
+      assert.equal(
+        err.code,
+        'ERR_JOB_NOT_AUTHORISED',
+        'the refusal must be about AUTHORISATION, not safety - if this is ' +
+          'ERR_NOT_AUTHORITATIVE the two gates have been collapsed again'
+      );
+      assert.equal(err.job, 'retention-purge');
+      return true;
+    }
+  );
 
-  // And the fixture survived the whole thing.
+  // And the fixture survived. With the migration complete, NOTHING but the
+  // per-job gate stands between a scheduler tick and a decade of donations.
   assert.ok(
     (await donations.countOlderThan(scheduler.tenYearsAgo(), scheduler.PLAUSIBLE_FLOOR)) > 0
   );
@@ -242,29 +254,41 @@ test('AT1: the same holds for users, which is where the finding came from', asyn
 // =============================================================================
 
 test('authorisation alone is NOT enough - safety is still checked', async () => {
+  // CHANGED IN 3.4. This used `donation` being genuinely `split`; the migration
+  // is complete, so there is no longer a naturally-unsafe entity to use and the
+  // condition has to be constructed.
+  //
+  // THAT IS WORTH NOTING RATHER THAN QUIETLY EDITING: the safety gate now
+  // refuses nothing in normal operation, which means from here on it is
+  // UNEXERCISED BY THE SYSTEM ITSELF. A gate in that state is one refactor away
+  // from being silently removed, and this test is the only thing that would
+  // notice - which is AU3's "control validated only where nothing is at stake",
+  // seen coming rather than in hindsight.
   await makeAncientDonation('authonly');
   process.env[destructiveJobs.definitionOf('retention-purge').env] = 'true';
 
-  // donation is `split`, so this must refuse on SAFETY even though authorised.
-  await assert.rejects(
-    () => scheduler.purgeOldDonations({ dryRun: false }),
-    (err) => {
-      assert.equal(err.code, 'ERR_NOT_AUTHORITATIVE');
-      assert.equal(err.entity, 'donation');
-      return true;
-    }
-  );
+  await withStore('donation', migrationState.SPLIT, async () => {
+    await assert.rejects(
+      () => scheduler.purgeOldDonations({ dryRun: false }),
+      (err) => {
+        assert.equal(err.code, 'ERR_NOT_AUTHORITATIVE');
+        assert.equal(err.entity, 'donation');
+        return true;
+      }
+    );
+  });
 });
 
-test('AUTHORISATION IS CHECKED FIRST when both gates would refuse', () => {
+test('AUTHORISATION IS CHECKED FIRST when both gates would refuse', async () => {
   // If nobody asked for the deletion, whether it would have been safe is moot -
   // and reporting the safety problem first sends an operator to investigate a
   // migration they have no reason to care about yet.
-  assert.equal(migrationState.storeFor('donation'), migrationState.SPLIT);
-  assert.throws(
-    () => destructiveJobs.assertRunnable('retention-purge', 'probe'),
-    (err) => err.code === 'ERR_JOB_NOT_AUTHORISED'
-  );
+  await withStore('donation', migrationState.SPLIT, async () => {
+    assert.throws(
+      () => destructiveJobs.assertRunnable('retention-purge', 'probe'),
+      (err) => err.code === 'ERR_JOB_NOT_AUTHORISED'
+    );
+  });
 });
 
 test('BOTH gates open: the purge actually runs', async () => {
@@ -273,11 +297,9 @@ test('BOTH gates open: the purge actually runs', async () => {
   const row = await makeAncientDonation('both');
   process.env[destructiveJobs.definitionOf('retention-purge').env] = 'true';
 
-  await withStore('donation', migrationState.MYSQL, async () => {
-    const result = await scheduler.purgeOldDonations({ dryRun: false });
-    assert.ok(result.deleted > 0, 'it deleted something');
-    assert.equal(result.dryRun, false);
-  });
+  const result = await scheduler.purgeOldDonations({ dryRun: false });
+  assert.ok(result.deleted > 0, 'it deleted something');
+  assert.equal(result.dryRun, false);
 
   assert.equal(await donations.findByLegacyId(row.legacyId), null, 'the ancient row is gone');
 });
@@ -322,7 +344,7 @@ test('a DRY RUN needs no authorisation, in any migration state', async () => {
   // WOULD do would make the decision unmakeable.
   const d = await scheduler.purgeOldDonations({ dryRun: true });
   assert.equal(d.deleted, 0);
-  assert.equal(d.authoritativeStore, 'split');
+  assert.equal(d.authoritativeStore, 'mysql', 'CHANGED IN 3.4 - the migration is complete');
 
   const u = await scheduler.purgeInactiveUsers({ dryRun: true });
   assert.equal(u.deleted, 0);
