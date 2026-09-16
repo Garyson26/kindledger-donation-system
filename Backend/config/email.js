@@ -312,6 +312,24 @@ async function sendSignupOTP(email, otp, userName = 'User') {
               
               <p>This code will expire in <strong>10 minutes</strong>.</p>
               
+              <!--
+                SIGNUP-01. THIS ENDPOINT IS UNAUTHENTICATED AND ANYONE CAN CAUSE
+                THIS EMAIL TO BE SENT TO ANY ADDRESS. The recipient is therefore
+                not necessarily the person who asked for it, and this template
+                was written as though they always were - it thanked them for
+                joining and asked for an action, with no way to tell that they
+                had not joined anything.
+
+                The warning is a MITIGATION, NOT THE FIX. The fix is that
+                /signup/verify-otp now requires the password the signup was
+                started with, so a recipient who did not start it cannot
+                complete it however convincing the email looks.
+              -->
+              <div class="notice" style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+                <strong>Did not sign up?</strong><br>
+                If you did not create an account with us, please ignore this email and <strong>do not enter this code</strong>. No account exists until the code is used, and we will never ask you for your password or a verification code by email.
+              </div>
+
               <div class="welcome">
                 <strong>✓ What's Next?</strong><br>
                 Once verified, you'll be able to access all features and start making a difference for our oceans!

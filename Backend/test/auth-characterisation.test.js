@@ -770,3 +770,109 @@ test('AK3: an UN-MIGRATED user authenticates through the bridge, loudly', async 
   assertRefused(login, 400);
   assert.equal(login.body.error, 'Invalid credentials');
 });
+
+// =============================================================================
+// SIGNUP-01 - pre-registration account takeover (AX1)
+// =============================================================================
+
+test('SIGNUP-01 CLOSED: a recipient who did not start the signup CANNOT complete it', async () => {
+  // THE ATTACK, RUN IN FULL, ASSERTED TO FAIL AT THE STEP THAT MATTERS.
+  //
+  // Proved working before this fix, in the AW2 audit:
+  //   pending row created: true
+  //   password hash is the ATTACKER-chosen one: true
+  //   attempts before re-post: 4 -> after: 0
+  //   account created: true
+  //   ATTACKER PASSWORD WORKS ON IT: true
+  //
+  // The OTP proves control of the ADDRESS. It does not prove who STARTED the
+  // signup. `/signup/verify-otp` now requires the password the signup was
+  // started with, which is the only thing the initiator has and the recipient
+  // does not.
+  await store.reset();
+  const victim = uniqEmail('signup01victim');
+  const ATTACKER_PASSWORD = 'AttackerChosen123!';
+
+  // 1. The attacker starts a registration for an address they do not own.
+  const initiated = await post('/api/auth/signup', {
+    name: 'Totally The Victim',
+    email: victim,
+    password: ATTACKER_PASSWORD,
+  });
+  assert.equal(initiated.status, 200, 'the attacker can still START one - that is SEC-08 uniformity');
+
+  // 2. The attacker re-posts to reset the OTP attempt counter. Part of the
+  //    proved chain, so it is part of the proof that the chain is broken.
+  const prisma = getPrisma();
+  await prisma.pendingSignup.update({
+    where: { email: victim.toLowerCase() },
+    data: { signupOtpAttempts: 4 },
+  });
+  await post('/api/auth/signup', { name: 'x', email: victim, password: ATTACKER_PASSWORD });
+  const afterRepost = await prisma.pendingSignup.findFirst({
+    where: { email: victim.toLowerCase() },
+    select: { signupOtpAttempts: true },
+  });
+  assert.equal(
+    afterRepost.signupOtpAttempts,
+    0,
+    'the re-post STILL resets the counter - recommendation 2 is NOT implemented, ' +
+      'and this asserts the residual rather than letting it be assumed closed'
+  );
+
+  // 3. The victim receives the code. Simulated by setting a known one, because
+  //    the suite cannot read the mailbox.
+  const KNOWN = '123456';
+  await require('../repositories/pendingSignups').setOtp(victim, KNOWN, Date.now() + 10 * 60 * 1000);
+
+  // 4. THE VICTIM ENTERS THE CODE - and this is where the chain now breaks.
+  //    They do not know the attacker's password, so they cannot supply it.
+  const victimAttempt = await post('/api/auth/signup/verify-otp', { email: victim, otp: KNOWN });
+  assertRefused(victimAttempt, 400);
+  assert.equal(victimAttempt.body.error, 'Invalid OTP', 'and it says nothing about why');
+
+  assert.equal(
+    await users.findByEmail(victim),
+    null,
+    'NO ACCOUNT WAS CREATED. This is the assertion the whole finding turns on.'
+  );
+
+  // 5. And guessing a DIFFERENT password does not work either, so the control
+  //    is the password and not merely the presence of the field.
+  const guessed = await post('/api/auth/signup/verify-otp', {
+    email: victim,
+    otp: KNOWN,
+    password: 'SomeOtherPassword1!',
+  });
+  assertRefused(guessed, 400);
+  assert.equal(await users.findByEmail(victim), null, 'still no account');
+});
+
+test('SIGNUP-01: the CONTROL - a genuine signup still completes', async () => {
+  // Without this, the test above proves only that verify-otp is broken, which a
+  // permanently failing endpoint would also satisfy.
+  await store.reset();
+  const email = uniqEmail('signup01real');
+  const PASSWORD = 'GenuineUser123!';
+
+  await post('/api/auth/signup', { name: 'Real User', email, password: PASSWORD });
+
+  const KNOWN = '654321';
+  await require('../repositories/pendingSignups').setOtp(email, KNOWN, Date.now() + 10 * 60 * 1000);
+
+  const verified = await post('/api/auth/signup/verify-otp', {
+    email,
+    otp: KNOWN,
+    password: PASSWORD,
+  });
+  assert.equal(verified.status, 200, `a genuine signup must complete: ${verified.raw.slice(0, 200)}`);
+  assert.ok(verified.body.token, 'and it issues a token');
+
+  const account = await users.findByEmail(email);
+  assert.ok(account, 'the account exists');
+  assert.equal(
+    await users.verifyPassword(account.id, PASSWORD),
+    true,
+    'with the password the person who signed up chose'
+  );
+});

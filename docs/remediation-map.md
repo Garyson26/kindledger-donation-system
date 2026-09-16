@@ -258,12 +258,37 @@ donor lands on a blank page. This cannot be closed by reading code: it depends
 on **the values actually deployed**, which are in Vercel's environment settings
 and have never been confirmed.
 
-**ASSIGNED TO GARY, production session.** Read the deployed
-`FRONTEND_SUCCESS_URL` and `FRONTEND_FAILURE_URL` and compare against the routes
-in `App.jsx`. If they match, this closes as a documentation defect in
-`.env.example` alone. If they do not, every donor who has paid since the values
-were set has landed on a blank page after a successful payment, and the finding
-is considerably larger than it reads here.
+**HALF OF THIS IS ALREADY CLOSED, AND HAD BEEN FOR SEVERAL PACKAGES (AX5).**
+`.env.example` lines 219-220 read `/payment-success` and `/payment-failure`,
+which match `App.jsx:180-181` exactly. The documentation defect was fixed and
+the finding was never updated - it has been describing a corrected file.
+
+**WHAT REMAINS IS ONE COMMAND, NOT A SESSION.**
+
+```
+vercel env pull        # or one look at the dashboard
+```
+
+and compare two values against exactly:
+
+```
+/payment-success
+/payment-failure
+```
+
+If they match, U-4 closes entirely. If they do not, every donor who has paid
+since the values were set has landed on a blank page after a successful payment.
+
+**The comparison is pre-computed, so whoever reads the values is CONFIRMING
+rather than INVESTIGATING.** That is a materially smaller ask than "a production
+session" and should be described as one.
+
+Checked and not available from here, both reasons verified rather than assumed:
+the Vercel tooling in this session can WRITE environment variables and not read
+them, and the backend deployment is `BLOCKED` with `live: false`, answering 404 -
+so behavioural probing is unavailable too. (The invalid-hash path would otherwise
+have revealed `FRONTEND_FAILURE_URL` without any credential, since it redirects
+before any hash check passes.)
 
 ### U-5. SEC-17 (second half) - `for_ocean_security_review.md` is tracked in the repository root
 **Source** SEC-17; ADR-030. **Provenance R.**
@@ -979,19 +1004,53 @@ anything"* and *"we will never ask you for your password or a verification code
 by email."* **The template written for the untrusted case is careful; the one
 that has always existed is not.**
 
-### Recommended, NOT implemented - this is an audit and the fixes are decisions
+### CLOSED IN AX1 - and recommendation 1 was NOT what closed it
 
-1. **Warn in the signup OTP email.** "If you did not request this, ignore this
-   email and do not enter the code." One template edit, in the file 3.5a owns,
-   no downside. It is the single highest-value change.
-2. **Do not reset `signupOtpAttempts` when a pending row already exists.** A
-   small repository change; keeps the counter meaningful.
-3. **Consider rate-limiting `/signup` per ADDRESS**, as AV1 did for resets - it
-   bounds problems 1 and 2 without touching the flow.
+**Recommendation 1 - the email warning - is IMPLEMENTED and is a MITIGATION.**
+It asks the recipient to make the right decision. It cannot make the attack
+fail, because the attack succeeds precisely when the recipient makes the wrong
+one, and no test can assert that a human read a paragraph.
 
-Not done here because AW2 was commissioned as an audit and because the email
-wording is a product decision. **Recorded with its evidence so it cannot be
-inherited as "probably fine".**
+**What closes it: `/signup/verify-otp` now requires the password the signup was
+started with.**
+
+> **The OTP proves control of the ADDRESS. It does not prove who STARTED the
+> signup.** Those are different facts and the flow treated them as one.
+
+The password is the only thing the initiator holds that a recipient does not:
+
+| | Knows the password | Outcome |
+|---|---|---|
+| a genuine signer-up | yes - they chose it | verifies |
+| an address owner who did not sign up | **no** | **cannot verify** |
+
+**`/login` already required exactly this** before re-sending an OTP for a pending
+signup - the precedent was in the same file, and the strictly more dangerous
+endpoint did not have it.
+
+The frontend already held the password in state across both steps of its
+single-page flow; it simply never sent it. One field.
+
+**Proved by running the attack, not by asserting the line is present**
+(`test:auth-char`): the attacker initiates, re-posts to reset the counter, the
+victim enters the code - **and no account is created.** With a control test that
+a genuine signup still completes, so the proof is not that the endpoint is
+broken.
+
+### STILL NOT IMPLEMENTED, with their evidence
+
+**Recommendation 2 - do not reset `signupOtpAttempts` on a re-post.** Still
+live: the test above ASSERTS the counter resets from 4 to 0, so the residual is
+pinned rather than assumed closed. It no longer contributes to takeover, because
+the chain breaks later; it remains a counter any anonymous caller can reset.
+
+**Recommendation 3 - rate-limit `/signup` per ADDRESS.** Still live. An attacker
+can still destroy a legitimate in-flight signup by re-posting the address, since
+`upsert` replaces the row and invalidates the OTP already in the victim's inbox.
+That is a denial of registration, not a takeover.
+
+**Neither is inherited as "probably fine" - both are asserted or stated with the
+behaviour that establishes them.**
 
 ---
 
@@ -1062,6 +1121,50 @@ looked**, which is the distinction AP1 is actually about.
 row; the existing-account path does neither. That is a far weaker signal than a
 distinct message, and closing it means constant-time signup - a different piece
 of work. Recorded here rather than left implied by the absence of a comment.
+
+---
+
+## AX4 - THE INVERTED ORACLE. Eleventh inherited claim, and it made things WORSE.
+
+Package 3.5a's first version made only the signup-attempt NOTICE
+fire-and-forget, leaving the OTP path awaiting its send with a rollback and a
+500.
+
+**That did not close the oracle. It turned it around** - and the new one is
+worse than the original:
+
+| | Known address | Unknown address |
+|---|---|---|
+| Before 3.5a | `400 "User already exists"` | `200` |
+| **After the first attempt** | `200` | **`500`** (mail degraded) |
+| After the fix | `200` | `200` |
+
+### WHY THE INVERTED FORM IS WORSE THAN THE ORIGINAL
+
+**A 500 reads as infrastructure, not as disclosure.** The original oracle was a
+message that said in plain words what it revealed - anyone auditing it could see
+it. The inverted one looks like a mail outage, which is a thing that genuinely
+happens, and an operator seeing intermittent 500s on signup investigates SMTP.
+
+**The oracle goes quiet while staying open.** That is the worst of both: it still
+distinguishes the two cases perfectly for anyone probing, and it no longer looks
+like a security finding to anyone maintaining.
+
+### THE ASYMMETRY WAS IN THE BRANCH I WAS NOT EDITING
+
+I was writing the existing-account branch. The defect was in the new-account
+branch, which I had not touched and therefore did not re-read - and **my own
+comment at the site I WAS editing named the wrong branch**, reasoning about the
+risk correctly and attributing it backwards.
+
+**Three functions away in the same file, `/signup/resend-otp` had already been
+made fire-and-forget for exactly this reason**, with a comment saying so: "Fire
+and forget, so a mail failure cannot distinguish by status either."
+
+A precedent that close, already applied, in the same file, for the same reason,
+and still not carried across. That is the strongest argument available for
+running the thing rather than reasoning about it: **the reasoning was present,
+correct, and written down, and it still did not reach the adjacent branch.**
 
 ---
 
@@ -1335,6 +1438,27 @@ The control was not checking the wrong thing - "does a file reference a migrated
 model" is exactly the right question for the coupling AT4 was built to find. It
 is that the ANSWER to that question does not determine whether the import can be
 removed, and nothing in the question hints that it might not.
+
+### U-6 IS THE SAME CLASS (AX2)
+
+`prisma` is declared a **devDependency**. The obvious reading is "build tooling
+only, not shipped". `npm ls` says otherwise:
+
+```
+@prisma/client@6.19.3      <- a PRODUCTION dependency
+`-- prisma@6.19.3
+  `-- @prisma/config@6.19.3
+    `-- deepmerge-ts@7.1.5   <- the advisory
+```
+
+**Checking the DECLARATION gives the wrong answer. Checking the TREE gives the
+right one.** The declaration is a statement of intent; the tree is what npm
+installs. Those are different properties, exactly as "does a file reference a
+model" and "does loading it register one" are different properties.
+
+Filed here rather than as a dependency note, because the interesting part is not
+the advisory - it is that a reasonable person checks `package.json`, concludes
+"dev-only", and is wrong.
 
 ### The countermeasure is NOT a better import checker
 
@@ -2980,6 +3104,24 @@ code must be VOIDED at the attempt cap, which defended nothing and handed anyone
 who knows an address a five-request denial of service on that user's reset. See
 AW1.
 
+#### THE RULE THAT AUDIT FOUND (AX3)
+
+The question above is what to ASK. This is what the answer turned out to be, and
+it is checkable by inspection rather than by investigation:
+
+> **A destructive threshold is SAFE when reaching it requires authority the
+> destruction itself presupposes. It is DANGEROUS when an unauthenticated party
+> can reach it on someone else's behalf.**
+
+Ten of the eleven destructive assertions in the suites were safe, and **all ten
+for that one structural reason** - an admin, or the holder of a valid code, or
+the passage of time. **The reason is the finding, not the count.** A future
+package does not need to re-run the audit to classify a new assertion; it needs
+to name who can reach the threshold.
+
+The eleventh was `signupOtpAttempts` resetting on a second `/signup`, reachable
+by anyone, which is SIGNUP-01.
+
 #### What this does NOT require
 
 It does not require a test for every claim. It requires that a claim with no
@@ -3002,10 +3144,13 @@ not, and is worse than silence, because the next reader inherits it.
 | 7 | The auto-verify branch is "narrowed to accounts that predate the OTP flow" | **my own comment, 3.2** | **NEVER IMPLEMENTED** - it applies to everyone |
 | 8 | BUG-03's counter is "always 0" | the review, restated in the map | **WRONG** - it counts the lowercase subset; measured 1 of 2 (AR1) |
 | 9 | SEC-10 is closed: "one shared validator across all five paths" | **my own claim, package 3.2** | **TRUE OF ONE FILE.** It was local to routes/auth.js; admin.js had a sixth, whose check said 10 and whose message said 6 (AT5) |
+| 10 | "`present()` below already returns `legacyId \|\| id`" | **my own comment, package 3.4** | **WRONG.** It returned `legacyId` alone, so every new category got `_id: null`. Caught in minutes by four assertions |
+| 11 | "making the notice fire-and-forget closes the oracle" | **my own comment, package 3.5a** | **IT INVERTED IT.** See AX4 below |
 
-**Nine now.** Number 8 arrived during the audit commissioned because of number 7,
-and number 9 during the package commissioned because of number 8. The claims do
-not run out, and each pass that looks for them finds one.
+**ELEVEN NOW.** Number 8 arrived during the audit commissioned because of number
+7, number 9 during the package commissioned because of number 8, and numbers 10
+and 11 in the two packages after that. The claims do not run out, and each pass
+that looks for them finds one.
 
 **THREE OF THE NINE ARE MINE, AND TWO OF THE LAST THREE.** That is the shift
 worth naming: the rule was built for claims inherited from other people's

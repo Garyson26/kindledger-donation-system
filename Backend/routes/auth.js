@@ -239,7 +239,7 @@ router.post("/signup", authLimiter, async (req, res) => {
 
 router.post("/signup/verify-otp", authLimiter, async (req, res) => {
   try {
-    const { email, otp } = req.body;
+    const { email, otp, password } = req.body;
     if (!email || !otp) return refuse(res, 400, "Email and OTP are required");
 
     // SEC-08. EVERY failure on this endpoint answers identically, including
@@ -252,6 +252,40 @@ router.post("/signup/verify-otp", authLimiter, async (req, res) => {
     // user who exhausts it requests a new code and it works.
     const pending = await pendingSignups.findByEmail(email);
     if (!pending) return refuse(res, 400, "Invalid OTP");
+
+    // =========================================================================
+    // SIGNUP-01 - THE CONTROL THAT BREAKS PRE-REGISTRATION TAKEOVER
+    // =========================================================================
+    // `/signup` is unauthenticated, so anyone could start a registration for
+    // ANY address using a password THEY chose. The address owner received a
+    // plausible welcome email, and if they entered the code, THE ACCOUNT WAS
+    // CREATED WITH THE ATTACKER'S PASSWORD - the attacker could then sign in as
+    // them, and everything the victim did afterwards was visible to whoever
+    // chose it.
+    //
+    // THE OTP PROVES CONTROL OF THE ADDRESS. IT DOES NOT PROVE WHO STARTED THE
+    // SIGNUP. Those are different facts and the flow was treating them as one.
+    // The password is the only thing the initiator has that a recipient does
+    // not, so requiring it here is what separates them.
+    //
+    //   legitimate user - knows their own password  -> verifies
+    //   address owner who did not sign up           -> CANNOT verify
+    //
+    // A warning in the email was the first thing suggested and it is a
+    // MITIGATION, not this. It asks the recipient to make the right decision;
+    // this removes the decision.
+    //
+    // `/login` already required exactly this to re-send an OTP for a pending
+    // signup (see above) - the precedent was in this file and the strictly more
+    // dangerous endpoint did not have it.
+    //
+    // ANSWERS "Invalid OTP" like every other failure here, so it adds no oracle:
+    // a caller cannot learn whether the address has a signup in flight, nor
+    // whether their password guess was right.
+    if (!password || !(await pendingSignups.verifyPassword(email, password))) {
+      await pendingSignups.incrementOtpAttempts(email);
+      return refuse(res, 400, "Invalid OTP");
+    }
 
     const verdict = await pendingSignups.verifyOtp(email, otp);
     if (!verdict.ok) {

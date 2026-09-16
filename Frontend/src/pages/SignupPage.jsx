@@ -66,7 +66,11 @@ function SignupPage({ onSignup }) {
       const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/auth/signup/verify-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: form.email, otp }),
+        // SIGNUP-01: the password the signup was STARTED with. The server
+        // requires it so that someone who merely received the code - because
+        // anyone can start a signup for any address - cannot complete it. The
+        // value was already in state; it was simply never sent.
+        body: JSON.stringify({ email: form.email, otp, password: form.password }),
       });
 
       const data = await response.json();
