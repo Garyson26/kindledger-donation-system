@@ -52,19 +52,68 @@
  * other.
  *
  * -----------------------------------------------------------------------------
- * THE RESIDUAL, STATED RATHER THAN IMPLIED
+ * THE SECOND GUARD: IDENTITY, NOT EMPTINESS (BB1)
  * -----------------------------------------------------------------------------
- * The guard catches an EMPTY source. It does NOT catch a POPULATED WRONG one:
- * if the ETL migrated from database A and this is pointed at database B, and B
- * holds documents of its own, the count is non-zero, the guard passes, and every
- * genuine id that happens not to exist in B is nulled.
+ * The emptiness check above catches an EMPTY source. **It does not catch a
+ * POPULATED WRONG one**, which is the dangerous case: point this at a different
+ * database that has documents of its own, the count is non-zero, the first guard
+ * passes, and every genuine id absent from it is nulled.
  *
- * There is no purely local way to close that - "is this the database we migrated
- * from" is not answerable from either side alone. **Phase 4b must run
- * `--dry-run` FIRST and compare the per-entity counts against what it expects**,
- * which is the only check that can see it. That is a runbook step, and it is a
- * runbook step because the alternative is a threshold that would fire constantly
- * on development data and be turned off.
+ * That gap was documented here as a residual and left to a 4b runbook step. It
+ * was wrong twice over. AY1 says a mitigation that depends on a human cannot
+ * carry a closure claim; and within minutes of the note being written, the test
+ * suite demonstrated the gap on the author's own machine, nulling two genuine
+ * category ids. A note next to the code did not reach the code (BA3).
+ *
+ * So the check is IDENTITY and it lives in the operation:
+ *
+ *   **If MongoDB holds documents for an entity but NOT ONE of the legacy_ids in
+ *   MySQL is among them, this is not the database those rows came from.**
+ *
+ * A count cannot see that. Emptiness cannot see that. Only asking whether the
+ * two sides share identifiers can, and sharing identifiers is what "the source
+ * the rows came from" MEANS.
+ *
+ * THE CUTOVER IS WHY THIS COULD NOT WAIT. In 4b, production MongoDB IS the
+ * oracle: there is no second copy to restore from, and a wrong-database run
+ * destroys the migration history of every record permanently.
+ *
+ * -----------------------------------------------------------------------------
+ * WHAT IDENTITY STILL DOES NOT COVER - PINNED, NOT NOTED (BB5)
+ * -----------------------------------------------------------------------------
+ * A PARTIALLY overlapping database still passes: an old snapshot of the right
+ * database shares most ids, so `found` is non-empty, and the genuine ids added
+ * since the snapshot are nulled.
+ *
+ * Identity cannot close that, because both sides genuinely do share
+ * identifiers. What closes it is the per-entity MATCH RATE, which this now
+ * reports on every run and which `--dry-run` prints before anything is written.
+ *
+ * **THAT RESIDUAL IS PINNED BY A TEST**, not left here as prose - see
+ * `test/null-minted.test.js`, "a PARTIAL overlap is NOT caught". Per BA3 a
+ * residual with no test is indistinguishable from one nobody thought about.
+ *
+ * -----------------------------------------------------------------------------
+ * AND FOR THE CUTOVER IT IS A FLOOR, NOT A PRINTOUT (BC3)
+ * -----------------------------------------------------------------------------
+ * Printing the rate loudly is enough in development. It is not a control at a
+ * cutover, where a human reads a number under time pressure - AY1 again.
+ *
+ * So `minMatchRate` REFUSES below a stated floor, and `null-minted-cli.js`
+ * REQUIRES the flag on any apply run. The operator does not read a number and
+ * judge it; they state an expectation beforehand and the run enforces it.
+ *
+ * **THE 4b VALUE IS 1.0, and the reason is specific rather than cautious.**
+ * Minted legacy_ids are a PHASE 3 DEVELOPMENT ARTEFACT: they exist because
+ * `routes/categories.js` and `repositories/users.js` fabricated them for rows
+ * created through the running application. That code has never been deployed.
+ * Production MySQL is populated by the ETL and by nothing else, so every
+ * legacy_id in it came from production MongoDB and every one must resolve.
+ *
+ * A production rate below 1.0 therefore does not mean "some rows were minted".
+ * It means **rows were deleted from MongoDB after the ETL ran, or this is not
+ * the database the ETL read** - and both are reasons to stop, not to proceed.
+ * The freeze window is what makes 1.0 attainable rather than aspirational.
  *
  * -----------------------------------------------------------------------------
  * AND THE FALSE REFUSAL, WHICH IS THE SAME GUARD SEEN FROM THE OTHER SIDE
@@ -96,8 +145,21 @@ const ENTITIES = [
  * @returns {{entity:string, migrated:number, mongoDocuments:number,
  *            minted:number, nulled:number, refused?:string}[]}
  */
-async function nullMintedLegacyIds({ prisma, models, dryRun = false, entities = null }) {
+async function nullMintedLegacyIds({
+  prisma,
+  models,
+  dryRun = false,
+  entities = null,
+  minMatchRate = null,
+}) {
+  if (minMatchRate !== null) {
+    if (typeof minMatchRate !== 'number' || minMatchRate < 0 || minMatchRate > 1) {
+      throw new Error(`minMatchRate must be a number in [0, 1], got ${minMatchRate}`);
+    }
+  }
+
   const report = [];
+  const pendingWrites = [];
 
   for (const { entity, delegate, model } of ENTITIES) {
     // `entities` scopes the run. Operationally it allows one entity at a time
@@ -151,15 +213,43 @@ async function nullMintedLegacyIds({ prisma, models, dryRun = false, entities = 
       for (const d of docs) found.add(String(d._id));
     }
 
+    // =========================================================================
+    // THE IDENTITY GUARD (BB1). Emptiness was not enough.
+    // =========================================================================
+    // Documents on the other side, and NOT ONE id in common, means this is not
+    // the database these rows came from. Every row would look minted and every
+    // genuine value would be destroyed - and in 4b, permanently, because
+    // production MongoDB is the oracle and there is no second copy.
+    //
+    // Deliberately NOT a threshold. A threshold has to be chosen, argued about
+    // and eventually relaxed; "share at least one identifier" is the weakest
+    // possible statement of "this is the same database" and needs no number.
+    if (found.size === 0) {
+      const err = new Error(
+        `REFUSING: MongoDB holds ${mongoDocuments} '${entity}' document(s), but ` +
+          `NOT ONE of the ${rows.length} legacy_id value(s) in MySQL appears among ` +
+          'them. Sharing no identifiers at all is what a DIFFERENT DATABASE looks ' +
+          'like - the emptiness check cannot see this, because the collection is ' +
+          'not empty. Running would NULL every legacy_id for this entity, and ' +
+          'after the cutover that is not recoverable. Check MONGODB_URI names the ' +
+          'database the ETL migrated FROM. If this entity really was created ' +
+          "entirely after the migration, scope the run with `entities` and say so.",
+      );
+      err.code = 'ERR_SOURCE_MISMATCH';
+      err.entity = entity;
+      err.mongoDocuments = mongoDocuments;
+      err.legacyRows = rows.length;
+      throw err;
+    }
+
     const minted = rows.filter((r) => !found.has(r.legacyId));
 
-    let nulled = 0;
-    if (!dryRun && minted.length > 0) {
-      const res = await db.updateMany({
-        where: { id: { in: minted.map((r) => r.id) } },
-        data: { legacyId: null },
-      });
-      nulled = res.count;
+    // DEFERRED, NOT APPLIED HERE (BC3 + ETL-01). The floor is a property of
+    // the WHOLE RUN: refusing on the third entity after writing the first two
+    // is the partial-load failure this project has already made once. Every
+    // entity is measured first; nothing is written until all of them pass.
+    if (minted.length > 0) {
+      pendingWrites.push({ entity, db, ids: minted.map((r) => r.id) });
     }
 
     report.push({
@@ -167,8 +257,55 @@ async function nullMintedLegacyIds({ prisma, models, dryRun = false, entities = 
       migrated: rows.length,
       mongoDocuments,
       minted: minted.length,
-      nulled,
+      nulled: 0,
+      // The number that sees the PARTIAL-overlap case the identity guard cannot.
+      // Reported on every run, including dry runs, because it is the only thing
+      // an operator can compare against an expectation.
+      matchRate: rows.length === 0 ? null : found.size / rows.length,
     });
+  }
+
+  // ===========================================================================
+  // THE FLOOR (BC3). Checked across EVERY entity, before ANY write.
+  // ===========================================================================
+  // This is the only check that can see a PARTIALLY overlapping source - an old
+  // snapshot of the right database, which shares most identifiers and so passes
+  // the identity guard by construction.
+  if (minMatchRate !== null) {
+    const below = report.filter((r) => r.matchRate !== null && r.matchRate < minMatchRate);
+    if (below.length > 0) {
+      const err = new Error(
+        'REFUSING: the match rate is below the floor you stated. ' +
+          below
+            .map(
+              (r) =>
+                `${r.entity}: ${(r.matchRate * 100).toFixed(1)}% of ${r.migrated} legacy_id ` +
+                `value(s) were found in MongoDB, floor ${(minMatchRate * 100).toFixed(1)}%`
+            )
+            .join('; ') +
+          '. At a production cutover the expected rate is 100%: MySQL is populated ' +
+          'by the ETL and by nothing else, so every legacy_id came from the source ' +
+          'and every one must resolve. A lower rate means rows were DELETED from ' +
+          'MongoDB after the ETL ran, or this is NOT the database the ETL read. ' +
+          'Both are reasons to stop. NOTHING HAS BEEN WRITTEN.'
+      );
+      err.code = 'ERR_MATCH_RATE_BELOW_FLOOR';
+      err.entities = below.map((r) => ({ entity: r.entity, matchRate: r.matchRate }));
+      err.minMatchRate = minMatchRate;
+      throw err;
+    }
+  }
+
+  if (!dryRun) {
+    for (const w of pendingWrites) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await w.db.updateMany({
+        where: { id: { in: w.ids } },
+        data: { legacyId: null },
+      });
+      const row = report.find((r) => r.entity === w.entity);
+      if (row) row.nulled = res.count;
+    }
   }
 
   return report;
@@ -187,6 +324,7 @@ function formatReport(report, dryRun) {
       `  ${r.entity.padEnd(10)} legacy_id rows: ${String(r.migrated).padStart(6)}   ` +
         `mongo docs: ${String(r.mongoDocuments).padStart(6)}   ` +
         `minted: ${String(r.minted).padStart(6)}   ` +
+        `matched: ${r.matchRate === null ? '   n/a' : (r.matchRate * 100).toFixed(1) + '%'}   ` +
         `${dryRun ? 'would null' : 'nulled'}: ${r.dryRunOnly || r.nulled}`
     );
   }
@@ -197,6 +335,21 @@ function formatReport(report, dryRun) {
       ? '  No minted values remain. SPEC-1A section 4.1s invariant holds.'
       : `  ${totalMinted} minted value(s)${dryRun ? ' would be' : ''} removed.`
   );
+  // The match rate is the ONLY signal for a partially-overlapping source - an
+  // old snapshot of the right database - which the identity guard passes by
+  // construction. Printed loudly rather than left in the numbers above.
+  const partial = report.filter((r) => r.matchRate !== null && r.matchRate < 1);
+  if (partial.length > 0) {
+    lines.push('');
+    lines.push('  CHECK THESE MATCH RATES AGAINST WHAT YOU EXPECT:');
+    for (const r of partial) {
+      lines.push(
+        `    ${r.entity.padEnd(10)} ${(r.matchRate * 100).toFixed(1)}% of legacy_id ` +
+          `values were found in MongoDB. If that is lower than you expected, this ` +
+          `may be an OLD SNAPSHOT of the right database rather than the right one.`
+      );
+    }
+  }
   lines.push('');
   return lines.join('\n');
 }

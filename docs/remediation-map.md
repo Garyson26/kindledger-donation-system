@@ -2865,7 +2865,8 @@ case-variant emails (the second insert hits the unique index). So overriding a
 BLOCKING finding was strictly worse than not overriding it, in every case the
 check can produce. The flag was offering a choice that did not exist.
 
-**Fixed**: findings carry `loaderRefuses`, and those are refused BEFORE anything
+**Fixed**: findings carry `refusedAtLoad` (renamed from `loaderRefuses` by BD1),
+and those are refused BEFORE anything
 is written, with the report saying why and pointing at the source data. Proved
 by re-running: the load now refuses with MySQL untouched at 0/0/0.
 
@@ -2887,7 +2888,7 @@ that does not exist. **The flag is now removed**, and passing it is a loud
 refusal rather than a silent no-op, because an operator who types a flag from an
 old runbook and sees a successful run concludes it worked.
 
-`loaderRefuses` is KEPT as reporting rather than deleted with the flag. It no
+`refusedAtLoad` is KEPT as reporting rather than deleted with the flag. It no
 longer changes behaviour; it records which findings the loader would also throw
 on, and it is the thing to check the day a BLOCKING-but-loadable finding is
 added - because on that day the question of an override becomes real again, and
@@ -3744,33 +3745,89 @@ each residual, what closes it.
 Commissioned by BA3. **Absences are reported, not omitted** - the "no" rows are
 the output of this audit, not the leftovers.
 
-| # | Residual, as documented | Guard | Test | Verdict |
+### THE RULE THIS TABLE NOW ENFORCES (BB5)
+
+> **A documented residual with no test is indistinguishable from one nobody has
+> thought about, and the map cannot tell them apart.**
+
+So every row carries **either a test name or the word UNPINNED**. There are no
+prose-only residuals in this project. A row that cannot name a test is making a
+claim about a hazard that nothing would notice changing, and saying so in the
+same column as the rows that can is what makes the difference visible.
+
+"PINNED" does not mean fixed. Rows 5, 6, 7 and 9 are **open**, and safe to leave
+open, because a test asserts the defective behaviour exactly - so closing it
+FAILS that test, and the failure is the notification.
+
+| # | Residual, as documented | Guard | Test that pins it, or UNPINNED | Verdict |
 |---|---|---|---|---|
 | 1 | **BUG-02's mixed-case `status` migrates invisibly** - MySQL silently canonicalises `'approved'`, erasing the only record of the corruption (ADR-014) | `etl/preflight.js` counts and reports before any insert | `etl.test.js` test 8, with the count | **CLOSED** |
-| 2 | **`sql_mode` is settable at runtime**, so the boot check does not cover a connection opened later - and the ETL is exactly such a connection (ADR-022) | `etl/preflight.js` re-checks `@@SESSION.sql_mode`; `etl/cli.js` makes it FATAL | none - nothing asserts the ETL refuses a non-strict connection | **GUARD ONLY.** Acceptable, since the guard is the control - but it has never been seen to fire |
+| 2 | **`sql_mode` is settable at runtime**, so the boot check does not cover a connection opened later - and the ETL is exactly such a connection (ADR-022) | `etl/preflight.js` re-checks `@@SESSION.sql_mode`; `etl/cli.js` makes it FATAL | **UNPINNED** - nothing asserts the ETL refuses a non-strict connection | **GUARD ONLY.** Acceptable, since the guard is the control - but it has never been seen to fire |
 | 3 | **`LIKE` wildcards in a search term** - a parameterised query stops injection, not `%` meaning "anything" | `escapeLike()` in the repositories | `admin-characterisation` and `donations-characterisation` both exercise `%`, `_`, `%%` | **CLOSED** |
 | 4 | **SEC-08's residual oracle** - a mail failure must not distinguish known from unknown by status either | both branches fire-and-forget, one shared `res.json` | asserted in `auth-characterisation.test.js` | **CLOSED** |
 | 5 | **SIGNUP-01 rec 2** - `signupOtpAttempts` resets on a re-post, so any anonymous caller can reset the counter | none - deliberately still live | **yes** - the test ASSERTS the counter resets 4 -> 0, pinning the residual rather than assuming it closed | **PINNED.** Open, but it cannot silently change |
-| 6 | **SIGNUP-01 rec 3** - `/signup` is not rate-limited per address, and `upsert` lets an attacker destroy a legitimate in-flight signup by re-posting the address | **none** | **none** | **UNPINNED AND OPEN.** The only row here that is neither closed nor pinned. It is a denial of registration against a real user, and nothing would notice if it got worse |
-| 7 | **The 3.5a TIMING difference** - the new-account signup path hashes a password and writes a row; the existing-account path does neither | none | **none** | **OPEN, unpinned.** Weaker than a distinct message, and closing it means constant-time signup. Recorded but never measured - nobody has established the size of the signal |
-| 8 | **`loaderRefuses` is reporting only** - kept for the day a BLOCKING-but-loadable finding is added, when the override question becomes real again | none | **none** | **OPEN.** Nothing fires on that day. The note calls it "the thing to check", which is exactly what BA3 is about |
-| 9 | **AE1-a against a POPULATED WRONG MongoDB** - the guard catches an empty source only | **none in production code** - `--dry-run` plus a 4b runbook step | the SUITE now guards itself (`null-minted.test.js`), proved by injection | **OPEN IN PRODUCTION.** The control that exists protects the test run, not the cutover - the only run that matters. Per AY1 a runbook step is not a closure claim |
+| 6 | **SIGNUP-01 rec 3** - `/signup` is not rate-limited per address, and `upsert` lets an attacker destroy a legitimate in-flight signup by re-posting the address | none - deliberately still live | **`auth-characterisation.test.js`** - "a re-post DESTROYS a legitimate in-flight signup" and "the re-post is UNLIMITED", both with a control (BB2) | **PINNED, STILL OPEN.** Demonstrated end to end: the victim's emailed code is dead and no account is created, so it is denial of registration and not takeover. Implementing the limit has a trigger, not a phase - see below |
+| 7 | **The 3.5a TIMING difference** - the new-account signup path hashes a password and writes a row; the existing-account path does neither | none | **`signup-timing.test.js`** (BB3) - MEASURED, with the number recorded | **PINNED, STILL OPEN, AND LARGER THAN EXPECTED.** See the BB3 measurement below |
+| 8 | **`refusedAtLoad` (was `loaderRefuses`) is reporting only** - kept for the day a BLOCKING-but-loadable finding is added | **`finding()` now THROWS** at construction unless the check is in `BLOCKING_BUT_LOADABLE` with a reason (BB4) | **`preflight-findings.test.js`** - the rejection proved by injection | **CLOSED - and writing it found the day had already come TWICE.** See below |
+| 9 | **AE1-a against a POPULATED WRONG MongoDB** - the emptiness guard cannot see it | **IDENTITY CHECK IN THE OPERATION** (BB1): documents on the other side and NOT ONE shared identifier is refused with `ERR_SOURCE_MISMATCH` | **`null-minted.test.js`** - "a POPULATED WRONG database is REFUSED", by injection against a 5000-document source | **CLOSED for the wrong-database case.** The PARTIAL-overlap case remains and is row 12 |
 | 10 | **AE1-a's FALSE refusal** - an entity legitimately all-minted is indistinguishable from the wrong database | `entities` scoping, so an operator can proceed deliberately | the dry-run test exercises the shape | **CLOSED as far as it can be.** The two cases are indistinguishable by construction; refusing is the correct default |
 | 11 | **AE3 part 2** - `fallbackCount()` zero across a MANUAL exercise of every migrated route, against a database holding both migrated and post-3.1 records | none | **none, by nature** | **OPEN.** A runbook step, and AY1 already says a runbook step is not a closure claim. See BA4 |
 
-### What the audit found
+### What the audit found, and what acting on it found
 
-**Four residuals have neither a guard nor a test: rows 6, 7, 8 and 11.** Row 9
-has a guard in the wrong place - it protects the test suite and not the cutover.
+The audit reported four residuals with neither a guard nor a test - rows 6, 7,
+8 and 11 - plus row 9's guard being in the wrong place. **Acting on them found
+things the audit could not have.**
 
-Row 5 is the model the others should follow. It is **still open**, and it is
-safe anyway, because a test asserts the residual behaviour exactly. An open
-residual with a test that pins it cannot change without somebody noticing; an
-open residual with a prose note can, and will.
+#### Row 9 -> BB1. The guard protected the test suite, not the cutover
 
-> **The output of this audit is not the closed rows. It is that a documented
-> residual with no test is indistinguishable from one nobody has thought about,
-> and the map cannot tell them apart either.**
+Moved into the operation, and changed from EMPTINESS to IDENTITY: *documents on
+the other side, and not one identifier in common, is not the database these rows
+came from.* A count cannot see that; sharing identifiers is what "the source"
+MEANS. Proved by injection against a 5000-document source - the case the old
+guard passed.
+
+It is deliberately **not a threshold**. "Share at least one identifier" is the
+weakest possible statement of sameness and needs no number to argue about.
+
+The cutover is why it could not wait: in 4b, production MongoDB IS the oracle,
+and there is no `kindledger_legacy` to restore from.
+
+#### Row 8 -> BB4. The flag that was meant to announce the day was mis-set
+
+`finding()` now THROWS when a BLOCKING finding declares `refusedAtLoad: false`
+unless it is acknowledged with a reason. **Writing the check found the day had
+already arrived, twice:**
+
+- `mixed-case-status` (non-canonicalisable) was blocking with the flag
+  false, and that was simply WRONG - MySQL rejects an out-of-set ENUM under
+  strict mode, and the finding's own detail text says so. **The flag whose job
+  was to notice this discrepancy was itself wrong about it.**
+- `strict-sql-mode` is GENUINELY blocking-but-loadable: the loader does not
+  throw on a permissive `sql_mode`, it truncates silently. Nothing to override,
+  because the remedy is the connection and not the data. Acknowledged.
+
+A note saying "check this on the day" could not have found either, because the
+day does not announce itself. The constructor does.
+
+#### Row 6 -> BB2. Pinned, and deliberately not fixed
+
+The per-address limit is separate work, and not trivially safe: **a limit keyed
+on an address the attacker supplies is itself a way to lock a real user out of
+registering**, which is AV1's shape and needs the same care. What could not wait
+was that it was the only residual neither closed nor recorded.
+
+#### The rule that generalises
+
+> **The output of an audit like this is not the closed rows. It is that a
+> documented residual with no test is indistinguishable from one nobody has
+> thought about - and every row that had to be converted from prose into a check
+> turned out to contain something the prose had got wrong.**
+
+Three of the four unpinned rows were not merely unwatched. Row 8's flag was
+mis-set, row 9's guard was in the wrong component, and row 7's signal (below)
+was larger than the note implied. **The act of writing the check is what found
+them**, which is AZ3's countermeasure doing the thing it was adopted for.
 
 ---
 
@@ -3819,6 +3876,157 @@ exist anywhere. It is now `test/bridge-exit-check.js`, a CI gate.
 Applied to AE3, the fix is not to weight synthetic records but to **remove
 them**: a record that cannot exist in production after the ETL has no business
 in the evidence at all. That is BA2.
+
+
+---
+
+## BC1 - A FLAG THAT IS THE SOLE CHECK ON A PROPERTY CAN ONLY AGREE WITH ITSELF
+
+BB4's construction-time guard found **two existing errors on its first run**, not
+a future one. That is the strongest case this project has produced for BA3's
+rule, because a note cannot find anything - only a check that runs can.
+
+| Finding | What was wrong |
+|---|---|
+| `mixed-case-status` | BLOCKING with the flag FALSE, **contradicting its own detail text**, which says in words that MySQL will REJECT these rows. The flag whose job was to notice the discrepancy was itself the discrepancy, and nothing could catch that because the flag was the only check |
+| `strict-sql-mode` | Genuinely blocking-but-loadable. The loader truncates silently rather than throwing, and there is nothing to override because the remedy is the CONNECTION, not the data. **That is ETL-01's shape reappearing inside the mechanism built to classify ETL-01** |
+
+Two instances of metadata being wrong about the thing it describes.
+
+> **Any flag that is the SOLE check on a property needs a second mechanism
+> deriving that property independently, or it can only ever agree with itself.**
+
+The second mechanism here is `test/etl.test.js`, which asserts the refusals by
+their SHAPE - a duplicate-key violation, an ENUM rejection - rather than by any
+message of ours. It fails if the property stops holding, whatever the flag says.
+
+---
+
+## BD1 - THE FLAG WAS TRUE ABOUT THE SYSTEM AND FALSE ABOUT THE LOADER
+
+`loaderRefuses` is now **`refusedAtLoad`**, and the rename is not tidiness.
+
+**Two of the five refusals come from the SCHEMA, not from `migrate.js`:**
+
+| Finding | What actually refuses it |
+|---|---|
+| `strict-sql-mode` | **Nothing.** Acknowledged in `BLOCKING_BUT_LOADABLE` |
+| `case-variant-emails` | **SCHEMA** - `uq_users_email` under `utf8mb4_0900_as_ci`, which is case-INsensitive, so two accounts differing only in case collapse onto one row |
+| `mixed-case-status` | **SCHEMA** - the `ENUM` plus `STRICT_TRANS_TABLES`. Without strict mode MySQL would insert the empty string instead |
+| `orphaned-category` | `migrate.js` - an explicit throw |
+| `implausible-dates` | `migrate.js` - an explicit throw |
+
+The old name invited exactly the reasoning that produced the original error:
+read "loaderRefuses", look in `migrate.js`, find nothing, conclude the flag is
+wrong. That is how `mixed-case-status` came to be marked false.
+
+> **A property owned by the schema and named after the loader is invisible to
+> anyone changing the schema.**
+
+Relaxing the email collation or dropping `uq_users_email` silently removes a
+migration safety property, and **nothing in the ETL would change to show it**.
+So the warning now lives in `db/schema.sql`, next to the index, per AI4 - the
+warning goes where the mistake gets made, not where it gets noticed.
+
+---
+
+## BD2 - THE OTHER THREE BLOCKING FINDINGS, AUDITED THE SAME WAY
+
+BC2's instruction was not to assume the remaining three were right because the
+guard passes, since the guard was written from the same understanding that
+produced the errors. Two of the three had **no behavioural citation either** -
+only a pre-flight test, so `refusedAtLoad: true` was an assertion about code
+nobody had executed.
+
+Both are TRUE. Both are now cited to behaviour:
+
+- **`BC2: CASE-VARIANT EMAILS fail the load - and it is the INDEX that refuses`**
+  asserts a duplicate-key refusal (`P2002` / `Duplicate entry`), deliberately
+  NOT a message of ours, because there is no message of ours.
+- **`BC2: a status in NO casing fails the load - and it is the ENUM that refuses`**
+  is the `mixed-case-status` detail text, executed.
+
+`orphaned-category` and `implausible-dates` were already cited by the two
+existing "FAILS THE LOAD" tests. ETL suite: 18 of 18.
+
+---
+
+## BD3 - WHY THE 4b MATCH-RATE FLOOR IS 1.0, DERIVED RATHER THAN CHOSEN
+
+The value matters less than the derivation, because the derivation is what tells
+a future reader that a 0.98 is **a stop condition and not a tolerance**.
+
+1. A minted `legacy_id` exists because `routes/categories.js` and
+   `repositories/users.js` FABRICATED one for a row created through the running
+   application, so that a required Mongoose ObjectId ref would resolve.
+2. **That code has never been deployed.** Phase 3 runs in development only.
+3. Production MySQL is therefore populated by the ETL and by nothing else.
+4. Every `legacy_id` in production MySQL came from production MongoDB.
+5. **So every one of them must resolve. The expected rate is exactly 1.0.**
+
+It follows that a production rate below 1.0 does not mean "some rows were
+minted" - that cannot happen in production. It means one of:
+
+- rows were **deleted from MongoDB after the ETL ran** - which the freeze window
+  exists to prevent, so its occurrence means the freeze was not held; or
+- **this is not the database the ETL read** - an old snapshot, a staging copy.
+
+Both are reasons to stop. Lowering the floor to make a run succeed converts an
+alarm into a permission, and the run it permits destroys migration history
+permanently, because after the cutover there is no oracle left to rebuild it.
+
+The floor is checked across every entity **before any write**, and the CLI
+requires `--min-match-rate` on every apply run - not only in production, because
+a flag first typed on the run that matters is a flag nobody has typed.
+
+---
+
+## BD4 - THE 3.5a TIMING DIFFERENCE, MEASURED
+
+**The note said it was "a far weaker signal than a distinct message". It is not.**
+
+```
+BB3 MEASUREMENT (12 samples each, interleaved, medians):
+  UNKNOWN address (hashes + writes): 247.5 ms
+  KNOWN address   (neither)        :   4.6 ms
+  SEPARATION                       : 242.8 ms
+  ratio                            :  53.27x
+```
+
+And the distributions **do not overlap at all** - the slowest known-address
+response is faster than the fastest unknown one - which is the strongest form
+the finding can take. **One request classifies an address.** The body is
+identical either way, which is what 3.5a closed; the clock is not.
+
+It is not an accident of implementation that a tidy-up removes. The separation
+IS bcrypt at cost 12, which SEC-18 deliberately chose to be expensive. Closing
+it means constant-time signup, and the obvious cheap fix - defer the hash - is
+a different trade-off, not a free one.
+
+Pinned by `test/signup-timing.test.js` on the BB2 model: the test asserts the
+separation, so closing it FAILS the test.
+
+### The collection problem, which is its own small finding
+
+The measurement takes **3.6 seconds**. Collecting it took several ten-minute
+timeouts, and the cause was not the measurement:
+
+Both `/signup` branches start an SMTP connection that cannot complete in this
+environment. `nodemailer` holds those sockets past the end of the test, so under
+`node --test` - which runs each file in a child process and drains its pipe -
+the run presents as a hang long after the numbers exist. Same class as the Redis
+`unref` finding: **a held socket presenting as a hang, whose natural fix is a
+force-exit flag.**
+
+The suite now runs the file DIRECTLY rather than under `node --test`, and forces
+exit after cleanup.
+
+> **THAT IS CORRECT FOR A MEASUREMENT HARNESS AND IS NOT A PATTERN FOR THE
+> APPLICATION SUITES.** In those, a process that will not exit is EVIDENCE - of
+> a connection never closed, a timer never cleared, a listener never removed.
+> Forcing exit there would delete the signal rather than the delay. This suite
+> is exempt because it deliberately drives a path whose side effect cannot
+> complete, and it exists to produce one number.
 
 
 ## Counts

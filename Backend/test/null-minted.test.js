@@ -365,3 +365,130 @@ test("THE SUITE'S OWN GUARD refuses when MySQL holds rows this MongoDB cannot ex
 
   await reset();
 });
+
+// =============================================================================
+// BB1 - THE POPULATED WRONG DATABASE, which emptiness cannot see
+// =============================================================================
+
+/**
+ * A MongoDB that HAS documents but is not ours.
+ *
+ * `matching` is the set of our legacy_ids it happens to contain - empty for a
+ * different database, partial for an OLD SNAPSHOT of the right one.
+ */
+function sourceWith(documentCount, matching) {
+  return {
+    ...models,
+    Category: {
+      countDocuments: async () => documentCount,
+      find: () => ({ lean: async () => matching.map((id) => ({ _id: id })) }),
+    },
+  };
+}
+
+test('BB1: a POPULATED WRONG database is REFUSED - the case emptiness misses', async () => {
+  // THE INJECTION BB1 ASKED FOR. The emptiness guard passes here: the collection
+  // has 5000 documents. They are simply not OUR documents.
+  //
+  // This is the cutover's unrecoverable case. In 4b production MongoDB IS the
+  // oracle - there is no kindledger_legacy to restore from - so a run against
+  // the wrong populated database destroys the migration history of every record
+  // permanently, and nothing about the run looks unusual while it happens.
+  await reset();
+  const genuine = await genuineCategory('wrongdb');
+  const minted = await mintedCategory('wrongdb');
+
+  await assert.rejects(
+    () =>
+      nullMintedLegacyIds({
+        prisma: getPrisma(),
+        models: sourceWith(5000, []),
+        dryRun: false,
+        entities: ['category'],
+      }),
+    (err) => {
+      assert.equal(err.code, 'ERR_SOURCE_MISMATCH', 'a DIFFERENT code from the empty case');
+      assert.notEqual(err.code, 'ERR_SOURCE_EMPTY', 'emptiness is not what was detected');
+      assert.equal(err.entity, 'category');
+      assert.equal(err.mongoDocuments, 5000, 'and it reports that the source was NOT empty');
+      assert.match(err.message, /NOT ONE of the/);
+      assert.match(err.message, /MONGODB_URI/, 'and names what to check');
+      return true;
+    }
+  );
+
+  // AND IT WROTE NOTHING - the refusal comes before the update, not after it.
+  assert.equal((await categories.findById(genuine.uuid)).legacyId, genuine.legacyId);
+  assert.equal(
+    (await categories.findById(minted.uuid)).legacyId,
+    minted.legacyId,
+    'even the genuinely minted row is untouched - a refusal writes nothing at all'
+  );
+});
+
+test('BB1: sharing even ONE identifier is accepted - it is not a threshold', async () => {
+  // The guard is deliberately the WEAKEST statement of "same database": share an
+  // identifier. A threshold would have to be chosen, argued about, and relaxed
+  // the first time it fired on a legitimate run.
+  await reset();
+  const genuine = await genuineCategory('oneid');
+  const minted = await mintedCategory('oneid');
+
+  const report = await nullMintedLegacyIds({
+    prisma: getPrisma(),
+    models: sourceWith(5000, [genuine.legacyId]),
+    dryRun: false,
+    entities: ['category'],
+  });
+
+  const cat = report.find((r) => r.entity === 'category');
+  assert.ok(cat.minted >= 1);
+  assert.equal((await categories.findById(genuine.uuid)).legacyId, genuine.legacyId);
+  assert.equal((await categories.findById(minted.uuid)).legacyId, null);
+});
+
+test('PINNED, NOT CLOSED: a PARTIAL overlap is NOT caught, and destroys genuine ids', async () => {
+  // ===========================================================================
+  // THIS TEST ASSERTS A KNOWN DEFECT. It is not a regression when it passes.
+  // ===========================================================================
+  // An OLD SNAPSHOT of the RIGHT database shares most identifiers, so the
+  // identity guard passes by construction - the two sides really do share ids.
+  // Every genuine legacy_id created since the snapshot then looks minted.
+  //
+  // Identity cannot close this. The only signal is the per-entity MATCH RATE,
+  // which the operation now reports on every run and prints loudly on a dry run.
+  //
+  // PINNED RATHER THAN NOTED, per BA3: a documented residual with no test is
+  // indistinguishable from one nobody has thought about. If someone closes this
+  // - by a rate floor, or by recording the source database identity at ETL time
+  // - THIS TEST MUST FAIL, and that failure is the notification.
+  await reset();
+  const inSnapshot = await genuineCategory('snap-old');
+  const addedLater = await genuineCategory('snap-new');
+
+  const report = await nullMintedLegacyIds({
+    prisma: getPrisma(),
+    // The snapshot has the older row and not the newer one. Both are GENUINE.
+    models: sourceWith(5000, [inSnapshot.legacyId]),
+    dryRun: false,
+    entities: ['category'],
+  });
+
+  assert.equal(
+    (await categories.findById(inSnapshot.uuid)).legacyId,
+    inSnapshot.legacyId,
+    'the row the snapshot knows about survives'
+  );
+  assert.equal(
+    (await categories.findById(addedLater.uuid)).legacyId,
+    null,
+    'THE DEFECT: a GENUINE legacy_id absent from an old snapshot is destroyed. ' +
+      'If this assertion fails, the residual has been closed - update the map ' +
+      'row and delete this test rather than making it pass.'
+  );
+
+  // And the ONE number that could have warned the operator.
+  const cat = report.find((r) => r.entity === 'category');
+  assert.ok(cat.matchRate < 1, 'the match rate is the only signal, and it is reported');
+  assert.ok(cat.matchRate > 0, 'while being high enough that the identity guard passed');
+});

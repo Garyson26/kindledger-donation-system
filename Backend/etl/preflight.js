@@ -63,15 +63,84 @@ function toMinorWithDelta(value) {
  * also refuses, so an override could never load the rows it was overriding. It
  * could only turn a clean refusal into a partial load.
  *
- * `loaderRefuses` NO LONGER CHANGES BEHAVIOUR, and is kept deliberately as
- * REPORTING. It records which findings `migrate.js` would also throw on, which
- * is what the refusal message uses to tell the operator that fixing the source
- * data is the only path. It is also the thing to check if a
- * BLOCKING-but-loadable finding is ever added: the day one exists, this flag is
- * false for it, and the question of an override becomes real again.
+ * `refusedAtLoad` records which findings THE LOAD would also refuse. That is
+ * what the refusal message uses to tell an operator that fixing the source data
+ * is the only path.
+ *
+ * -----------------------------------------------------------------------------
+ * IT WAS CALLED `refusedAtLoad`, AND THE NAME WAS A LIE ABOUT THE MECHANISM (BD1)
+ * -----------------------------------------------------------------------------
+ * The flag is true about the SYSTEM and false about the LOADER. **Two of the
+ * five refusals do not come from any check in `migrate.js` at all** - they come
+ * from the SCHEMA:
+ *
+ *   | finding                 | what actually refuses it                        |
+ *   |-------------------------|-------------------------------------------------|
+ *   | strict-sql-mode         | NOTHING. Acknowledged below - see the allowlist |
+ *   | case-variant-emails     | **SCHEMA**: `uq_users_email` under               |
+ *   |                         | `utf8mb4_0900_as_ci`, which is case-INsensitive |
+ *   | mixed-case-status       | **SCHEMA**: the `ENUM` plus STRICT_TRANS_TABLES |
+ *   | orphaned-category       | `migrate.js` - an explicit throw                |
+ *   | implausible-dates       | `migrate.js` - an explicit throw                |
+ *
+ * The old name invited exactly the reasoning that produced the original error:
+ * read "refusedAtLoad", look in `migrate.js`, find nothing, conclude the flag is
+ * wrong. That is how `mixed-case-status` came to be marked false while its own
+ * detail text said MySQL would reject the rows.
+ *
+ * **A property owned by the schema and named after the loader is invisible to
+ * anyone changing the schema.** Relaxing the email collation, or dropping
+ * `uq_users_email`, silently removes an ETL safety property - and nothing in
+ * `migrate.js` would change. `db/schema.sql` now carries that warning where the
+ * mistake gets made (AI4), and `test/etl.test.js` asserts the refusals by their
+ * SHAPE - `P2002` / `Duplicate entry` - rather than by a message of ours, so the
+ * check fails if the schema stops providing them.
+ *
+ * -----------------------------------------------------------------------------
+ * IT IS NOW ENFORCED AT CONSTRUCTION TIME (BB4), AND THE DAY HAD ALREADY COME
+ * -----------------------------------------------------------------------------
+ * This flag used to be described as "the thing to check if a BLOCKING-but-
+ * loadable finding is ever added". A day that has to be noticed by someone
+ * re-reading a comment is a day that does not announce itself - so the check is
+ * now the constructor, and adding such a finding THROWS.
+ *
+ * **Writing the check found that the day had already arrived, twice:**
+ *
+ *   - `mixed-case-status` (non-canonicalisable) was blocking with the flag
+ *     FALSE, and that was simply WRONG: MySQL rejects an out-of-set ENUM under
+ *     strict mode, so the load does refuse it. The flag that existed to
+ *     announce the day was itself mis-set on the finding.
+ *   - `strict-sql-mode` is GENUINELY blocking-but-loadable. The loader does not
+ *     throw on a permissive `sql_mode`; it silently truncates. There is nothing
+ *     to override, because the remedy is to fix the connection and not the data.
+ *
+ * So the allowlist below is an ALLOWLIST OF ACKNOWLEDGED CASES, each with the
+ * reason an override would be meaningless for it. A new blocking-but-loadable
+ * finding fails loudly until somebody writes that reason down - which is the
+ * day announcing itself, instead of waiting to be noticed.
  */
-function finding(check, severity, detail, blocking = true, loaderRefuses = false) {
-  return { check, severity, detail, blocking, loaderRefuses };
+const BLOCKING_BUT_LOADABLE = new Map([
+  [
+    'strict-sql-mode',
+    'The loader does not refuse a permissive sql_mode - it truncates and clamps ' +
+      'silently, which is the whole danger. An override is meaningless because ' +
+      'the remedy is the CONNECTION, not the source data.',
+  ],
+]);
+
+function finding(check, severity, detail, blocking = true, refusedAtLoad = false) {
+  if (blocking && !refusedAtLoad && !BLOCKING_BUT_LOADABLE.has(check)) {
+    throw new Error(
+      `PREFLIGHT INVARIANT: '${check}' is BLOCKING but declares refusedAtLoad=false. ` +
+        'Either the load does refuse it - by a throw in migrate.js OR by a SCHEMA ' +
+        'constraint, both count (set refusedAtLoad=true) - or this is a genuinely ' +
+        'blocking-but-loadable finding, in which case add it to ' +
+        'BLOCKING_BUT_LOADABLE with the reason an override would be meaningless ' +
+        'for it. ETL-01 is what this protects: an override that can only turn a ' +
+        'clean refusal into a partial load.'
+    );
+  }
+  return { check, severity, detail, blocking, refusedAtLoad };
 }
 
 // -----------------------------------------------------------------------------
@@ -165,6 +234,11 @@ async function checkMixedCaseStatus(Donation) {
               'ENUM in any casing. MySQL will REJECT these rows.',
           // A canonicalisable value is recorded, not blocking: the load is
           // correct, we simply lose the ability to count it afterwards.
+          !canonicalMatch,
+          // AND THE LOADER REFUSES IT TOO (BB4). A value that is not a member of
+          // the ENUM in any casing is REJECTED by MySQL under STRICT_TRANS_TABLES
+          // - the detail above says so in words. The flag said otherwise, and it
+          // was the flag whose job was to notice exactly this discrepancy.
           !canonicalMatch
         )
       );
@@ -402,7 +476,7 @@ async function runPreflight({ prisma, models }) {
     fatal: findings.filter((f) => f.severity === 'FATAL'),
     // ETL-01. Findings the LOADER will also refuse, so the override cannot help
     // and must not be offered - see finding().
-    refusedByLoader: findings.filter((f) => f.loaderRefuses),
+    refusedByLoader: findings.filter((f) => f.refusedAtLoad),
   };
 }
 
@@ -462,6 +536,9 @@ function formatReport(result) {
 }
 
 module.exports = {
+  /** Exported for `test/preflight-findings.test.js` - BB4's invariant. */
+  BLOCKING_BUT_LOADABLE,
+  finding,
   runPreflight,
   formatReport,
   toMinorWithDelta,

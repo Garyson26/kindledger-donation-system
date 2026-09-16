@@ -90,6 +90,23 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at             DATETIME(3)      NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   UNIQUE KEY uq_users_uuid      (uuid),
+  -- ###########################################################################
+  -- THIS INDEX IS AN ETL SAFETY PROPERTY, NOT ONLY AN APPLICATION ONE (BD1)
+  -- ###########################################################################
+  -- The Phase 4 pre-flight reports `case-variant-emails` as BLOCKING and marks
+  -- it `refusedAtLoad: true` - meaning the load itself would also refuse it.
+  -- **NOTHING IN etl/migrate.js PERFORMS THAT REFUSAL.** The loader lowercases
+  -- the address and inserts; what refuses is THIS UNIQUE KEY, under the
+  -- case-INsensitive collation declared above.
+  --
+  -- So relaxing that collation, or dropping this index, silently removes a
+  -- migration safety property - and nothing in the ETL would change to show it.
+  -- Two Mongo accounts differing only in case would then collapse into one row,
+  -- or worse, both load and one shadow the other.
+  --
+  -- Asserted by `Backend/test/etl.test.js`, "CASE-VARIANT EMAILS fail the load",
+  -- which matches the DUPLICATE-KEY shape rather than any message of ours -
+  -- precisely so it fails if this index stops providing the guarantee.
   UNIQUE KEY uq_users_email     (email),
   UNIQUE KEY uq_users_legacy_id (legacy_id),
   KEY ix_users_created_at_role  (created_at, role) COMMENT 'Retention purge.'

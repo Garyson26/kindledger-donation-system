@@ -2609,7 +2609,9 @@ choice that did not exist.**
 
 ### Decision
 
-A finding declares `loaderRefuses`. Findings carrying it are **refused before
+A finding declares `refusedAtLoad` (renamed from `loaderRefuses` by BD1, which
+found that two of the five refusals come from the SCHEMA and not from the
+loader). Findings carrying it are **refused before
 anything is written**, and the override does not apply to them. The report says
 so explicitly, names them, and directs the operator at the SOURCE data.
 

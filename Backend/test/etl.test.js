@@ -455,6 +455,87 @@ test('an implausible date FAILS THE LOAD even if the pre-flight was overridden',
   await assert.rejects(() => runMigration({ prisma, models }), /implausible date/);
 });
 
+// =============================================================================
+// BC2 - what the LOADER actually does, for the blocking findings that had
+//       only a PRE-FLIGHT test
+// =============================================================================
+// BB4 made `refusedAtLoad` a construction-time invariant, and writing it found
+// two of five blocking findings mis-classified. BC2's instruction: do not trust
+// the other three because the guard now passes - the guard was written from the
+// same understanding that produced the errors.
+//
+// Of the three, `orphaned-category` and `implausible-dates` were already cited
+// to behaviour by the two tests above. These two were not: both had a PRE-FLIGHT
+// test and nothing that exercised the LOADER, so `refusedAtLoad: true` was an
+// assertion about code nobody had run.
+//
+// Both turn out to be TRUE, and neither is refused by a line in `migrate.js`.
+// The refusal comes from the SCHEMA, which is worth stating because it means the
+// flag would stay `true` if somebody relaxed the collation or dropped the index.
+// That is precisely the second mechanism BC1 asks for: a check that derives the
+// property independently instead of agreeing with the metadata.
+// =============================================================================
+
+test('BC2: CASE-VARIANT EMAILS fail the load - and it is the INDEX that refuses', async () => {
+  // The preflight blocks this. `refusedAtLoad: true` claims the load would too.
+  // THE MECHANISM IS NOT IN migrate.js: it lowercases the address and inserts.
+  // What refuses is `uq_users_email` under utf8mb4_0900_as_ci, which is
+  // case-INsensitive, so two Mongo accounts differing only in case collapse onto
+  // one row and the second insert violates the constraint.
+  const base = `${TAG}-BC2Case@invalid.test`;
+  await User.collection.insertMany([
+    { name: 'Upper', email: base, password: 'x', role: 'user' },
+    { name: 'Lower', email: base.toLowerCase(), password: 'x', role: 'user' },
+  ]);
+
+  await assert.rejects(
+    () => runMigration({ prisma, models }),
+    (err) => {
+      // Deliberately NOT matched against a message from migrate.js - there
+      // isn't one. A unique-constraint violation is what this looks like, and
+      // asserting the shape is what keeps the claim honest.
+      assert.match(
+        String(err && err.message),
+        /[Uu]nique|P2002|Duplicate entry/,
+        `expected a unique-constraint refusal, got: ${err && err.message}`
+      );
+      return true;
+    },
+    'refusedAtLoad: true is CORRECT for case-variant-emails - via the index'
+  );
+});
+
+test('BC2: a status in NO casing fails the load - and it is the ENUM that refuses', async () => {
+  // `mixed-case-status` is the finding BB4 found mis-flagged: it was BLOCKING
+  // with refusedAtLoad FALSE while its own detail text said "MySQL will REJECT
+  // these rows". This is that sentence, executed.
+  //
+  // Again the refusal is not in migrate.js - it is the ENUM plus
+  // STRICT_TRANS_TABLES. Without strict mode MySQL would insert the empty
+  // string instead, which is exactly why ADR-022's preflight check exists and
+  // why strict-sql-mode is the one acknowledged blocking-but-loadable finding.
+  const cat = await Category.create({
+    _id: oid(), name: `${CAT} bc2status`, sortDescription: 's', donationAmount: 10,
+  });
+  await Donation.collection.insertOne({
+    donorName: 'x',
+    donorEmail: `${TAG}-bc2status@invalid.test`,
+    category: cat._id,
+    amount: 10,
+    date: new Date('2024-01-01'),
+    quantity: 1,
+    paymentStatus: 'definitely-not-a-member',
+  });
+
+  await assert.rejects(
+    () => runMigration({ prisma, models }),
+    (err) => {
+      assert.ok(err, 'the load must refuse a status that is not in the ENUM in any casing');
+      return true;
+    }
+  );
+});
+
 test('the full pre-flight reports clean on the seeded dataset', async () => {
   await seedMongo();
   const result = await preflight.runPreflight({ prisma, models });

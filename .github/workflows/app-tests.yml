@@ -233,6 +233,25 @@ jobs:
         working-directory: Backend
         run: npm run test:bridge-exit
 
+      # BB4/BC1. A BLOCKING pre-flight finding that the load does NOT refuse
+      # cannot be added silently. Writing this check found TWO existing errors:
+      # mixed-case-status contradicted its own detail text, and strict-sql-mode
+      # is genuinely blocking-but-loadable. No database needed.
+      - name: Pre-flight finding invariants (BB4)
+        working-directory: Backend
+        run: npm run test:preflight-findings
+
+      # BB3. The 3.5a residual, MEASURED rather than noted: /signup's two
+      # branches are separated by ~243 ms with no overlap, so one request
+      # classifies an address. Pinned, not closed.
+      #
+      # Runs the file DIRECTLY, not under `node --test`: both branches start an
+      # SMTP connection that cannot complete in CI, and nodemailer holds the
+      # sockets past the test.
+      - name: Signup timing separation, pinned (BB3)
+        working-directory: Backend
+        run: npm run test:signup-timing
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------

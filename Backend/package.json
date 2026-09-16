@@ -38,7 +38,9 @@
     "test:payment-char": "node --test test/payment-characterisation.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
     "test:charset": "node db/check-charset.js",
-    "test:bridge-exit": "node test/bridge-exit-check.js"
+    "test:bridge-exit": "node test/bridge-exit-check.js",
+    "test:preflight-findings": "node --test test/preflight-findings.test.js",
+    "test:signup-timing": "node test/signup-timing.test.js"
   },
   "keywords": [],
   "author": "",
