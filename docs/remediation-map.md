@@ -470,7 +470,7 @@ bridge for the six unmigrated read sites.
 | | |
 |---|---|
 | `routes/categories.js` | rewritten against `repositories/categories`; no Mongoose |
-| `services/categoryBridge.js` | temporary, deleted in 3.6; logs and counts every MongoDB fallback |
+| `services/categoryBridge.js` | temporary, deleted in 3.6 (the BRIDGE goes in 3.6; Mongoose itself survives in `etl/` until 4c - ADR-059); logs and counts every MongoDB fallback |
 | `test/categories-characterisation.test.js` | 22 scenarios, green BEFORE and AFTER the migration |
 | `test/category-bridge.test.js` | 11 scenarios, both paths plus twelve malformed inputs |
 | six read sites | `payment.js` x2, `admin.js` x1, `donations.js` x4 |
@@ -1124,6 +1124,94 @@ of work. Recorded here rather than left implied by the absence of a comment.
 
 ---
 
+## AZ2 - A DELETION CRITERION ATTACHED TO A FILE IS WRONG WHEN THE FILE'S CONTENTS HAVE DIVERGENT LIFETIMES
+
+ADR-047 said `docker-compose.legacy-mongo.yml` exists only while `config/db.js`
+does. **That is true of one half of the file and false of the other:**
+
+| What the override provides | Dies when | Package |
+|---|---|---|
+| `MONGODB_URI` on the api service | `config/db.js` goes | **3.6** |
+| the `mongo` SERVICE itself | 4b's snapshot rehearsal has restored into it and the ETL is gone | **4c** |
+
+Amended with a superseding note rather than rewritten, per the ADR-012
+precedent - the original reasoning is what makes the correction legible.
+
+### The generalisation
+
+> **A deletion criterion attached to a FILE is wrong when the file's contents
+> have divergent lifetimes. Attach it to the CAPABILITY instead.**
+
+"Delete `docker-compose.legacy-mongo.yml` when `config/db.js` goes" binds two
+capabilities that happen to share a file. The criterion that survives is
+"the api stops needing `MONGODB_URI`" and, separately, "nothing needs a local
+MongoDB".
+
+### The sweep - every remaining "delete X when Y" where X is a FILE
+
+| Criterion | X is a file or a capability? | Verdict |
+|---|---|---|
+| ADR-047, the override | **FILE** - two capabilities in it | **The finding above.** Split |
+| ADR-050, delete the bridges when `fallbackCount()` is zero | capability - "nothing needs the MongoDB fallback" | **Safe.** And it is measured, not declared |
+| AE1-a, NULL minted `legacy_id`s before MongoDB is deleted | capability - "MongoDB is still readable" | **Safe**, and the ordering is the whole point |
+| AV2's boot-registration gate, "delete in the same commit that removes Mongoose" | **FILE-shaped** - it names a commit, not a condition | **Corrected by ADR-059.** It said 3.6; Mongoose survives in `etl/` until 4c, so the gate still has a subject. Re-homed |
+| ADR-033, duplicate index declarations "moot once the models go" | capability - "no Mongoose schema is loaded" | **Safe** |
+| U-5 / ADR-030, the history scrub in Phase 6 | capability | **Safe** |
+
+**Two of six were file-shaped, and both were wrong.** That is a high enough rate
+to be worth the sweep rather than a note.
+
+---
+
+## AZ3 - WHAT AY2's FOURTH INSTANCE UNDERCUTS
+
+**It is not only a finding about a fix. It undercuts the assumption behind every
+ADR in this repository.**
+
+The practice here rests on: *write the reasoning down, next to the thing, and it
+will be available to whoever needs it next.* Fifty-nine ADRs, a remediation map,
+and comment blocks longer than the functions they describe all assume it.
+
+**AX4 is a counter-example at the shortest distance the assumption could
+possibly be tested at.** `/signup/resend-otp` was fire-and-forget WITH A COMMENT
+SAYING WHY - "so a mail failure cannot distinguish by status either". Three
+functions later, in the same file, in the same editing session, I made only one
+branch fire-and-forget and left the sibling awaiting its send. And the comment I
+wrote at the site I WAS editing reasoned about that exact risk and named the
+wrong branch.
+
+> **Writing a thing down does not make it available to whoever needs it next. Not
+> at any distance, including three functions, including when the person who needs
+> it is the person who wrote it, forty minutes later.**
+
+### What that means for the practice, stated honestly
+
+**The ADRs are not worthless - but their value is not where it feels like it is.**
+
+- **They are excellent for the reader who already suspects something** and goes
+  looking. Every inherited-claim correction in this project was found by someone
+  asking a question and finding the answer recorded.
+- **They are close to useless as a CONTROL at the point of change.** A document
+  consulted only by someone who already suspects the problem cannot prevent the
+  problem, because the person about to make the mistake does not suspect it -
+  that is what makes it a mistake.
+
+### The countermeasure is ENUMERATE-AND-STATE AT THE POINT OF CHANGE
+
+Not "read the ADR". Not "check nearby". **At the moment of fixing an asymmetry,
+list every sibling and write down what each one does.** That converts the check
+from something requiring suspicion into something requiring only a list - and a
+list can be produced by someone who has no idea what they are looking for, which
+is precisely the person who needs it.
+
+**Every mechanical gate in this project has the same shape and that is why they
+work**: the drift gate, the migration-state self-check, the boot-registration
+set, the destructive-job authorisation. None requires anyone to suspect anything.
+**The ADRs explain those gates; they do not substitute for them**, and AX4 is the
+clearest evidence that they cannot.
+
+---
+
 ## AY1 - A MITIGATION THAT DEPENDS ON A HUMAN CANNOT CARRY A CLOSURE CLAIM
 
 **Recorded because the instruction was wrong, and that is worth keeping as
@@ -1393,7 +1481,8 @@ have given the wrong answer; checking the tree gave the right one.**
 No request path reaches it, and stack exhaustion needs attacker-controlled
 recursive input.
 
-**Recommendation: its own small package, not folded into 3.6.** The fix is a
+**Its own package, 4d, AFTER 4c (AZ1)** - so that a failure in either cannot
+be attributed to the other. The fix is a
 Prisma bump, which regenerates the client - the one dependency the entire data
 layer sits on. It deserves a full suite run of its own rather than being
 absorbed into a package that is already removing Mongoose.
@@ -1557,7 +1646,9 @@ package later, for a different reason, because AU1 required it.
 `test/migration-state.test.js` asserts the exact set of Mongoose models the app
 registers at boot. As of package 3.4 that set is **empty**.
 
-**IT MUST BE REMOVED IN PACKAGE 3.6, IN THE SAME COMMIT THAT REMOVES MONGOOSE.**
+**IT MUST BE REMOVED IN PACKAGE 4c, IN THE SAME COMMIT THAT REMOVES MONGOOSE
+(corrected by ADR-059 - Mongoose survives 3.6 in `etl/`, so the gate still has a
+subject until 4c).**
 Once no Mongoose exists, the gate guards a coupling that cannot occur - and a
 gate protecting nothing is AU3's shape one package out: it passes forever,
 nobody can tell whether it still works, and it makes the suite look better
@@ -3332,8 +3423,12 @@ specific.
 > not. See "Package 3.3" above.
 | **3.5a** | **`config/email.js`** (AQ2) | none - it was unowned |
 | ~~**3.5**~~ | ~~`admin.js`~~ **DONE IN AS7.** Migrating its user operations and the two `/stats` counts was the whole file - there was no remainder. BUG-04's dead Vercel cron declaration is all that is left, and it is a deployment change | - |
-| **3.6** | Mongoose removal | no file imports Mongoose; `fallbackCount()` zero (AE3) |
+| **3.6** | Mongoose removal from the REQUEST PATH and the test suites. `etl/` and `models/` RETAINED (ADR-059) | no file reachable from a request imports Mongoose; `fallbackCount()` zero (AE3) |
 | **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
+| **4c** | Terminal cleanup: `etl/`, `models/`, the `mongoose` dependency, `scripts/seedDatabase.js`, `docker-compose.legacy-mongo.yml` | 4b complete, rollback boundary closed |
+| **4d** | The Prisma advisory bump (U-6) - its own package because it regenerates the client the data layer sits on | after 4c, so a failure in either cannot be attributed to the other |
+| **5** | Frontend | Phase 4 complete |
+| **6** | Release: licence, history scrub, publication gate | Phase 5 complete |
 
 **4a moving ahead does not reorder the phases** - it splits one. 4b stays last
 and is stronger for it: the ETL will have been exercised by five route packages
@@ -3522,15 +3617,21 @@ The original table is kept below as the record of what the package was given.
 | ADR-024 §3 / ADR-026 / ADR-027 | - | No security decision may rest on an unsigned field; unsigned text must be escaped per sink | Keep the `verifyHash` banner; escape at each sink, not at ingest | Test asserts `unmappedstatus` cannot drive the decision | **R** |
 | SPEC-3 §4.6 | - | Alternate-case parser fallbacks (`.AMOUNT`, `.STATUS`, `udf_4`, `udf[4]`) | Delete them; keep the banner comment | Tests unchanged - they are unreachable today | **R** |
 
-### Mongoose removal  *(trigger: no file imports Mongoose; currently 3.6)*
+### Mongoose removal  *(REQUEST PATH in 3.6; the dependency itself in 4c - ADR-059)*
 
-Exit criteria are SPEC-3 section 7. The map's own condition: every Phase 3
-finding above is closed or explicitly deferred, and SEC-04 is reported closed
-with its wiring commit, reversing the Phase 2 report.
+Exit criteria are SPEC-3 section 7, **restated as two by ADR-059** because one of
+them would have made the cutover impossible: the ETL reads production MongoDB
+through Mongoose, and 4b is what runs it.
+
+1. **3.6** - no file reachable from a request imports Mongoose. Gated by
+   `test/migration-state.test.js`, which asserts the app registers ZERO Mongoose
+   models at boot.
+2. **4c** - `etl/` and `models/` are the last importers, deleted once 4b closes.
 
 | ID | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|
-| ADR-047 | `docker-compose.legacy-mongo.yml` exists only while `config/db.js` does | Delete both | Plain `docker compose up`, four healthy, no override | **R** |
+| ADR-047 (first half) | the `config/db.js` coupling | Delete `config/db.js` and its `connectDB()` call; the api stops needing `MONGODB_URI` | Boot with no `MONGODB_URI`; no Mongoose connection attempted | **R**, **3.6** |
+| ADR-047 (second half) | the `mongo` SERVICE in the override | Delete `docker-compose.legacy-mongo.yml` | Plain `docker compose up`, four healthy, no override | **R**, **4c** - 4b's snapshot rehearsal restores INTO that service |
 
 ---
 

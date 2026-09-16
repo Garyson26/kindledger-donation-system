@@ -2700,3 +2700,39 @@ The fourth ordering constraint found by asking what the DATA does rather than
 what the code layout suggests (ADR-055 FK direction, ADR-056 row location,
 ADR-057 writer/reader split). **A package named for removing a dependency cannot
 remove it from the component whose job is to stop needing it.**
+
+---
+
+## ADR-047 (AMENDED by AZ2) — the override file's two halves have different lifetimes
+
+**The original decision stands and is not rewritten** (ADR-012's precedent: the
+superseded reasoning is what makes the correction legible).
+
+ADR-047 recorded that `docker-compose.legacy-mongo.yml` exists only while
+`config/db.js` does, and that both are deleted together.
+
+**That is true of one half of the file and false of the other.**
+
+| What the override provides | Dies when | Package |
+|---|---|---|
+| `MONGODB_URI` on the api service | `config/db.js` goes — the app stops connecting to MongoDB | **3.6** |
+| the `mongo` SERVICE | nothing needs a local MongoDB: the ETL is gone and 4b's snapshot rehearsal has restored into it | **4c** |
+
+Phase 4b restores a production snapshot INTO that service to rehearse the
+cutover. Deleting the file in 3.6 would remove the thing the rehearsal runs
+against, and would do it two packages before anyone noticed.
+
+### The generalisation
+
+> **A deletion criterion attached to a FILE is wrong when the file's contents
+> have divergent lifetimes. Attach it to the CAPABILITY.**
+
+"Delete the override when `config/db.js` goes" binds two capabilities that
+happen to share a file. The criteria that survive are *"the api stops needing
+`MONGODB_URI`"* and, separately, *"nothing needs a local MongoDB"*.
+
+A sweep of the remaining "delete X when Y" criteria found six, of which two were
+file-shaped and both were wrong — this one, and AV2's boot-registration gate,
+which named a COMMIT rather than a condition and has been re-homed to 4c by
+ADR-059. Two of six was a high enough rate to justify the sweep rather than a
+note; it is recorded in the remediation map under AZ2.
