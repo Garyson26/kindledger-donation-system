@@ -3704,6 +3704,123 @@ silently reconciled.
 
 ---
 
+---
+
+## BA3 - A NOTE ABOUT A RESIDUAL IS NOT A CONTROL, AND THE DISTANCE WAS ZERO
+
+AZ3 found that correct reasoning written down does not propagate at three
+functions' distance. **This is the same failure at zero distance.**
+
+In `etl/nullMintedLegacyIds.js` I wrote, under a heading reading THE RESIDUAL,
+STATED RATHER THAN IMPLIED, that the guard catches an EMPTY MongoDB source but
+NOT a POPULATED WRONG one. I wrote it minutes before running the suite. Then I
+pointed the suite at a scratch database and it permanently nulled the `legacy_id`
+of both categories the ETL had migrated from `kindledger_legacy`.
+
+Same author. Same session. Same file. Minutes apart. The note did not reach the
+code, and nothing about proximity helped.
+
+### It is also AZ3's OTHER shape - the gate after the candidate count
+
+Catching an empty source but not a populated wrong one validates the case where
+nothing is at stake. An empty source is the case where a careful operator has
+already noticed something is wrong; a populated wrong one is the case that looks
+normal. **The guard fired on every configuration except the dangerous one.**
+
+### The rule
+
+> **A note about a residual must be converted into a guard or a test in the same
+> commit, or it is not a control. Writing it down is documentation of a hazard,
+> not mitigation of one.**
+
+The countermeasure is AZ3's, because it is the only one available: enumerate and
+state at the point of change. Not "check whether a guard is needed" - state, for
+each residual, what closes it.
+
+---
+
+## BA3 - THE RESIDUAL AUDIT: every documented residual, and what closes it
+
+Commissioned by BA3. **Absences are reported, not omitted** - the "no" rows are
+the output of this audit, not the leftovers.
+
+| # | Residual, as documented | Guard | Test | Verdict |
+|---|---|---|---|---|
+| 1 | **BUG-02's mixed-case `status` migrates invisibly** - MySQL silently canonicalises `'approved'`, erasing the only record of the corruption (ADR-014) | `etl/preflight.js` counts and reports before any insert | `etl.test.js` test 8, with the count | **CLOSED** |
+| 2 | **`sql_mode` is settable at runtime**, so the boot check does not cover a connection opened later - and the ETL is exactly such a connection (ADR-022) | `etl/preflight.js` re-checks `@@SESSION.sql_mode`; `etl/cli.js` makes it FATAL | none - nothing asserts the ETL refuses a non-strict connection | **GUARD ONLY.** Acceptable, since the guard is the control - but it has never been seen to fire |
+| 3 | **`LIKE` wildcards in a search term** - a parameterised query stops injection, not `%` meaning "anything" | `escapeLike()` in the repositories | `admin-characterisation` and `donations-characterisation` both exercise `%`, `_`, `%%` | **CLOSED** |
+| 4 | **SEC-08's residual oracle** - a mail failure must not distinguish known from unknown by status either | both branches fire-and-forget, one shared `res.json` | asserted in `auth-characterisation.test.js` | **CLOSED** |
+| 5 | **SIGNUP-01 rec 2** - `signupOtpAttempts` resets on a re-post, so any anonymous caller can reset the counter | none - deliberately still live | **yes** - the test ASSERTS the counter resets 4 -> 0, pinning the residual rather than assuming it closed | **PINNED.** Open, but it cannot silently change |
+| 6 | **SIGNUP-01 rec 3** - `/signup` is not rate-limited per address, and `upsert` lets an attacker destroy a legitimate in-flight signup by re-posting the address | **none** | **none** | **UNPINNED AND OPEN.** The only row here that is neither closed nor pinned. It is a denial of registration against a real user, and nothing would notice if it got worse |
+| 7 | **The 3.5a TIMING difference** - the new-account signup path hashes a password and writes a row; the existing-account path does neither | none | **none** | **OPEN, unpinned.** Weaker than a distinct message, and closing it means constant-time signup. Recorded but never measured - nobody has established the size of the signal |
+| 8 | **`loaderRefuses` is reporting only** - kept for the day a BLOCKING-but-loadable finding is added, when the override question becomes real again | none | **none** | **OPEN.** Nothing fires on that day. The note calls it "the thing to check", which is exactly what BA3 is about |
+| 9 | **AE1-a against a POPULATED WRONG MongoDB** - the guard catches an empty source only | **none in production code** - `--dry-run` plus a 4b runbook step | the SUITE now guards itself (`null-minted.test.js`), proved by injection | **OPEN IN PRODUCTION.** The control that exists protects the test run, not the cutover - the only run that matters. Per AY1 a runbook step is not a closure claim |
+| 10 | **AE1-a's FALSE refusal** - an entity legitimately all-minted is indistinguishable from the wrong database | `entities` scoping, so an operator can proceed deliberately | the dry-run test exercises the shape | **CLOSED as far as it can be.** The two cases are indistinguishable by construction; refusing is the correct default |
+| 11 | **AE3 part 2** - `fallbackCount()` zero across a MANUAL exercise of every migrated route, against a database holding both migrated and post-3.1 records | none | **none, by nature** | **OPEN.** A runbook step, and AY1 already says a runbook step is not a closure claim. See BA4 |
+
+### What the audit found
+
+**Four residuals have neither a guard nor a test: rows 6, 7, 8 and 11.** Row 9
+has a guard in the wrong place - it protects the test suite and not the cutover.
+
+Row 5 is the model the others should follow. It is **still open**, and it is
+safe anyway, because a test asserts the residual behaviour exactly. An open
+residual with a test that pins it cannot change without somebody noticing; an
+open residual with a prose note can, and will.
+
+> **The output of this audit is not the closed rows. It is that a documented
+> residual with no test is indistinguishable from one nobody has thought about,
+> and the map cannot tell them apart either.**
+
+---
+
+## BA2 - ADR-059's SHAPE, RECURRING
+
+> **A component whose purpose is to demonstrate the thing being removed cannot
+> survive into the evidence that it can be removed.**
+
+ADR-059 said a package removing a dependency cannot remove it from the component
+whose job is to stop needing it. This is the same relation, between a control
+and its evidence.
+
+The AK3 fixtures exist to assert that the bridge works - that an un-migrated
+record still resolves. The bridge's deletion evidence is that nothing uses it.
+**Both cannot hold.** So the fixtures go first, and AZ4's steps 2 and 3 swap.
+
+This is the second instance. The difference worth recording is that ADR-059 was
+found by reasoning about a plan, and this one was found by a check producing a
+number that made no sense. Two routes to the same shape, and only the second is
+repeatable.
+
+---
+
+## BA4 - A NUMBER THAT CANNOT DISTINGUISH ITS OWN EXPLANATIONS IS NOT EVIDENCE
+
+AE3's exit check reported **34 fallbacks**. Two readings were available:
+
+1. the bridge is load-bearing, and deleting it breaks authentication;
+2. the fixtures manufacture the traffic, and the number is noise.
+
+**Neither was checkable without reading the fixtures**, and the second reading is
+the one a tired person picks the day before a cutover. The answer turned out to
+be (2) for 32 of the 34 - but the metric could not say so.
+
+**The mechanical half:** `readyToDelete()` counts within ONE PROCESS, and
+`node --test` gives each suite its own. The number ADR-050 asked for did not
+exist anywhere. It is now `test/bridge-exit-check.js`, a CI gate.
+
+**The conceptual half, which is the one that generalises:**
+
+> **An exit metric must be able to distinguish its own readings. If two
+> incompatible explanations produce the same number, it is not an exit criterion
+> - it is a prompt to go and read the code, and it will be read in whichever
+> direction the schedule prefers.**
+
+Applied to AE3, the fix is not to weight synthetic records but to **remove
+them**: a record that cannot exist in production after the ETL has no business
+in the evidence at all. That is BA2.
+
+
 ## Counts
 
 | State | Count | Rows |
