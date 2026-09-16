@@ -145,30 +145,33 @@ exploit-level detail that should not be published alongside the code.
 
 ## Security status
 
-A full review exists (see Documentation above; not tracked in this repository).
-**One critical and four high-severity findings are open**, concentrated in the
-payment callbacks and the password-reset flow. Read it before deploying.
+A full security review exists and is **deliberately not tracked in this
+repository**: it carries exploit-level detail that should not be published
+alongside the code. Ask a maintainer for it before deploying.
 
-Fix these first:
+**Do not deploy this from `main` without reading that review.** Findings remain
+open, including in the authentication and payment paths. They are being worked
+through in a phased remediation programme tracked in
+[`docs/remediation-map.md`](docs/remediation-map.md) and
+[`docs/decisions.md`](docs/decisions.md).
 
-1. **SEC-01 (critical)** — `/api/payment/success` never checks the signed `status`
-   field, so a donor can replay their own PayU-signed *failure* payload and have
-   the donation marked `Paid`.
-2. **SEC-02 (high)** — the 6-digit password-reset code has no rate limit and no
-   attempt counter, allowing unauthenticated account takeover by brute force.
-3. **SEC-04 (high)** — rate limiting does not work in production: an in-memory
-   store on serverless, and `trust proxy` is never set behind Vercel's proxy.
-4. **SEC-03 (high)** — `email` flows unvalidated from JSON bodies into Mongoose
-   queries, permitting NoSQL operator injection.
-5. **SEC-05 (high)** — `isActive` is never checked at login, so "disable user"
-   has no effect.
+Closed so far, with regression tests that run in CI on every push:
 
-An earlier review (`for_ocean_security_review.md`) is **superseded** — most of its
-findings have since been fixed, and appendix A of the current review tracks the
-status of each one.
+- **SEC-01 (critical)** - a donor could replay their own PayU-signed *failure*
+  payload and have the donation marked `Paid`. Fixed and covered by 17 tests.
+- **SEC-02 (high)** - the password-reset code had no attempt counter. Fixed and
+  covered by 6 tests.
 
-To report a vulnerability, contact the maintainers privately rather than opening a
-public issue.
+This section deliberately no longer enumerates the OPEN findings or how to
+reach them. It previously did, which was inconsistent with holding the review
+outside version control for exactly that reason - the mechanics were excluded
+from the repository and then restated in the file most likely to be read first.
+The remediation map names open findings with file and line; before this
+repository is published, that map must contain no open items or be redacted of
+file and line for those that remain (a Phase 6 gate).
+
+To report a vulnerability, contact the maintainers privately rather than opening
+a public issue.
 
 ---
 

@@ -91,9 +91,13 @@ jobs:
 
       - name: Install dependencies
         working-directory: Backend
-        # No lockfile is committed yet (SEC-12), so `npm ci` is not usable.
-        # Switch this to `npm ci` the moment package-lock.json lands.
-        run: npm install --no-audit --no-fund
+        # `npm ci` now that Backend/package-lock.json is committed (SEC-12
+        # closed on chore/dependency-cleanup). It installs exactly the locked
+        # tree and FAILS if package.json and the lockfile disagree, where
+        # `npm install` would silently reconcile them by rewriting the
+        # lockfile - so CI could pass against a dependency set nobody
+        # committed, which is most of what SEC-12 was about.
+        run: npm ci --no-audit --no-fund
 
       - name: Ensure a MySQL client is available
         # Not assumed: the runner image's bundled MySQL/MariaDB client

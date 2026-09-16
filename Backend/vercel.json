@@ -12,12 +12,6 @@
       "dest": "app.js"
     }
   ],
-  "crons": [
-    {
-      "path": "/api/admin/cleanup/trigger",
-      "schedule": "0 2 * * *"
-    }
-  ],
   "env": {
     "NODE_ENV": "production"
   }
