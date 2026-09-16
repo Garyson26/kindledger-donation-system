@@ -1124,6 +1124,79 @@ of work. Recorded here rather than left implied by the absence of a comment.
 
 ---
 
+## AY1 - A MITIGATION THAT DEPENDS ON A HUMAN CANNOT CARRY A CLOSURE CLAIM
+
+**Recorded because the instruction was wrong, and that is worth keeping as
+carefully as a wrong implementation.**
+
+AX1 asked for SIGNUP-01's recommendation 1 - a warning in the signup email - to
+be proved to the same standard as the finding: the attack failing end to end.
+
+**That was not possible, and the impossibility is structural rather than a
+matter of effort.** The warning asks the recipient to decide correctly. The
+attack succeeds precisely when they decide incorrectly. A test can assert the
+paragraph is present; it cannot assert that a human read it, believed it, and
+acted on it - and the case where they did not is the entire attack.
+
+> **When a recommendation's effectiveness depends on a human reading something,
+> it CANNOT carry a closure claim under AU2. Either it is paired with a
+> MECHANICAL control that can, or the finding stays OPEN with the mitigation
+> noted.**
+
+Added to the per-package criteria. It is the natural completion of AU2: that
+rule says a closure claim must cite the behaviour establishing it, and this says
+what to do when no behaviour can.
+
+**Asking for proof of an unprovable control is itself a defect in the
+instruction**, and it is a quiet one - it reads as rigour. The tell is that the
+proof would have to assert something about a person rather than about the
+system.
+
+For SIGNUP-01 the answer was the second branch: the warning shipped as a
+mitigation, and `/signup/verify-otp` requiring the initiating password is the
+mechanical control that carries the closure.
+
+---
+
+## AY2 - THE ADJACENCY PATTERN: a control a few functions from where it was missing
+
+**Four instances in this phase, and the fourth is the most surprising.**
+
+| # | The control that existed | Where it was missing | Distance |
+|---|---|---|---|
+| 1 | SEC-08 unified on three endpoints (3.2) | a fourth endpoint differing on body text (AP1) | same file |
+| 2 | `passwordProblem`, one validator for five paths | `admin.js` had a sixth, check 10 / message 6 (AT5) | one file away |
+| 3 | `/login` required the pending password before re-sending an OTP | `/signup/verify-otp` did not require it at all (AX1) | **same file** |
+| 4 | `/signup/resend-otp` was fire-and-forget, WITH A COMMENT SAYING WHY | `/signup`'s OTP path awaited its send (AX4) | **three functions** |
+
+### The fourth is different in kind
+
+The first three are a control not propagating. **The fourth is CORRECT REASONING,
+WRITTEN DOWN, IN THE SAME FILE, failing to reach the next function** - and worse,
+my own comment at the site I was editing reasoned about the exact risk and
+attributed it to the wrong branch.
+
+**This is AK3's meta-lesson at a smaller and far more surprising scale.** AK3 was
+about a rule stated for one control failing to propagate to others - a
+documentation-level failure over packages. This is the same failure over
+FUNCTIONS, within a single editing session, with the explanation already visible
+on screen.
+
+### The countermeasure, and why "check nearby" is not it
+
+> **When fixing an asymmetry, ENUMERATE every sibling branch and endpoint in the
+> same file and STATE, for each, whether it has the same property.**
+
+Not "check nearby". **"Nearby" is what has failed four times.** The enumeration
+has to be written down, because the failure mode is not forgetting to look - it
+is looking and not seeing, which an unwritten check cannot catch. Three of the
+four had the answer already present in the file.
+
+Added to the per-package criteria. **Applied retroactively in 3.6** for each fix
+this phase that turned on a branch condition.
+
+---
+
 ## AX4 - THE INVERTED ORACLE. Eleventh inherited claim, and it made things WORSE.
 
 Package 3.5a's first version made only the signup-attempt NOTICE
@@ -3103,6 +3176,18 @@ is then correct. It exists because SEC-02's suite asserted that a user's reset
 code must be VOIDED at the attempt cap, which defended nothing and handed anyone
 who knows an address a five-request denial of service on that user's reset. See
 AW1.
+
+#### A MITIGATION THAT DEPENDS ON A HUMAN (AY1)
+
+> When a recommendation's effectiveness depends on a human reading something, it
+> CANNOT carry a closure claim. Either pair it with a mechanical control that
+> can, or leave the finding OPEN with the mitigation noted.
+
+#### WHEN FIXING AN ASYMMETRY, ENUMERATE THE SIBLINGS (AY2)
+
+> Enumerate every sibling branch and endpoint in the same file and STATE, for
+> each, whether it has the same property. Written down, not checked mentally -
+> the failure mode is looking and not seeing, four times so far.
 
 #### THE RULE THAT AUDIT FOUND (AX3)
 

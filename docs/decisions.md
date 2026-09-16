@@ -2630,3 +2630,73 @@ to none.
 - It belongs to the class in AP4: a control that is correct - refusing to guess
   a date - producing a symptom somewhere else, here a half-migrated database
   that reads like a loader bug.
+
+---
+
+## ADR-059 — Package 3.6 cannot remove Mongoose entirely, because Phase 4b needs it
+
+**Status** Accepted (package 3.6). Corrects the exit criterion recorded for 3.6.
+
+### Context
+
+3.6's recorded exit criterion is **"no file imports Mongoose"**, and the sequence
+puts it before 4b, whose entire job is running the ETL against production
+MongoDB. The ETL reads the old store through Mongoose:
+
+```
+Backend/etl/cli.js:25    const mongoose = require('mongoose');
+Backend/etl/cli.js:102   User: require('../models/User'),
+Backend/etl/cli.js:103   Category: require('../models/Category'),
+Backend/etl/cli.js:104   Donation: require('../models/Donation'),
+Backend/etl/cli.js:105   PendingSignup: require('../models/PendingSignup'),
+Backend/etl/preflight.js:31  const mongoose = require('mongoose');
+```
+
+**So 3.6 as specified would make the cutover impossible.** Satisfying the
+criterion means deleting the only code that can read the database the cutover
+has to migrate.
+
+### Why the criterion read as correct
+
+Because it IS correct about the thing anyone pictures on hearing "Mongoose
+removal" — the REQUEST PATH. Every route, middleware and service reaching the
+old store is what the finding is about, and that is finishable now.
+
+**The ETL is not a consumer of the old store; it is the BRIDGE OUT OF IT.** It is
+the one component whose purpose requires the dependency the package exists to
+delete, and it survives its own removal by being what performs the removal.
+
+### Decision
+
+**3.6 removes Mongoose from the REQUEST PATH and the test suites, and retains it
+in `Backend/etl/` and `Backend/models/`.** Two exit criteria replace one:
+
+1. **No file reachable from a request imports Mongoose** — already gated:
+   `test/migration-state.test.js` asserts the app registers ZERO Mongoose models
+   at boot (AV2's gate).
+2. **`Backend/etl/` and `Backend/models/` are the only remaining importers**,
+   deleted by a final cleanup AFTER 4b completes.
+
+### Consequences
+
+- **A terminal package 4c exists**: delete `Backend/models/`, `Backend/etl/`,
+  `scripts/seedDatabase.js`, the `mongoose` dependency and
+  `docker-compose.legacy-mongo.yml`. Trigger: 4b complete, rollback boundary
+  closed.
+- **ADR-047 is re-homed to 4c and was half right.** It ties the override's life
+  to `config/db.js`, which 3.6 does delete — but the override also provides the
+  `mongo` SERVICE, which 4b's snapshot rehearsal restores into and the ETL suite
+  needs. The two halves of that file have different lifetimes and ADR-047 saw
+  only one.
+- **AE1-a's `legacy_id` nulling stays in 3.6.** It depends on MongoDB being
+  READABLE to distinguish a minted id from a genuine one, which keeps it on the
+  safe side of the only irreversible step.
+- The AK3 fixtures in the route suites are deleted in 3.6: their subject is a
+  bridge fallback that no longer exists.
+
+### The shape, again
+
+The fourth ordering constraint found by asking what the DATA does rather than
+what the code layout suggests (ADR-055 FK direction, ADR-056 row location,
+ADR-057 writer/reader split). **A package named for removing a dependency cannot
+remove it from the component whose job is to stop needing it.**
