@@ -70,8 +70,14 @@ const store = {
     await getPrisma().pendingSignup.deleteMany({ where: { email: { startsWith: TAG } } });
   },
 
-  async createUser({ email, role = 'user', isVerified = true, isActive = true }) {
-    const created = await users.create({ name: 'ZZZ AuthChar', email, password: PASSWORD, role, isVerified });
+  /**
+   * `legacyId` stands in for A USER THAT CAME FROM MONGODB. Since 3.6 nothing
+   * mints one, so a test that needs a migrated-looking user has to say so - and
+   * that is the point: the two identity shapes are now visibly different states,
+   * not an accident of which code path created the row.
+   */
+  async createUser({ email, role = 'user', isVerified = true, isActive = true, legacyId = null }) {
+    const created = await users.create({ name: 'ZZZ AuthChar', email, password: PASSWORD, role, isVerified, legacyId });
     if (!isActive) await users.setActive(created.id, false);
     const fresh = await users.findById(created.id);
     return { id: fresh.legacyId || fresh.id, uuid: fresh.id, tokenVersion: fresh.tokenVersion };
@@ -687,10 +693,57 @@ test('AE4: what GET /api/auth/me ACTUALLY returns', async () => {
     assert.equal(forbidden in res.body, false, `${forbidden} must not be returned`);
   }
   assert.equal(res.body.email, email);
-  // CHANGED IN 3.2: `_id` is the ObjectId-shaped external id (ADR-051) and the
-  // uuid is returned alongside, so nothing is hidden.
-  assert.match(res.body._id, /^[0-9a-f]{24}$/);
-  assert.match(res.body.uuid, /^[0-9a-f]{8}-/);
+
+  // ===========================================================================
+  // CHANGED IN 3.6, DELIBERATELY - and this is the before and the after
+  // ===========================================================================
+  // WAS (3.2):  assert.match(res.body._id, /^[0-9a-f]{24}$/);
+  //             every user's external id was ObjectId-shaped, because
+  //             `repositories/users.js` MINTED one for users who had never been
+  //             near MongoDB. That was needed while `Donation.userId` was a
+  //             required Mongoose ObjectId ref.
+  //
+  // NOW (3.6):  package 3.4 migrated the donation write path, the ref is gone,
+  //             and AE1-b's sibling minter in users.js was removed. A user
+  //             created now has legacy_id NULL and IS ADDRESSED BY UUID.
+  //
+  // The old assertion did not become wrong by accident - it recorded a
+  // behaviour this package deliberately removed. It is replaced by the RULE
+  // rather than by the new absolute, so that it keeps discriminating: a
+  // MIGRATED user must still answer with its real ObjectId (ADR-051 keeps it as
+  // the external id through Phase 3), and a NEW one must answer with its uuid.
+  // Asserting only "it is a uuid" would pass even if migrated users had silently
+  // lost their ObjectId identity, which is the failure that would actually hurt.
+  const OBJECT_ID = /^[0-9a-f]{24}$/;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  assert.match(res.body.uuid, UUID, 'the uuid is always present and always a uuid');
+  assert.match(
+    res.body._id,
+    UUID,
+    'a user created AFTER 3.6 is addressed by uuid - no legacy_id is minted any more'
+  );
+  assert.equal(
+    res.body._id,
+    res.body.uuid,
+    'and with no legacy_id the external id IS the uuid, not a second value'
+  );
+
+  // The other half of the rule, on a user carrying a legacy_id - which since
+  // 3.6 only the ETL produces, so the fixture has to ask for one explicitly.
+  const migrated = await store.createUser({
+    email: uniqEmail('me-migrated'),
+    legacyId: crypto.randomBytes(12).toString('hex'),
+  });
+  const res2 = await get('/api/auth/me', tokenFor(migrated));
+  assert.equal(res2.status, 200, res2.raw.slice(0, 160));
+  assert.match(
+    res2.body._id,
+    OBJECT_ID,
+    'A MIGRATED user still answers with its ObjectId. If this fails, 3.6 did not ' +
+      'stop minting - it broke the identity of every record that came from MongoDB.'
+  );
+  assert.match(res2.body.uuid, UUID);
 });
 
 test('PUT /api/users/profile requires a token and updates the caller', async () => {

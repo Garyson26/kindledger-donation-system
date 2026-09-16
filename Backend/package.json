@@ -32,10 +32,13 @@
     "test:destructive-jobs": "node --test test/destructive-jobs.test.js",
     "etl": "node etl/cli.js",
     "etl:preflight": "node etl/cli.js --preflight-only",
+    "etl:null-minted": "node etl/null-minted-cli.js",
+    "test:null-minted": "node --test test/null-minted.test.js",
     "test:payment": "node --test test/payment-callbacks.test.js",
     "test:payment-char": "node --test test/payment-characterisation.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
-    "test:charset": "node db/check-charset.js"
+    "test:charset": "node db/check-charset.js",
+    "test:bridge-exit": "node test/bridge-exit-check.js"
   },
   "keywords": [],
   "author": "",

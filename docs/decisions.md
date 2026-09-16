@@ -2736,3 +2736,59 @@ file-shaped and both were wrong — this one, and AV2's boot-registration gate,
 which named a COMMIT rather than a condition and has been re-homed to 4c by
 ADR-059. Two of six was a high enough rate to justify the sweep rather than a
 note; it is recorded in the remediation map under AZ2.
+
+---
+
+## ADR-060: AE3's exit check cannot be satisfied by the suite that produces it
+
+**Status:** accepted (package 3.6)
+**Supersedes nothing. Constrains ADR-050's exit condition.**
+
+### What happened
+
+ADR-050 says a bridge may be deleted when `fallbackCount()` is zero over a real
+run. Package 3.6 mechanised that as `test/bridge-exit-check.js`, because
+`readyToDelete()` can only answer for ONE PROCESS and `node --test` gives each
+suite its own — the counter resets fifteen times, so the number ADR-050 asks for
+did not exist anywhere.
+
+The first mechanised run reported **34 fallbacks**, every one of them
+`[AUTH-DECISION-FROM-MONGO]`.
+
+**Thirty-two came from one test fixture.** `categories-characterisation.test.js`
+created its admin and plain-user in MongoDB — a leftover from package 3.1, when
+users still lived there — so every authenticated request in a suite *about
+categories* missed MySQL and was resolved through the auth bridge.
+
+### The finding
+
+> **The bridge was not carrying traffic. The test suite was manufacturing it.**
+
+Both readings of "34" were available and neither was checkable without reading
+the fixtures: *the bridge is live, do not delete it*, and *those are only
+fixtures, ignore them*. An exit check that can be read either way is not
+evidence, and the second reading is the one a tired person picks.
+
+This is AU3's pattern in a new place — a control validated only where nothing is
+at stake — but sharper: here the control's INPUT was produced by the thing it
+was measuring.
+
+### What follows
+
+1. The exit check is kept and is now a CI gate. It failed usefully on its first
+   run, which is the only evidence that a check of this kind works.
+2. **The AK3 Mongo-only fixtures must be removed BEFORE the bridge-deletion
+   evidence means anything**, which inverts AZ4's steps 2 and 3. This is
+   ADR-059's shape again: the evidence for removing a dependency cannot be
+   gathered while the component that manufactures it is still in place.
+3. The exclusion list names `category-bridge.test.js` explicitly rather than by
+   pattern, because that suite exists to drive the fallback and a pattern would
+   quietly grow to cover the next inconvenient suite.
+4. The two fallbacks that remain are AK3 tests asserting the bridge works —
+   the behaviour 3.6 removes. They change with the bridge, not before it.
+
+### The generalisation
+
+> **Before trusting a count, ask what produces the thing being counted. If the
+> answer is "the test suite", the count measures the fixtures.**
+

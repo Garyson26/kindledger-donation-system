@@ -72,12 +72,21 @@ async function create(input, tx) {
   const row = await client(tx).user.create({
     data: {
       uuid: input.uuid || newUuid(),
-      // ADR-051: MINTED when not supplied. A user created here with a null
-      // legacy_id would be addressed by uuid, and Donation.userId is a required
-      // Mongoose ObjectId ref until donations migrate - so that donation could
-      // not be attributed. The ETL supplies the real ObjectId and this branch
-      // is not taken for migrated rows.
-      legacyId: input.legacyId ?? mintObjectId(),
+      // NO LONGER MINTED (package 3.6). A user created here used to get a
+      // fabricated ObjectId because `Donation.userId` was a required Mongoose
+      // ObjectId ref, so a MySQL-only user could not be attributed a donation.
+      // Package 3.4 migrated the donation write path and that ref is gone.
+      //
+      // FOUND BY AY2's ENUMERATION, NOT BY THE TRIGGER. AE1-b fired in 3.4 and
+      // removed the minter from `routes/categories.js`. THIS FILE HAD THE SAME
+      // PROPERTY FOR THE SAME REASON AND WAS NOT TOUCHED - the fifth instance
+      // of a control existing a few functions from where it was missing, and
+      // the first one caught by enumerating siblings rather than by accident.
+      //
+      // A user created here now has `legacy_id` NULL and is addressed by uuid.
+      // `resolveAuthUser` already dispatches on the id SHAPE, so both forms
+      // circulate correctly (ADR-051).
+      legacyId: input.legacyId ?? null,
       name: input.name,
       // Lowercased on write. The unique index is case-insensitive
       // (utf8mb4_0900_as_ci) so this is defence in depth, not the only control.
@@ -231,6 +240,15 @@ async function setActive(id, isActive, tx) {
  * exists - look it up; no row means minted. Package 3.6 NULLs these BEFORE
  * deleting Mongo, in that order, or the distinction is lost permanently.
  */
+// RETAINED THOUGH NOTHING IN THIS FILE CALLS IT ANY MORE (package 3.6).
+//
+// `etl/migrate.js` does not need it - migrated rows carry their real ObjectId -
+// but the TEST SUITES do: several construct fixtures with ObjectId-shaped
+// external ids because that is still what the routes exchange for migrated
+// records (ADR-051). Deleting it would move that logic into four test files.
+//
+// It is exported and unused by production code. When ADR-051 retires the
+// ObjectId as an external identifier, this goes with it.
 let objectIdCounter = crypto.randomBytes(3).readUIntBE(0, 3);
 function mintObjectId() {
   const seconds = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
@@ -266,7 +284,10 @@ async function createFromPendingSignup(email, tx) {
     const row = await db.user.create({
       data: {
         uuid: newUuid(),
-        legacyId: mintObjectId(),
+        // NOT MINTED (package 3.6). The SECOND minting site in this file, and
+        // the reason AY2 asks for an enumeration rather than a search: the
+        // first one is where anybody would look.
+        legacyId: null,
         name: pending.name,
         email: pending.email,
         passwordHash: pending.passwordHash,

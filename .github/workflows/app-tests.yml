@@ -210,6 +210,29 @@ jobs:
         working-directory: Backend
         run: npm run test:destructive-jobs
 
+      # AE1-a. The ONE irreversible step in package 3.6: a minted legacy_id and
+      # a genuine one are the same 24 hex characters, and the only thing that
+      # tells them apart is whether a MongoDB document with that _id exists.
+      # Run this after the cutover and the distinction is gone for ever, so the
+      # ORDERING is asserted here rather than written in a runbook.
+      - name: Minted legacy_id removal and its ordering (AE1-a)
+        working-directory: Backend
+        env:
+          TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_nullminted_ci
+        run: npm run test:null-minted
+
+      # AE3 PART 1. ADR-050 makes deleting a bridge an EMPIRICAL question, and
+      # `readyToDelete()` can only answer it for one process - `node --test`
+      # gives each suite its own, so the counter resets fifteen times.
+      #
+      # This runs every suite and fails if a MongoDB fallback fired outside the
+      # one suite that exists to drive it. On its first run it reported 34, of
+      # which 32 were a test fixture creating its auth user in MongoDB - the
+      # bridge was not carrying traffic, the suite was manufacturing it.
+      - name: Bridge exit check - zero MongoDB fallbacks (AE3 part 1)
+        working-directory: Backend
+        run: npm run test:bridge-exit
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------
