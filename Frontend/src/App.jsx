@@ -21,8 +21,6 @@ import Footer from "./pages/Footer";
 import AdminUsers from "./pages/AdminUsers";
 import AdminCharts from "./pages/AdminCharts";
 import UserDonationHistory from "./pages/UserDonationHistory";
-import TailwindTest from "./pages/TailwindTest";
-import ButtonShowcase from "./pages/ButtonShowcase";
 import PaymentSuccess from "./pages/PaymentSuccess";
 import PaymentFailure from "./pages/PaymentFailure";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
@@ -158,9 +156,9 @@ function AppContent() {
       <Navbar isAuthenticated={isAuthenticated} onLogout={handleLogout} userRole={userRole} />
       <div>
         <Routes>
-          {/* Tailwind Test Route - Remove this after verification */}
-          <Route path="/tailwind-test" element={<TailwindTest />} />
-          <Route path="/button-showcase" element={<ButtonShowcase />} />
+          {/* B3 (SPEC-5 5.6): /tailwind-test and /button-showcase are GONE.
+              They shipped to production behind no guard, under a comment that
+              said to remove them after verification. */}
 
           {/* User routes */}
           <Route path="/" element={<CategoriesPage userRole={userRole} />} />

@@ -23,7 +23,18 @@ function ChangePassword() {
     try {
       const { data, error, ok } = await authAPI.changePassword(form);
       if (ok) {
-        showToast(data.msg || "Password changed successfully", "success");
+        // B1 (SPEC-5 5.6). WAS `data.msg`, which BUG-11 removed when it unified
+        // the response shape - so this was always undefined and the fallback
+        // below was shown every time, including when the server said something
+        // more useful.
+        //
+        // ENUMERATED, NOT GREPPED ONCE (AY2): all seventeen reads of a server
+        // message or error across the frontend were listed, and this was the
+        // ONLY surviving `.msg`. Every other caller already reads
+        // `error`/`message`, and `utils/api.js` normalises failures to
+        // `data.error || data.message` - which is why only the SUCCESS path
+        // here was left behind.
+        showToast(data.message || "Password changed successfully", "success");
         setForm({ oldPassword: "", newPassword: "" });
       } else {
         showToast(error || "Failed to change password", "error");

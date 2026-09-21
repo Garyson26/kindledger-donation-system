@@ -1,7 +1,21 @@
 # SPEC-5 package 5.1 — UI audit
 
-**No code changed.** This is the list SPEC-5 §7 asks for. Gary picks from it; 5.6
-implements whatever is picked.
+**No code changed when this was written.** This is the list SPEC-5 §7 asks for.
+
+> ### CORRECTED AFTER IMPLEMENTATION — TWO OF SEVEN ITEMS WERE WRONG
+>
+> **B2 is withdrawn entirely** and **M1 is halved.** Both errors came from the
+> same method: I counted greps (`catch` occurrences, `length === 0` occurrences)
+> and treated the count as the property. Implementing them is what read the code.
+>
+> That is the metric-for-property mistake this project has recorded repeatedly —
+> BB4's flag that was the only check on itself, BH2's presence-versus-execution —
+> committed in an audit whose whole job was to look. **A proxy applied
+> systematically is worse than judgement, because it looks rigorous.**
+>
+> BN4 said a negative result from a rule applied systematically is worth more
+> than the same conclusion by inspection. That holds only when the rule measures
+> the property. Here it measured a correlate, and two of seven cells were wrong.
 
 Every item is one line on what is wrong and one on what it should be. No
 redesigns, no new features — the existing visual language is the constraint.
@@ -22,13 +36,18 @@ useful.
 **This is SPEC-5 §7's third known item, found live.** It is the only surviving
 reader of the old shape; the rest of the frontend already uses `error`/`message`.
 
-### B2. `AdminUsers` has no error handling at all
+### ~~B2. `AdminUsers` has no error handling at all~~ — WITHDRAWN, NOT A DEFECT
 
-`src/pages/AdminUsers.jsx` contains **zero `catch` blocks** while every other
-admin page has one or two. A failed or slow request leaves the page blank or
-spinning with nothing said.
+**This was wrong.** `AdminUsers.jsx` handles every failure. It has no `catch`
+blocks because **`utils/api.js` never throws**: it catches network errors itself
+and returns `{ ok: false, error }`. Every call site there destructures
+`{ ok, error }` and calls `showToast(error || "…")` — eight of them.
 
-*Should:* the same toast-on-failure the other admin pages use.
+I counted `catch` occurrences, found zero, and wrote "no error handling at all".
+The count was accurate and the conclusion was false.
+
+*Action: none. Recorded rather than deleted, because a withdrawn finding that
+vanishes teaches nothing about how it got written.*
 
 ### B3. Two development routes are shipped to production
 
@@ -76,13 +95,17 @@ than by looking where the known duplicate was (AY2).
 
 ## Missing
 
-### M1. No empty state on `DonationDetails` or `AdminCharts`
+### M1. No empty state on `AdminCharts` — HALVED
 
-Both handle loading and both `catch`, but neither handles "the request
-succeeded and there is nothing to show". Every other listing page does.
+**`AdminCharts` is real.** `stats` starts `null` and is set only on a successful
+fetch, so an empty database or a failed request rendered charts against nothing.
 
-*Should:* the same empty-state treatment used by `MyDonations` and
-`AdminDonations`.
+**`DonationDetails` was wrong.** It has a not-found state already
+(`src/pages/DonationDetails.jsx:116`, `{error || 'Donation not found'}`). Same
+grep-counting mistake as B2.
+
+*Done in 5.6:* an explicit "no donation statistics to show yet" branch on
+`AdminCharts` only.
 
 ---
 
@@ -142,3 +165,52 @@ checked off rather than rediscovered.
   (BJ4), not a UI one, and it holds only `VITE_API_URL`, which Vite embeds
   publicly anyway.
 - **react-router v7.** Package 5.5 owns it.
+
+---
+
+## What was implemented (SPEC-5 package 5.6)
+
+| Item | Status |
+|---|---|
+| **B1** `ChangePassword` reads `data.msg` | **FIXED** — reads `data.message`. Verified against the route, which sends `message: "Password changed successfully"` |
+| ~~**B2**~~ | **WITHDRAWN** — not a defect. See above |
+| **B3** dev routes in production | **FIXED** — routes and both page files deleted |
+| **I1** duplicate `pdfGenerator` files | **FIXED** — both unimported copies deleted |
+| **I2** duplicate `AddCategoryForm` | **FIXED** — the unimported `pages/` copy deleted |
+| **M1** missing empty state | **FIXED for `AdminCharts`**; withdrawn for `DonationDetails` |
+| **D1** guest donation retrieval | **DEFERRED** — see below |
+
+**Verified by outcome, not by the diff (BH2):** `npm run build` succeeds, which
+is what proves five deletions did not break an import. `vite build` resolves
+every import in the graph; a stale reference would fail the build rather than
+appear at runtime on one route nobody opened.
+
+### B1's enumeration, since it is the evidence and not the fix
+
+All **seventeen** reads of a server `message`/`error`/`msg` across the frontend
+were listed. `ChangePassword.jsx:26` was the **only** surviving `.msg`.
+
+The reason it survived is worth keeping: `utils/api.js` normalises FAILURES to
+`data.error || data.message`, so every error path was already correct. Only the
+**success** path, which reads the body directly, was left behind — which is why
+a reader checking "do we handle BUG-11's shape" would have said yes.
+
+---
+
+## D1 — DEFERRED, with a trigger rather than a phase
+
+**Can a guest retrieve their own donation?** Deferred: it is a product decision
+and a new lookup path over donor data, not a UI fix.
+
+**Trigger — revisit when any of these becomes true:**
+
+1. A donor asks for a receipt they did not keep. That is the first real evidence
+   the gap costs anything, and until then the cost is assumed.
+2. Guest donations exceed a meaningful share of the total — the admin `/stats`
+   tile already counts donations by user presence, so the number exists.
+3. Any receipt-by-link or donation-lookup feature is proposed for another
+   reason, because that flow would carry the same enumeration questions and
+   should be designed once.
+
+Recorded so it is not rediscovered as a bug. It remains an accident of the data
+model (AG4), and deferring it is now a decision rather than the absence of one.
