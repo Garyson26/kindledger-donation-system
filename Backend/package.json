@@ -73,6 +73,9 @@
     "nodemon": "^3.1.10",
     "prisma": "^6.1.0"
   },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
+  },
   "//scripts": {
     "seed": "LEGACY MongoDB seeder. Still the production path until the Phase 4 cutover; do not repoint it at MySQL.",
     "db:seed": "MySQL demo seeder. Destructive - requires --i-understand-this-drops-the-database.",

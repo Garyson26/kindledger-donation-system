@@ -4697,6 +4697,53 @@ request path, and ADR-059 says it cannot: it is the evidence for this package's
 work, and it goes with `models/` in 4c.
 
 
+---
+
+## U-6 CLOSED - and the bump everyone had queued would NOT have fixed it
+
+Three **HIGH** advisories: `deepmerge-ts < 8.0.0` (stack exhaustion on recursive
+object graphs), reaching the tree through `prisma -> @prisma/config`.
+
+### Two things the obvious fix gets wrong
+
+**1. It is in the PRODUCTION tree, though the declaration says otherwise.**
+`package.json` lists `prisma` under `devDependencies`. The tree says:
+
+    @prisma/client@6.19.3  (a PRODUCTION dependency)
+      -> prisma@6.19.3
+        -> @prisma/config@6.19.3
+          -> deepmerge-ts@7.1.5
+
+`npm audit --omit=dev` reports all three. U-6 recorded this discrepancy and it
+still holds: **the declaration is not the tree**, and only running `npm ls`
+distinguishes them.
+
+**2. UPGRADING PRISMA WOULD NOT HAVE FIXED IT.** The advisory's vulnerable range
+for `prisma` is `6.13.0-dev.1 - 8.1.0-dev.4` - **which includes all of v7.** The
+queued "bump Prisma" task, performed as written, would have moved 6.19.3 to
+7.10.0, changed a major version of the data layer, and left three HIGH
+advisories in place while looking like remediation.
+
+`npm audit fix` proposes `prisma@8.0.0-rc.15` - a release candidate, which is
+not a thing to put under a payment system.
+
+### What was actually done
+
+An `overrides` entry pinning `deepmerge-ts@^8.0.0`. The vulnerability is in
+`deepmerge-ts`; the fix is in `deepmerge-ts@8`; nothing else needs to move.
+
+    npm audit  ->  found 0 vulnerabilities
+    deepmerge-ts@8.0.2 resolved under @prisma/config@6.19.3
+
+Verified by OUTCOME (BH2), not by the version string: `npx prisma generate` runs
+inside the container, and `data-layer` + `schema` pass 57/57 against the real
+database. An override that silently broke the client would show there.
+
+> **An advisory names a vulnerable PACKAGE and a vulnerable RANGE. "Upgrade the
+> thing that depends on it" is not the same fix, and here it would have changed
+> a major version and closed nothing.**
+
+
 ## Counts
 
 | State | Count | Rows |
