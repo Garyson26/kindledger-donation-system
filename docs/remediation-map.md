@@ -4029,6 +4029,121 @@ exit after cleanup.
 > complete, and it exists to produce one number.
 
 
+---
+
+## BE2 - THE COMPOSITION CLASS: TWO CORRECT CONTROLS, ONE VULNERABILITY
+
+Every class catalogued so far is a control that is **wrong** - missing, mis-set,
+validated where nothing is at stake, depending on a human, agreeing with itself.
+This one is different, and the difference is the point:
+
+> **Two independently correct controls producing a vulnerability by interaction.
+> Neither is wrong. Neither can be fixed by making it more correct.**
+
+- **SEC-18** made bcrypt cost 12 on purpose. The cost factor is the control; a
+  cheap hash would be the defect.
+- **SEC-08** made the responses identical on purpose. Package 3.5a spent a whole
+  package closing the last body-shaped oracle.
+
+**The oracle lives in the gap between them.** SEC-08 equalised what the endpoint
+SAYS. SEC-18 guaranteed that one branch would take 240 ms longer to say it.
+Reviewing either control on its own finds nothing, because neither is defective.
+
+### Why nothing in this process was looking for it
+
+**The map tracks findings individually.** Every row is one finding, with its own
+owner, its own package and its own test. That structure is what has made the
+work tractable, and it has no representation for *"these two rows interact"*.
+
+- AR6's inherited-claim gate reads claims one at a time.
+- BB4's invariant checks one finding's flags against itself.
+- The `readyToDelete` / exit-check machinery measures one property.
+- A code review of `repositories/users.js` sees a correct cost factor. A review
+  of `routes/auth.js` sees correct identical responses.
+
+**No single-finding review could have caught this**, and the only reason it was
+caught at all is that BB3 measured a residual instead of restating it. The
+measurement was commissioned to decide whether a note was signal or noise; what
+it actually found was an interaction nobody had a place to write down.
+
+### The countermeasure, which is weaker than the others and should be admitted as such
+
+There is no gate for this. What there is:
+
+1. **When a control is deliberately EXPENSIVE, ask what else observes its cost.**
+   Cost is an output. bcrypt's expense is visible to anyone who can time a
+   request, and "identical responses" does not cover it.
+2. **When a finding is closed by making two paths identical, name the dimension.**
+   3.5a closed SEC-08 *in the body*. Writing "in the body" would have left the
+   clock visibly unclosed rather than implicitly so.
+3. **Measure residuals rather than characterising them** (BB3). The prose said
+   "a far weaker signal than a distinct message". It is a 52x signal with no
+   overlap between the distributions. Characterisation was the error.
+
+---
+
+## BE1 - THE SAME SHAPE, EVERYWHERE IT OCCURS
+
+Enumerated rather than checked nearby (AY2). **Every endpoint that performs real
+cryptographic work in one branch and returns early in its sibling.**
+
+### Measured - bcrypt-sized, all three with NON-OVERLAPPING distributions
+
+| Endpoint | Expensive branch | Early-returning sibling | Separation | What it reveals |
+|---|---|---|---|---|
+| `POST /signup` | unknown address -> `bcrypt.hash` + write | known address -> neither | **237.7 ms (51.9x)** | account existence |
+| `POST /login` | pending signup OR registered user -> `bcrypt.compare` | **neither exists -> refused before any bcrypt** | **236.0 ms (60.0x)** | account existence, on the canonical enumeration endpoint |
+| `POST /signup/verify-otp` | pending row -> `bcrypt.compare` | no pending row -> `false`, no bcrypt | **240.7 ms** | whether a signup is IN FLIGHT for an address |
+
+**`/login` is the worst of the three and was not the one noticed.** `/signup`
+was measured first only because BA3's audit happened to carry a note about it.
+Its three-way structure - pending signup, registered user, neither - means an
+unknown address is refused before any hashing at all.
+
+**`/signup/verify-otp` contradicts its own comment.** The comment AX1 left says
+the password requirement "adds no oracle: a caller cannot learn whether the
+address has a signup in flight". That is TRUE OF THE BODY AND FALSE OF THE
+CLOCK. Another confident sentence written next to code, in the class AJ3 named.
+
+### Enumerated, same shape, NOT yet measured - stated rather than assumed
+
+| Endpoint | Shape | Expected size |
+|---|---|---|
+| `POST /signup/resend-otp` | `pendingSignups.verifyPassword` - identical structure to `/signup/verify-otp` | bcrypt-sized. Almost certainly the same ~240 ms |
+| `POST /forgot-password/request` | known+active -> sha256 + one UPDATE + mail dispatch; unknown -> nothing | **small** - milliseconds, not hundreds. Real but far below the bcrypt cases |
+| `POST /login/resend-otp` | same shape as above | small |
+
+### Checked and found NOT to have it - reported because "nothing" is an answer
+
+| Endpoint | Why not |
+|---|---|
+| `POST /login/verify-otp` | `verifyLoginOtp` is **sha256**, microseconds. The branch exists; the cost does not |
+| `POST /forgot-password/verify`, `POST /forgot-password/reset` | `verifyResetCode` is sha256, same reason |
+| `POST /change-password` | behind `authMiddleware` - the caller already IS the account, so there is nothing to enumerate |
+| `GET /me`, every donation and payment route | no password-shaped comparison on a branch |
+
+**So: four bcrypt-sized oracles, not one**, three of them measured and the
+fourth structurally identical to one that was.
+
+---
+
+## BE4 - `git add -A` HAS NOW TWICE COMMITTED SOMETHING UNINTENDED
+
+An unexplained edit was sitting in the working tree - the README's title
+demoted from `#` to `##` - and `git add -A` swept it into a commit about the
+pre-flight invariant. Reverted in a separate commit; Gary did not make the
+change knowingly.
+
+It is a hygiene point rather than a finding, and it is recorded because it is
+the SECOND time in this project. The pattern is that `-A` stages whatever is
+there, and "whatever is there" is not always mine - an editor's autoformat, a
+stray keystroke, a tool writing a file.
+
+> **Review `git status` before staging, or stage by path. A commit message that
+> describes one change while the commit contains two is a small lie that a
+> future bisect believes.**
+
+
 ## Counts
 
 | State | Count | Rows |

@@ -67,6 +67,18 @@ let clientSeq = 0;
 const uniqEmail = (t) => `${TAG}-${t}-${crypto.randomBytes(4).toString('hex')}@invalid.test`;
 const nextIp = () => `203.0.113.${(clientSeq++ % 250) + 1}`;
 
+async function post(path, body) {
+  const started = process.hrtime.bigint();
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextIp() },
+    body: JSON.stringify(body),
+  });
+  await res.text();
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  return { status: res.status, elapsedMs };
+}
+
 async function signup(email) {
   const started = process.hrtime.bigint();
   const res = await fetch(`${base}/api/auth/signup`, {
@@ -190,5 +202,125 @@ test('BB3: the two /signup branches are TIMED, and the number is recorded', asyn
     'TOTAL separation: the distributions do not overlap at all, so ONE request ' +
       'is enough to tell a registered address from an unregistered one. This is ' +
       'the strongest form the finding can take, and it is the one that holds.'
+  );
+});
+
+// =============================================================================
+// BE1 - THE SAME SHAPE ELSEWHERE. Enumerated, not checked nearby (AY2).
+// =============================================================================
+// /signup is where the oracle was noticed. It is not the worst instance.
+//
+// Wherever one branch performs real cryptographic work and its sibling returns
+// early, the same oracle exists. These tests MEASURE the two other bcrypt-sized
+// ones rather than reasoning about them, because the whole reason /signup's was
+// underestimated is that somebody reasoned about it and wrote "a far weaker
+// signal than a distinct message".
+// =============================================================================
+
+test('BE1: /login separates a KNOWN address from an UNKNOWN one by timing', async () => {
+  // THE CANONICAL ENUMERATION ENDPOINT, and its structure is:
+  //
+  //   pending signup exists -> bcrypt.compare
+  //   registered user exists -> bcrypt.compare
+  //   NEITHER                -> refuse(400) immediately, NO bcrypt at all
+  //
+  // The body is identical in all three - SEC-08 saw to that. The clock is not.
+  const known = uniqEmail('login-known');
+  await users.create({ name: 'ZZZ Login', email: known, password: PASSWORD, isVerified: true });
+
+  const WRONG = 'WrongPassword9!';
+  await post('/api/auth/login', { email: known, password: WRONG });
+  await post('/api/auth/login', { email: uniqEmail('login-warm'), password: WRONG });
+
+  const unknownTimes = [];
+  const knownTimes = [];
+  for (let i = 0; i < SAMPLES; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const k = await post('/api/auth/login', { email: known, password: WRONG });
+    // eslint-disable-next-line no-await-in-loop
+    const u = await post('/api/auth/login', { email: uniqEmail(`login-u${i}`), password: WRONG });
+    assert.equal(k.status, 400, 'a wrong password is refused');
+    assert.equal(u.status, 400, 'and so is an unknown address - IDENTICALLY');
+    knownTimes.push(k.elapsedMs);
+    unknownTimes.push(u.elapsedMs);
+  }
+
+  const mKnown = median(knownTimes);
+  const mUnknown = median(unknownTimes);
+  const separation = mKnown - mUnknown;
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `\n  BE1 /login MEASUREMENT (${SAMPLES} samples each, interleaved, medians):\n` +
+      `    KNOWN address, wrong password (bcrypt.compare): ${mKnown.toFixed(1)} ms\n` +
+      `    UNKNOWN address (refused before any bcrypt)   : ${mUnknown.toFixed(1)} ms\n` +
+      `    SEPARATION                                    : ${separation.toFixed(1)} ms\n` +
+      `    ratio                                         : ${(mKnown / mUnknown).toFixed(2)}x\n`
+  );
+
+  assert.ok(
+    separation > 20,
+    `PINNED DEFECT: /login is separable by timing (${separation.toFixed(1)} ms), so an ` +
+      'unauthenticated caller can enumerate registered addresses one request at a ' +
+      'time. If this FAILS the oracle has been closed - update the map and delete ' +
+      'this test rather than lowering the threshold.'
+  );
+  assert.ok(
+    Math.max(...unknownTimes) < Math.min(...knownTimes),
+    'TOTAL separation on /login: the distributions do not overlap, so ONE request ' +
+      'decides. This is the canonical enumeration endpoint and the oracle is the ' +
+      'same size as /signup - which was measured first only because it was noticed first.'
+  );
+});
+
+test('BE1: /signup/verify-otp leaks whether a signup is IN FLIGHT, contradicting its comment', async () => {
+  // The comment above this endpoint says, of the password requirement AX1 added:
+  //
+  //   "ANSWERS 'Invalid OTP' like every other failure here, so it adds no
+  //    oracle: a caller cannot learn whether the address has a signup in
+  //    flight, nor whether their password guess was right."
+  //
+  // TRUE OF THE BODY. FALSE OF THE CLOCK. `pendingSignups.verifyPassword`
+  // returns false WITHOUT reaching bcrypt when there is no pending row, so an
+  // address with a signup in flight costs a bcrypt.compare and one without
+  // costs nothing.
+  //
+  // Another confident sentence written next to code that the clock contradicts.
+  const inFlight = uniqEmail('otp-inflight');
+  await post('/api/auth/signup', { name: 'ZZZ InFlight', email: inFlight, password: PASSWORD });
+
+  const body = (email) => ({ email, otp: '000000', password: 'WrongPassword9!' });
+  await post('/api/auth/signup/verify-otp', body(inFlight));
+  await post('/api/auth/signup/verify-otp', body(uniqEmail('otp-warm')));
+
+  const withRow = [];
+  const withoutRow = [];
+  for (let i = 0; i < SAMPLES; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const a = await post('/api/auth/signup/verify-otp', body(inFlight));
+    // eslint-disable-next-line no-await-in-loop
+    const b = await post('/api/auth/signup/verify-otp', body(uniqEmail(`otp-u${i}`)));
+    assert.equal(a.status, 400);
+    assert.equal(b.status, 400, 'identical bodies, identical status');
+    withRow.push(a.elapsedMs);
+    withoutRow.push(b.elapsedMs);
+  }
+
+  const mWith = median(withRow);
+  const mWithout = median(withoutRow);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `\n  BE1 /signup/verify-otp MEASUREMENT (${SAMPLES} samples each, medians):\n` +
+      `    signup IN FLIGHT (bcrypt.compare): ${mWith.toFixed(1)} ms\n` +
+      `    no pending row (no bcrypt)       : ${mWithout.toFixed(1)} ms\n` +
+      `    SEPARATION                       : ${(mWith - mWithout).toFixed(1)} ms\n`
+  );
+
+  assert.ok(
+    mWith - mWithout > 20,
+    `PINNED DEFECT: the endpoint's own comment claims it adds no oracle. It adds ` +
+      `a ${(mWith - mWithout).toFixed(1)} ms one. Fix the code or fix the comment; ` +
+      'do not lower this threshold.'
   );
 });
