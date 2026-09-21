@@ -591,7 +591,60 @@ async function deleteInactiveOlderThan(cutoff, tx) {
   return res.count;
 }
 
+/**
+ * =============================================================================
+ * Resolve a user for an AUTHORISATION decision (package 3.6)
+ * =============================================================================
+ * WAS `services/userBridge.resolveAuthUser`, which tried MySQL and then fell
+ * back to MongoDB. **The fallback is gone with the bridge**, and the difference
+ * is a real behaviour change rather than a refactor:
+ *
+ *   BEFORE: a user who existed only in MongoDB could still hold a session. The
+ *           event was logged as [AUTH-DECISION-FROM-MONGO] because an
+ *           authorisation decision made from the store we were migrating away
+ *           from was the single most interesting event in the system (AJ1b).
+ *   NOW:    there is one store. An id that does not resolve in MySQL is not a
+ *           user, and the caller is refused.
+ *
+ * That is safe ONLY because the ETL has run - an un-migrated account now fails
+ * to authenticate rather than falling back, so the ETL is the thing standing
+ * between a real donor and a locked account. ADR-056's constraint, and the
+ * reason AE3 required evidence that no fallback was still firing before this
+ * could be deleted.
+ *
+ * THE NARROWER PROJECTION IS KEPT (AJ1). It returns less than a user record,
+ * not more: no email, nothing serialisable into a response. `isActive` and
+ * `tokenVersion` describe the account's security state and are no client's
+ * business - `tokenVersion` in particular tells an attacker holding a stale
+ * token exactly why it stopped working. NEVER PUT THIS IN A RESPONSE BODY.
+ */
+async function resolveForAuth(id, tx) {
+  const { idShape } = require('../utils/idShape');
+  const shape = idShape(id);
+  if (shape === 'invalid') return null;
+  const value = String(id).trim();
+
+  const row = shape === 'objectid' ? await findByLegacyId(value, tx) : await findById(value, tx);
+  if (!row) return null;
+
+  return {
+    // The EXTERNAL identifier - an ObjectId for a migrated record, the uuid for
+    // one created since (ADR-051, and 3.6 stopped minting).
+    id: row.legacyId || row.id,
+    // The uuid, for repository lookups.
+    uuid: row.id,
+    name: row.name || '',
+    role: row.role || 'user',
+    isActive: row.isActive !== false,
+    tokenVersion: typeof row.tokenVersion === 'number' ? row.tokenVersion : 0,
+    // Retained so a reader can see at a glance that there is only one store
+    // left. It was the field that distinguished a bridge answer from a real one.
+    _source: 'mysql',
+  };
+}
+
 module.exports = {
+  resolveForAuth,
   create,
   createFromPendingSignup,
   mintObjectId,

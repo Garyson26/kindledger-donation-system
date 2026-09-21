@@ -25,7 +25,7 @@ const router = express.Router();
 const { donations } = require("../repositories");
 // BUG-11: one refusal shape. See Backend/utils/respond.js.
 const { refuse, failed } = require("../utils/respond");
-const { idShape } = require("../services/legacyBridge");
+const { idShape } = require("../utils/idShape");
 const adminAuth = require("../middleware/adminAuth");
 const authMiddleware = require("../middleware/authMiddleware");
 

@@ -4626,6 +4626,77 @@ how BH5's guard was accepted - the assertion is that a forged callback leaves
 the donation `Pending`, not that `assertSigningConfigured` appears in the file.
 
 
+---
+
+## PACKAGE 3.6 - THE REQUEST PATH LEAVES MONGODB
+
+Run in BA2's corrected order: the AK3 coupling first, then the evidence, then
+the deletions.
+
+### AE3, both parts
+
+**Part 1 PASSES.** Eighteen suites green in one run, **zero MongoDB fallbacks**,
+via `test/bridge-exit-check.js`. Two suites are named as run elsewhere rather
+than skipped: `trust-proxy` (host, through nginx) and `no-committed-secrets`
+(needs `git`, absent from the api image).
+
+**Part 2 is satisfied for users and donations and DEGRADED for categories.**
+The shared database holds one ETL-migrated user and five migrated donations
+carrying real `legacy_id`s, exercised by every route suite. The two migrated
+categories have NULL `legacy_id` **because this project's own test suite nulled
+them twice** (BH3b) and they await restoration. Stated rather than glossed: the
+category half of part 2 rests on fixtures, not on ETL-produced rows.
+
+### What was deleted, and what each consumer became
+
+| Deleted | Consumer | Now |
+|---|---|---|
+| `services/legacyBridge.js` | `idShape` in donations + payment | `utils/idShape.js` - never bridge logic, and a helper living in a file named after a temporary mechanism is how the mechanism outlives its purpose |
+| `services/categoryBridge.js` | `countCategories` in admin | `repositories/categories.countActive()` - it never consulted MongoDB, it delegated straight to that file |
+| `services/userBridge.js` | `resolveAuthUser` in both middlewares | `repositories/users.resolveForAuth()` - **MySQL only** |
+| `test/category-bridge.test.js` | - | gone with its subject |
+| `config/db.js` + `connectDB()` | `app.js` | nothing. The request path opens no Mongoose connection |
+| `Backend/.env.example` | - | the root template is authoritative (BK2) |
+
+### The behaviour change, stated as one
+
+> **An account that exists only in MongoDB can no longer hold a session.**
+
+The bridge used to resolve it and log `[AUTH-DECISION-FROM-MONGO]`. That is safe
+only because the ETL has run, so **the ETL is the thing standing between a real
+donor and a locked account** - ADR-056's constraint, and the reason AE3 demanded
+evidence before this deletion rather than after.
+
+### The coupling the suites had, made visible
+
+Seven suites asserted `mongoose.connection.readyState === 1` after importing
+`app.js` - they were relying on the APPLICATION to open a MongoDB connection as
+a side effect of being imported, for their OWN fixtures. Each now connects for
+itself.
+
+That dependency was invisible while it was satisfied. Removing `connectDB()` is
+what surfaced it, which is BA2 once more: a component's job ending does not
+remove what quietly depended on it.
+
+### ADR-047, first half only
+
+`MONGODB_URI` is out of the api service. **The `mongo` service stays** - 4b
+restores a production snapshot into it to rehearse the cutover, and the ETL and
+AK3 fixtures still read it. AZ2 found ADR-047 wrong precisely here.
+
+### Acceptance, measured
+
+- `docker compose up` with **no override**: four services, api **healthy**
+- `GET /api/health` -> `200 {"status":"ok"}`, `GET /api/categories` -> `200`
+  with real rows, both through nginx
+- `mongoose.modelNames()` after importing `app.js`: **`[]`**
+
+The last one is the boot-registration gate's property proved directly rather
+than asserted. **The gate itself STAYS** - BH4 asked for it to go with the
+request path, and ADR-059 says it cannot: it is the evidence for this package's
+work, and it goes with `models/` in 4c.
+
+
 ## Counts
 
 | State | Count | Rows |

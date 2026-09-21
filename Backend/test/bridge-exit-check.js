@@ -43,6 +43,13 @@ const DRIVES_FALLBACK_BY_DESIGN = new Set(['category-bridge.test.js']);
  */
 const SEPARATE_INVOCATION = new Map([
   [
+    'no-committed-secrets.test.js',
+    'reads `git ls-files`, and git is not installed in the api image. It needs ' +
+      'no services at all - run `npm run test:no-secrets` on the host or the CI ' +
+      'runner, where git exists. Listed rather than dropped so the gap is ' +
+      'visible in this report.',
+  ],
+  [
     'trust-proxy.test.js',
     'runs from the HOST against the compose stack through nginx, not inside the ' +
       'api container. Run `npm run test:trust-proxy` from the host and scan its ' +

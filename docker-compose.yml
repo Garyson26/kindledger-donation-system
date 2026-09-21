@@ -155,9 +155,21 @@ services:
       JOB_PENDING_SIGNUP_SWEEP: ${JOB_PENDING_SIGNUP_SWEEP:-false}
       PRISMA_CONNECTION_LIMIT: ${PRISMA_CONNECTION_LIMIT:-10}
       HEALTH_DIAGNOSTIC_SECRET: ${HEALTH_DIAGNOSTIC_SECRET:-}
-      # MONGODB_URI is still passed: the additive model keeps Mongoose
-      # serving every existing route until Phase 3 switches them over.
-      MONGODB_URI: ${MONGODB_URI:-}
+      # MONGODB_URI IS GONE FROM THE API SERVICE (package 3.6, ADR-047 first half).
+      #
+      # `config/db.js` is deleted and nothing in the request path opens a
+      # Mongoose connection, so this variable had no reader left. Passing it
+      # would be a standing invitation to conclude the API still talks to
+      # MongoDB - which is what the second `.env.example` did to the docs.
+      #
+      # THE `mongo` SERVICE IN docker-compose.legacy-mongo.yml STAYS. ADR-047
+      # originally bound both to the life of config/db.js, and AZ2 found that
+      # wrong: the two halves have different lifetimes. Phase 4b restores a
+      # production snapshot INTO that service to rehearse the cutover, and the
+      # ETL and the AK3 test fixtures still read it. It goes in 4c.
+      #
+      # The override file still sets MONGODB_URI for the ETL and the suites that
+      # need it; the BASE stack no longer mentions MongoDB at all.
     volumes:
       - uploads:/var/lib/kindledger/uploads
     depends_on:

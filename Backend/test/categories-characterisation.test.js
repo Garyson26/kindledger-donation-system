@@ -371,10 +371,16 @@ before(async () => {
   assert.equal(probe.ok, true, `MySQL unreachable: ${probe.error}`);
 
   const app = require('../app.js');
-  for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.equal(mongoose.connection.readyState, 1, 'mongoose did not reach a connected state');
+  // CHANGED IN 3.6. This used to wait for `app.js` to open the Mongoose
+  // connection via connectDB(), then assert it had. `config/db.js` is deleted -
+  // the request path does not touch MongoDB at all - so a suite that still
+  // needs MongoDB for its own AK3 fixtures must connect for itself.
+  //
+  // The dependency was real and is now visible: the application no longer
+  // provides a MongoDB connection as a side effect of being imported, and
+  // anything relying on that was relying on the thing this package removes.
+  await mongoose.connect(process.env.MONGODB_URI);
+  assert.equal(mongoose.connection.readyState, 1, 'this suite connects to MongoDB itself');
 
   server = app.listen(0);
   await once(server, 'listening');
@@ -896,12 +902,18 @@ test('QUIRK: deleting a category REFERENCED BY A DONATION succeeds and orphans t
   assert.equal(stillThere.isArchived, true);
   assert.equal(await store.readDonationCategoryRef(donationId), catId);
 
-  // And the bridge still resolves it for the unmigrated readers, so an old
-  // donation's receipt does not lose its category.
-  const bridge = require('../services/categoryBridge');
-  const resolved = await bridge.resolveCategory(catId);
+  // CHANGED IN 3.6: the bridge is deleted, so this asserts the PROPERTY it was
+  // there to demonstrate rather than the mechanism. An archived category must
+  // still be resolvable by the id a historical donation carries, or an old
+  // receipt loses the category that priced it.
+  //
+  // The bridge was never doing the work here - it delegated to this repository
+  // and the answer was always `_source: 'mysql'`. Asserting the resolution
+  // survives the deletion is the outcome; asserting the bridge returned it was
+  // asserting the plumbing (BH2).
+  const resolved = await categories.findByLegacyId(catId) || await categories.findById(catId);
   assert.ok(resolved, 'an archived category still resolves for historical records');
-  assert.equal(resolved._source, 'mysql');
+  assert.equal(resolved.isArchived, true, 'and is still marked archived');
 });
 
 // =============================================================================

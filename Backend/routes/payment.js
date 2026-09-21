@@ -29,7 +29,7 @@ const payuConfig = require('../config/payu');
 
 const { donations, categories, toMinorUnits: sharedToMinorUnits } = require('../repositories');
 const { refuse, failed } = require('../utils/respond');
-const { idShape } = require('../services/legacyBridge');
+const { idShape } = require('../utils/idShape');
 const authMiddleware = require('../middleware/authMiddleware');
 // SEC-11: built in Phase 2 and never wired (ADR-042's shape - the limiter
 // existing and the limiter being used are different claims). Wired below.

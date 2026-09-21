@@ -30,7 +30,7 @@ const { users, donations } = require("../repositories");
 // TEMPORARY (ADR-050, deleted in package 3.6). The category count still goes
 // through the bridge: categories are MySQL, but a category created before the
 // 3.1 cutover may still be MongoDB-only, and the bridge is what covers that.
-const categoryBridge = require("../services/categoryBridge");
+const categoriesRepo = require("../repositories/categories");
 const scheduler = require("../services/scheduler");
 
 const adminAuth = require("../middleware/adminAuth");
@@ -122,7 +122,7 @@ router.get("/stats", async (req, res) => {
       // Via the bridge (ADR-050). Counts ACTIVE categories only, because
       // ADR-004 made deletion a soft delete - an archived category is gone as
       // far as an admin is concerned, which is what this tile reports.
-      categoryBridge.countCategories(),
+      categoriesRepo.countActive(),
       donations.count({ status: "Approved" }),
     ]);
     res.json({

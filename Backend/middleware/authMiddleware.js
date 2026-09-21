@@ -2,7 +2,10 @@
  * =============================================================================
  * Authenticate a request  (SPEC-3 package 3.2)
  * =============================================================================
- * NO MONGOOSE. The user is resolved through services/userBridge, which reads
+ * NO MONGOOSE. The user is resolved through repositories/users.resolveForAuth,
+ * which since package 3.6 reads MySQL and nothing else - the bridge that used
+ * to fall back to MongoDB is deleted. An id that does not resolve is not a
+ * user. Formerly: services/userBridge, which read
  * MySQL first and falls back to MongoDB for accounts not yet migrated - loudly,
  * because an authorisation decision made from the store we are migrating away
  * from is the single most interesting event in the system during this package
@@ -26,7 +29,8 @@
 const jwt = require("jsonwebtoken");
 const { JWT_SECRET } = require("../config/jwt");
 const { refuse } = require("../utils/respond");
-const { resolveAuthUser } = require("../services/userBridge");
+// 3.6: the bridge is gone. One store, so one lookup.
+const { resolveForAuth } = require("../repositories/users");
 
 // Attach a normalized `req.user` with `id`, `name`, and `role`.
 const authMiddleware = async (req, res, next) => {
@@ -40,7 +44,7 @@ const authMiddleware = async (req, res, next) => {
     const userId = decoded.userId || decoded.id || decoded.user || null;
     if (!userId) return refuse(res, 401, "Invalid token payload");
 
-    const user = await resolveAuthUser(userId);
+    const user = await resolveForAuth(userId);
     if (!user) return refuse(res, 404, "User not found");
 
     // SEC-05, half one: a disabled account is not authenticated.
