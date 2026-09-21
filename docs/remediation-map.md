@@ -4568,6 +4568,64 @@ restored - which is the third thing the sweep is about: a test whose fixture is
 absent proves nothing, quietly.
 
 
+---
+
+## BH1 - THE RETROACTIVE CHANNELS AUDIT
+
+BG4's clause applied backwards to every SEC-08 closure. Five channels: **body,
+status, timing, response size, error-path ordering.**
+
+| Endpoint | Body | Status | Timing | Size | Ordering |
+|---|---|---|---|---|---|
+| `POST /signup` | closed 3.5a | closed | **was 237.7 ms - closed BG1** | clean* | clean |
+| `POST /login` | closed | closed | **was 236.0 ms - closed BG1** | clean | clean |
+| `POST /signup/verify-otp` | closed | closed | **was 240.7 ms - closed BG1** | clean | clean |
+| `POST /signup/resend-otp` | closed | closed | **5.2 ms - accepted BG3** | clean | clean |
+| `POST /login/resend-otp` | closed | closed | **6.2 ms - accepted BG3** | clean | clean |
+| `POST /forgot-password/request` | closed | closed | **6.3 ms - accepted BG3** | clean | clean |
+
+\* `/signup` returns 140 bytes for a known address and 137 for an unknown one.
+The difference is the submitted address echoed back - a value the CALLER chose -
+so it carries nothing the caller did not already know. Compared with the echo
+normalised rather than raw, and the reason is in the test.
+
+### The answer to "expect more than one"
+
+**Only timing was channel-partial.** Response size and error-path ordering are
+clean on all six, including the malformed-request case where a missing password
+is rejected before the account lookup on both branches.
+
+That is a NEGATIVE result from a rule applied systematically, and it is worth
+more than the same conclusion by inspection: SEC-08 was marked closed while
+/login was measurable at 60x, so inspection had already been wrong here once.
+
+---
+
+## BH2 - PRESENCE IS NOT APPLICATION
+
+> **A fix can be correct, in the right file, for the right reason, and still not
+> execute.**
+
+| Instance | Verified by | The property that actually mattered |
+|---|---|---|
+| **PAY-02** | reference-counting an import | runtime model registration |
+| **BG1 / `/signup/verify-otp`** | the fix being present in `verifyPassword` | whether the request REACHES it - the route returns at `if (!pending)` first |
+
+Both times the change was right and inert. Both times **only measurement caught
+it**; in the second, inspection had already reported success.
+
+### The countermeasure
+
+> **An acceptance criterion measures the OUTCOME, never the presence of the
+> change.** Not "the guard is called" but "the forged callback is refused". Not
+> "the import is gone" but "the model is not registered at boot". Not "the
+> equaliser is in the branch" but "the two branches now take the same time".
+
+This is standard for every fix from here, not only timing ones. It is already
+how BH5's guard was accepted - the assertion is that a forged callback leaves
+the donation `Pending`, not that `assertSigningConfigured` appears in the file.
+
+
 ## Counts
 
 | State | Count | Rows |

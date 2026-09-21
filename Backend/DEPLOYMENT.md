@@ -1,3 +1,16 @@
+> **SUPERSEDED — this document describes the MongoDB/Vercel deployment.**
+>
+> The system runs on **MySQL 8.4 via Prisma** and is deployed with Docker
+> Compose. Every `MONGODB_URI` instruction below is wrong, and the MongoDB
+> Atlas guidance describes a datastore this project no longer uses.
+>
+> Use the root `README.md` and `docker-compose.yml`. This file is kept only
+> until the Vercel deployment notes are rewritten, and is not a guide to follow
+> today.
+>
+> Found by BK2's sweep for documents that summarise a decision the code has
+> moved past — the same class as the second `.env.example`.
+
 # Backend Deployment Guide for Vercel
 
 ## Prerequisites

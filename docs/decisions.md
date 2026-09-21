@@ -2794,3 +2794,51 @@ was measuring.
 > **Before trusting a count, ask what produces the thing being counted. If the
 > answer is "the test suite", the count measures the fixtures.**
 
+---
+
+## ADR-061: Apache-2.0, and what it does not protect
+
+**Status:** accepted (BI1)
+**Supersedes:** the "undecided" state in which four artefacts disagreed.
+
+### The decision
+
+`LICENSE` (Apache-2.0 text), `NOTICE`, `Backend/package.json`,
+`Frontend/package.json` and `README.md` now all say **Apache-2.0**.
+
+### Why not copyleft
+
+GPL-3.0's copyleft triggers on CONVEYING. Hosting a modified web application is
+generally not conveying, so GPL would have bound an NGO handing a modified copy
+to a peer while leaving a commercial host free to publish nothing. **It imposes
+the obligation on the party least likely to be the problem.**
+
+AGPL-3.0 closes that through section 13 and was the serious alternative. It was
+rejected on adoption grounds: the goal is small NGOs running their own instance,
+and AGPL is the licence most likely to make a volunteer developer or a donated
+hosting provider back away.
+
+Apache-2.0 additionally grants patent rights explicitly (section 3), which MIT
+and ISC do not.
+
+### WHAT THE LICENCE DOES NOT DO, STATED SO NOBODY ASSUMES OTHERWISE
+
+> **Apache-2.0 does NOT protect the "Powered by KindLedger Donation System"
+> footer. A fork may legally remove it.**
+
+Section 4(d) carries the NOTICE file into derivative works. It says nothing
+about what the application renders at runtime. The footer is an **honour-system
+request**, and it is one by deliberate choice: a clause forbidding its removal
+would make this not open source under the OSI definition.
+
+Recorded because the failure mode is specific and this project has met its shape
+before - a control believed to be doing work it is not (BB4's flag, AU2's
+uncited claims). SPEC-5 section 5.2 requires the same sentence in the component's
+own comment, next to the code, per AI4.
+
+### On the GPL text that was there
+
+Commit `4f3b7ec` added GPL v3 while the repository was private. No public
+distribution occurred under it, so no public grant exists and nothing is
+revoked. This is a first choice, not a relicensing.
+

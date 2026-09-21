@@ -74,9 +74,12 @@ async function post(path, body) {
     headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextIp() },
     body: JSON.stringify(body),
   });
-  await res.text();
+  const text = await res.text();
   const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-  return { status: res.status, elapsedMs };
+  // BH1: every channel a caller can observe, captured together. Body and status
+  // were closed by 3.5a; TIMING was open at 60x while SEC-08 was marked closed,
+  // and RESPONSE SIZE had never been looked at by anyone.
+  return { status: res.status, elapsedMs, body: text, bytes: Buffer.byteLength(text) };
 }
 
 async function signup(email) {
@@ -487,4 +490,126 @@ test('BG3: /forgot-password/request - sha256 scale, measured and decided', async
 
   const r = decide('/forgot-password/request', hot, cold);
   assert.ok(r.separation < 50, 'sha256 scale, not bcrypt scale');
+});
+
+// =============================================================================
+// BH1 - THE RETROACTIVE CHANNELS CHECK
+// =============================================================================
+// BG4 added a clause to the citation rule: a claim that something "adds no
+// oracle" must name which CHANNELS were checked, because body, status, timing
+// and response size are separate channels and a claim covering one is not a
+// claim covering the others.
+//
+// SEC-08 was marked CLOSED on the body and the status. /login was measurable at
+// 60x at the time. So the retroactive question is: what else was never looked
+// at? RESPONSE SIZE is the channel nobody in this project has checked once.
+//
+// It is cheap and it is not theoretical: a body that differs by a single
+// character - a name echoed back, a pluralisation, a trailing field present on
+// one branch - is visible through TLS, where the content is not.
+// =============================================================================
+
+/** Every SEC-08 endpoint, with a known-address case and an unknown-address one. */
+async function channelPair(label, path, knownBody, unknownBody) {
+  const known = await post(path, knownBody);
+  const unknown = await post(path, unknownBody);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `\n  BH1 ${label}\n` +
+      `    known   : status ${known.status}  ${String(known.bytes).padStart(4)} bytes\n` +
+      `    unknown : status ${unknown.status}  ${String(unknown.bytes).padStart(4)} bytes`
+  );
+
+  return { known, unknown };
+}
+
+test('BH1: RESPONSE SIZE - the channel nobody had checked', async () => {
+  const known = uniqEmail('bh1-known');
+  await users.create({ name: 'ZZZ BH1', email: known, password: PASSWORD, isVerified: true });
+
+  const pending = uniqEmail('bh1-pending');
+  await post('/api/auth/signup', { name: 'ZZZ BH1 Pending', email: pending, password: PASSWORD });
+
+  const WRONG = 'WrongPassword9!';
+  const cases = [
+    await channelPair(
+      'POST /signup',
+      '/api/auth/signup',
+      { name: 'ZZZ BH1', email: known, password: PASSWORD },
+      { name: 'ZZZ BH1', email: uniqEmail('bh1-u1'), password: PASSWORD }
+    ),
+    await channelPair(
+      'POST /login',
+      '/api/auth/login',
+      { email: known, password: WRONG },
+      { email: uniqEmail('bh1-u2'), password: WRONG }
+    ),
+    await channelPair(
+      'POST /signup/verify-otp',
+      '/api/auth/signup/verify-otp',
+      { email: pending, otp: '000000', password: WRONG },
+      { email: uniqEmail('bh1-u3'), otp: '000000', password: WRONG }
+    ),
+    await channelPair(
+      'POST /signup/resend-otp',
+      '/api/auth/signup/resend-otp',
+      { email: pending },
+      { email: uniqEmail('bh1-u4') }
+    ),
+    await channelPair(
+      'POST /login/resend-otp',
+      '/api/auth/login/resend-otp',
+      { email: known },
+      { email: uniqEmail('bh1-u5') }
+    ),
+    await channelPair(
+      'POST /forgot-password/request',
+      '/api/auth/forgot-password/request',
+      { email: known },
+      { email: uniqEmail('bh1-u6') }
+    ),
+  ];
+
+  for (const { known: k, unknown: u } of cases) {
+    // STATUS - closed by 3.5a, re-asserted here because a channels audit that
+    // only checks the new channel is the same partial claim one step along.
+    assert.equal(k.status, u.status, 'STATUS channel: the two branches must agree');
+
+    // RESPONSE SIZE. The bodies are generic strings, so any difference is a
+    // difference in CONTENT, and content that varies with account existence is
+    // an oracle whatever the status says.
+    //
+    // /signup echoes the submitted address, so its two bodies differ by the
+    // length of an address the CALLER CHOSE - which tells the caller nothing
+    // they did not already know. That is why this compares the body with the
+    // echoed address removed rather than raw bytes.
+    const strip = (b) => b.replace(/"email":"[^"]*"/, '"email":"<echoed>"');
+    assert.equal(
+      strip(k.body),
+      strip(u.body),
+      'RESPONSE SIZE / BODY channel: the two branches returned different content'
+    );
+  }
+});
+
+test('BH1: ERROR-PATH ORDERING does not leak through a malformed request', async () => {
+  // The fifth channel. If a missing field is rejected BEFORE the account lookup
+  // on one branch and after it on another, the order of checks is itself an
+  // oracle - the caller learns which check ran by which error came back.
+  const known = uniqEmail('bh1-order-known');
+  await users.create({ name: 'ZZZ BH1', email: known, password: PASSWORD, isVerified: true });
+
+  // No password at all, against a KNOWN and an UNKNOWN address.
+  const k = await post('/api/auth/login', { email: known });
+  const u = await post('/api/auth/login', { email: uniqEmail('bh1-order-u') });
+
+  assert.equal(k.status, u.status, 'a malformed request is refused identically either way');
+  assert.equal(k.body, u.body, 'and with the same body - the validation runs before the lookup');
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `\n  BH1 ERROR-PATH ORDERING: missing password -> ${k.status} ` +
+      `identical for known and unknown addresses\n`
+  );
 });
