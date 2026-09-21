@@ -264,6 +264,13 @@ jobs:
         working-directory: Backend
         run: npm run test:password-timing
 
+      # BJ4. No tracked file a self-hoster deploys may carry a working
+      # credential. `.env.example` being clean is one file staying
+      # well-written; this is the control. Needs no services.
+      - name: No committed credentials (BJ4)
+        working-directory: Backend
+        run: npm run test:no-secrets
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------

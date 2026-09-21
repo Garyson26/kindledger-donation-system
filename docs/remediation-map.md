@@ -4360,6 +4360,138 @@ assert that no tracked file contains a non-empty credential value, rather than
 relying on `.env.example` continuing to be written carefully.
 
 
+---
+
+## ENV-01 (HIGH) - A BARE `${VAR}` MADE SEC-01 A PUBLIC CHECK
+
+**Severity: HIGH. Fails OPEN, and fails SILENTLY.**
+
+`docker-compose.yml` declared `PAYU_MERCHANT_SALT` as a bare `${VAR}` - no
+default, no `:?` - and it is absent from `.env`. A plain `docker compose up`
+therefore started a stack reporting four healthy services in which
+
+    verifyHash -> sha512("undefined|success|||...")
+
+is a value **anyone can compute**. Every forged "payment succeeded" callback is
+accepted and the donation marked Paid.
+
+**The logs show a hash verified and matched**, because one was. There is no
+error, no warning, and no symptom until somebody reconciles against the bank.
+
+### This is the self-hosting story for the whole project
+
+An NGO clones the repository, copies the compose file, misses one variable, and
+accepts forged payments with nothing in the logs to show it. That is not a
+misconfiguration they could reasonably detect - it is the system working exactly
+as written.
+
+**Fixed** by `config/payu.js assertSigningConfigured()`, which refuses at the
+point the secret is USED rather than at boot. Proved by outcome: a callback
+forged with a blank salt leaves the donation `Pending`
+(`payment-callbacks.test.js`, and the forging helper is parameterised so the
+seventeen SEC-01 tests prove its formula).
+
+### THE RULE, FOR PHASE 6
+
+> **No security-critical variable may be declared as a bare `${VAR}`. Either
+> `:?` so compose refuses to start, or a runtime guard at the decision point.**
+
+### Every variable in `docker-compose.yml`, audited on that basis
+
+| Variable | Declared | Security-critical? | Behaviour when absent |
+|---|---|---|---|
+| `PAYU_MERCHANT_SALT` | bare | **YES - the signing secret** | was FAIL-OPEN; now refused at `verifyHash`/`generateHash` |
+| `PAYU_MERCHANT_KEY` | bare | yes, as an identifier | now refused for absence (not length - see BJ2) |
+| `JWT_SECRET` | `:?` | **YES** | compose refuses; `config/jwt.js` also throws |
+| `ADMIN_CREATION_KEY` | `:?` | **YES** | compose refuses |
+| `DATABASE_URL` | `:?` | yes | compose refuses |
+| `MYSQL_PASSWORD` / `MYSQL_ROOT_PASSWORD` | `:?` | yes | compose refuses (the bare second occurrence is the healthcheck, covered by the same value) |
+| `ALLOWED_ORIGINS` | bare | **yes - CORS** | **FAILS CLOSED, checked.** Empty list, so every cross-origin request is rejected. Correct direction, and worth having confirmed rather than assumed |
+| `HEALTH_DIAGNOSTIC_SECRET` | `:-` empty | yes | the diagnostic form is unavailable - fails closed |
+| `EMAIL_PASSWORD`, `EMAIL_USER`, `SMTP_HOST`, `EMAIL_SERVICE` | bare | no, but delivery-critical | mail fails with EAUTH; OTP and reset codes are not delivered. Fails closed, loudly in logs, and the endpoints are fire-and-forget so no oracle |
+| `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL`, `FRONTEND_*_URL` | bare | no | PayU redirects nowhere; the flow breaks visibly |
+| `JOB_*`, `SCHEDULER_ENABLED` | `:-false` | yes, DESTRUCTIVE | default OFF (AT1) - the right direction |
+| `MONGODB_URI` | `:-` empty | no | request-path Mongoose is removed in this package |
+| `NODE_ENV`, `REDIS_URL`, `PORT`, `RATE_LIMIT_PREFIX`, `PRISMA_CONNECTION_LIMIT`, `SMTP_PORT/SECURE`, `PAYU_BASE_URL`, `MYSQL_USER/DATABASE`, `HTTP(S)_PORT` | `:-` | no | sensible defaults |
+
+**One fail-open security-critical variable, and it was the payment one.**
+
+---
+
+## BJ2 - A THRESHOLD I INVENTED, THREE STEPS AFTER ARGUING AGAINST ONE
+
+BB1 chose "share at least one identifier" over a match-rate threshold, with the
+reason written down: *a threshold has to be chosen, argued about and eventually
+relaxed.*
+
+Three steps later I required **16+ characters for the PayU merchant key**. PayU
+ships `gtKFFx`. The suite's `TESTMERCHANTKEY` is fifteen, and sixteen tests
+failed on the first run.
+
+### It was also the wrong CONTROL, not merely the wrong number
+
+The two values need different properties, and conflating them is the actual
+error:
+
+| Value | What it is | What it needs | Guard |
+|---|---|---|---|
+| `PAYU_MERCHANT_SALT` | a SECRET - never leaves the server, and the only thing making a callback unforgeable | **entropy** | present, and long enough not to be `test` / `salt` / `changeme` |
+| `PAYU_MERCHANT_KEY` | an IDENTIFIER - travels in the payment form, the customer's browser sees it | **correctness** - it must be the right merchant | present. Length says nothing about it, and PayU's own is six characters |
+
+A length floor on an identifier is not a weak control. It is a control for a
+property that value does not have.
+
+### Against the AZ3 tally
+
+AZ3 was three functions. BA3 was three lines, same session. BG4 was zero
+distance - the author knew the class. **This is the next step along: reasoning
+failing to reach the author's own NEXT DECISION.**
+
+There is nothing left to shorten, and the countermeasure has not changed because
+no other one has worked: **enumerate and state at the point of change.** Writing
+"what property does this value need?" before writing the check would have caught
+it; writing it afterwards did.
+
+---
+
+## BJ4 - "NO TRACKED FILE CARRIES A WORKING CREDENTIAL", AS A CHECK
+
+`.env.example` being clean is one file staying well-written. The control is
+`test/no-committed-secrets.test.js`, in CI, which reads what git tracks.
+
+**Scope**: env templates, compose files, application source, schema, workflows -
+everything a self-hoster deploys. `Backend/test/` is excluded **with a property
+rather than by a blanket skip**: its fixtures are credentials for nothing.
+
+It proves itself three ways, because a scan is the easiest thing in the world to
+write vacuously:
+
+1. It fires on a planted `JWT_SECRET=...` (injection, AV2).
+2. It does NOT fire on `<placeholder>`, `${REFERENCE}`, `CHANGEME` or the
+   `ci-only-*` values the workflows use for a database that lives ninety seconds.
+3. **It asserts it actually matched files.** A scope pattern that silently stops
+   matching would report a clean sweep over nothing - the BH3 shape, applied to
+   the check itself.
+
+Current result: **clean.** The `ci-only-*` workflow values are deliberate and
+named as such; pushing them into repository settings would make them harder to
+read and no safer.
+
+### And a second env template nobody had looked at
+
+`Backend/.env.example` exists alongside the root one. It carries no live
+credentials - every secret is a `<placeholder>` - but it is **stale and
+actively misleading**: it documents `MONGODB_URI` as the datastore and contains
+no `DATABASE_URL` and no MySQL variables at all.
+
+Two files claim to be the environment template and disagree, and the one a
+self-hoster might follow points at the store this project has spent six packages
+leaving. It is removed with the request-path Mongoose in this package.
+
+I found it only because BJ4's scan enumerated tracked files. Checking "the
+`.env.example`" by name would not have - AY2 again.
+
+
 ## Counts
 
 | State | Count | Rows |
