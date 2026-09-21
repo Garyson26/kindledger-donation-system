@@ -116,6 +116,10 @@ function optionalAuth(req, res, next) {
 // Helper function to generate PayU hash
 function generateHash(data) {
   // Formula: sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
+  // BH5: no salt, no hash. Signing a request with an empty salt produces a
+  // value PayU will reject and we would have presented as authentic.
+  payuConfig.assertSigningConfigured();
+
   const hashString = `${payuConfig.MERCHANT_KEY}|${data.txnid}|${data.amount}|${data.productinfo}|${data.firstname}|${data.email}|${data.udf1 || ''}|${data.udf2 || ''}|${data.udf3 || ''}|${data.udf4 || ''}|${data.udf5 || ''}||||||${payuConfig.MERCHANT_SALT}`;
   return crypto.createHash("sha512").update(hashString).digest("hex");
 }
@@ -153,6 +157,12 @@ function generateHash(data) {
 // attacker-mutable, because the payload arrives via the donor's browser.
 function verifyHash(data) {
   // Response formula: sha512(SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key)
+  // BH5: THE IMPORTANT ONE. Without the salt this computes a hash over a string
+  // an attacker can build themselves, so a forged callback verifies and the
+  // donation is marked PAID. Failing closed here means the callback is refused;
+  // a missing salt must never read as a passing check.
+  payuConfig.assertSigningConfigured();
+
   const hashString = `${payuConfig.MERCHANT_SALT}|${data.status}||||||${data.udf5 || ''}|${data.udf4 || ''}|${data.udf3 || ''}|${data.udf2 || ''}|${data.udf1 || ''}|${data.email}|${data.firstname}|${data.productinfo}|${data.amount}|${data.txnid}|${payuConfig.MERCHANT_KEY}`;
   const expected = crypto.createHash("sha512").update(hashString).digest("hex");
   const received = data.hash || '';

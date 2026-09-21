@@ -4294,6 +4294,72 @@ body*, and writing those three words at the time would have left the clock
 visibly open instead of implicitly so (BE2).
 
 
+---
+
+## BH5 - A MISSING ENVIRONMENT VARIABLE SILENTLY DISABLES SEC-01
+
+### (a) The diagnosis was wrong and the consequence was worse
+
+The symptom was that `docker compose` warns about a dozen blank variables. The
+supposed cause - compose not finding the env file - is **not what is happening**.
+`.env` is found; it holds ten keys; the warned variables **are simply not in it**.
+`--env-file` would change nothing.
+
+That matters because the fix is different, and because one of the absent
+variables is `PAYU_MERCHANT_SALT`.
+
+> **`docker-compose.yml` declares `PAYU_MERCHANT_SALT` as a bare `${VAR}` - no
+> default, no `:?` - and it is absent from `.env`. So a plain `docker compose up`
+> produces a stack that reports HEALTHY while `verifyHash` computes
+> `sha512("undefined|success|...")`, which anybody can compute too.**
+
+Every callback endpoint would accept a forged "payment succeeded" and mark a
+donation PAID. Nothing looks wrong in the logs, because from the code's point of
+view nothing IS wrong: it verified a hash, and the hash matched.
+
+**This is not a weaker check. It is a public one.**
+
+### The sixth AY2 adjacency, and the control was in the same directory
+
+`config/jwt.js` refuses to load at all without a 32-character `JWT_SECRET`.
+`config/payu.js`, sitting beside it, read an equally load-bearing secret into
+`undefined` and said nothing.
+
+### The fix refuses at the SECURITY DECISION, not at boot
+
+`assertSigningConfigured()` throws inside `generateHash` and `verifyHash`. A
+require-time throw like jwt.js's would stop the application starting for work
+that never touches payments - including the harnesses that boot the app to
+measure auth timing - and that creates pressure to invent a dummy salt, which is
+how a guard becomes a formality. `docker-compose.yml` keeps `${VAR}` with the
+reasoning written next to it.
+
+### And a threshold I invented rejected a legitimate value immediately
+
+My first version required 16+ characters for BOTH the salt and the key. It
+rejected `TESTMERCHANTKEY` - fifteen - and failed sixteen tests on first run.
+
+**The merchant KEY is an identifier, not a secret.** It travels in the payment
+form, the customer's browser sees it, and PayU's own test key is `gtKFFx`.
+Requiring length of it is a category error.
+
+That is BB1's argument - "a threshold is a number you choose and then have to
+relax" - which I had written three steps earlier and then did not apply.
+
+### (b) `.env.example` - checked, and CLEAN
+
+Reported because nothing is an answer. Every secret is blank
+(`MYSQL_ROOT_PASSWORD=`, `MYSQL_PASSWORD=`, `JWT_SECRET=`, `ADMIN_CREATION_KEY=`,
+`PAYU_MERCHANT_SALT=`, `EMAIL_PASSWORD=`, `HEALTH_DIAGNOSTIC_SECRET=`), and
+`DATABASE_URL` carries a visible `CHANGEME` rather than a working password. A
+self-hoster copying it inherits nothing usable.
+
+**For Phase 6's publication gate:** the local `.env` holds `klpass` / `rootpw`.
+Those are fine locally and must never become defaults anywhere - the gate should
+assert that no tracked file contains a non-empty credential value, rather than
+relying on `.env.example` continuing to be written carefully.
+
+
 ## Counts
 
 | State | Count | Rows |

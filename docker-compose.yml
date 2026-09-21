@@ -113,6 +113,22 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       ADMIN_CREATION_KEY: ${ADMIN_CREATION_KEY:?set ADMIN_CREATION_KEY in .env}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      # BH5: DECLARED, NOT REQUIRED, AND THAT IS DELIBERATE.
+      #
+      # `:?` here would stop `docker compose up` without payment credentials,
+      # which breaks AZ2's acceptance criterion for this package - four healthy
+      # services from a plain `up` - and blocks every developer working on
+      # something that is not payments.
+      #
+      # The refusal lives where the secret is USED instead:
+      # config/payu.js assertSigningConfigured() throws rather than computing a
+      # hash anyone could forge. That fails closed, cannot be bypassed by how
+      # the process was started, and does not create pressure to invent a dummy
+      # salt just to get the stack running.
+      #
+      # WITHOUT THAT GUARD this stack starts HEALTHY with no payment
+      # authenticity at all: the variable is absent from .env, so the response
+      # hash is computed over a string an attacker can build (SEC-01).
       PAYU_MERCHANT_KEY: ${PAYU_MERCHANT_KEY}
       PAYU_MERCHANT_SALT: ${PAYU_MERCHANT_SALT}
       PAYU_BASE_URL: ${PAYU_BASE_URL:-https://test.payu.in}
