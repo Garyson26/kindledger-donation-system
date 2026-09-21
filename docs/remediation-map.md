@@ -4744,6 +4744,122 @@ database. An override that silently broke the client would show there.
 > a major version and closed nothing.**
 
 
+---
+
+## BN1 - A GUARD ON A REAL DEPENDENCY IS VOID WHEN A STUB ANSWERS FOR IT
+
+> **The guard was correct, and it never ran.**
+
+`assertSourceMatchesMySQL()` consults the real MongoDB before `null-minted`
+writes anything. BB1's tests passed a STUBBED `Category` whose `find` returned a
+fixed list - so inside those tests the stub WAS the database, the guard's
+subject was never consulted, and every row the suite did not create looked
+absent and was nulled.
+
+**Second time a control was bypassed rather than wrong.** PAY-02's import check
+was correct and measured the wrong property; this guard is correct and was not
+in the path. Both are AV2/BH2: *the property verified was not the property that
+mattered.*
+
+### Added to the standing rules
+
+> **Any test that stubs a datastore a guard consults must either resolve against
+> the real store, or assert that the guard was reached.**
+
+`sourceWith()` now resolves foreign ids against the real collection and invents
+answers only for its own fixtures. The two `countDocuments: 0` stubs go further
+and **throw from `find()`** - if the emptiness guard ever stops refusing first,
+that says so loudly instead of silently reporting every row as minted.
+
+### THE ONE PLACE THE RULE IS BROKEN ON PURPOSE
+
+Test 7 needs a source that resolves NOTHING, which a truthful stub cannot
+produce once the database holds real migrated rows. Those two needs are in
+genuine tension, and the resolution is to separate them rather than weaken the
+truthful one:
+
+- the lying stub lives in that test alone;
+- its safety argument is **specific** - that run must REFUSE BEFORE WRITING, and
+  that is the property under test;
+- and the test asserts the foreign rows survived, so a lying stub cannot destroy
+  one without the test reporting it.
+
+### The audit BN1 asked for
+
+| Suite | Verdict |
+|---|---|
+| `null-minted.test.js` | **the only suite that fabricates a datastore.** All four stubs accounted for above |
+| `etl.test.js` | passes the REAL Mongoose models (`{ User, Category, Donation, PendingSignup }`). No bypass |
+| `categories-characterisation.test.js` | same - real models handed to the real ETL |
+| `data-layer.test.js` | inspects `require.cache` to assert Mongoose is not loaded. A read, not a stub |
+| every other suite | no fakes. There is no mocking library in this project at all |
+
+**One instance, already fixed.** Reported as a "nothing" answer for the rest,
+because an audit that lists only hits cannot be told from one that stopped early.
+
+---
+
+## A LOCAL DATABASE DOCUMENTED AS EPHEMERAL WAS USED AS A SOURCE OF TRUTH
+
+`docker-compose.legacy-mongo.yml` says of the `mongo` service:
+
+> "No volume, deliberately. State that survives a restart would start looking
+> like a development database people rely on."
+
+**It started looking like one anyway.** Package 3.6 treated `kindledger_legacy`
+as AE1-a's oracle, and `null-minted.test.js`'s guard consults it before deciding
+what to destroy. A `docker compose down` then removed the container and every
+document in it, exactly as the comment promised.
+
+The consequence is the finding AE1-a is *about*, demonstrated on the development
+stack: **the restored legacy_id values pointed at nothing, so minted and genuine
+became locally indistinguishable.** The only reason the restored ids survived
+the next test run is that the guard refused.
+
+> **A comment saying a thing is ephemeral does not stop people depending on it.
+> A cheap way to rebuild it does.**
+
+`scripts/rebuildLegacyMongo.js` reconstructs the collection from MySQL's own
+legacy_id values - the ids are what the oracle needs, and every consumer asks
+only whether a document with that id EXISTS. Idempotent, never updates an
+existing document, refuses a non-local target, and writes a deliberately
+unusable password hash so the fixture can never authenticate anyone.
+
+It restores the oracle and AE3 part 2. It does not restore the original
+documents, and nothing needs them.
+
+---
+
+## BN3 - THE QUEUED FIX WAS ITSELF AN INHERITED CLAIM
+
+U-6's instruction was "bump Prisma". It assumed **a bump fixes an advisory**,
+without checking the vulnerable range - and the range covers all of v7, so the
+bump would have changed a major version of the data layer and closed nothing
+while looking like remediation.
+
+Correct-looking, repeated, load-bearing: the signature holds. The generator is
+not the age of the claim or who wrote it - it is a confident sentence written
+near a decision, and this one was in the work order itself.
+
+> **An advisory names a vulnerable PACKAGE and a vulnerable RANGE. "Upgrade the
+> thing that depends on it" is a different claim and needs its own check.**
+
+---
+
+## BN4 - WHAT A NEGATIVE RESULT IS WORTH
+
+BH1 checked five channels across six endpoints and found **only timing**
+partial. Thirty of thirty-five cells clean.
+
+That is evidence, and the same conclusion reached by inspection would not have
+been - **inspection had already marked SEC-08 closed while /login measured 60x.**
+The value is not in the cells that were clean; it is that the rule was applied
+to all of them by something other than judgement about where to look.
+
+The same holds for BJ1's compose audit: 35 of 36 variables correct, and the one
+that was not was the payment secret.
+
+
 ## Counts
 
 | State | Count | Rows |
