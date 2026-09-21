@@ -39,6 +39,7 @@ const jwt = require("jsonwebtoken");
 const { refuse, failed } = require("../utils/respond");
 const authMiddleware = require("../middleware/authMiddleware");
 const { JWT_SECRET } = require("../config/jwt");
+const { burnEquivalentBcrypt } = require("../config/passwordTiming");
 const {
   sendVerificationEmail,
   sendLoginOTP,
@@ -201,6 +202,17 @@ router.post("/signup", authLimiter, async (req, res) => {
     const existing = await users.findByEmail(email);
 
     if (existing) {
+      // BG1: SPEND THE BCRYPT THIS BRANCH DOES NOT NEED.
+      //
+      // The other branch hashes the password at cost 12 before writing the
+      // pending row. This one neither hashes nor writes, and that difference
+      // was 237.7 ms - measured, with distributions that do not overlap, so a
+      // single request told an attacker whether the address was registered.
+      //
+      // Deliberately AWAITED and deliberately before the notice: the cost has
+      // to land inside the request, which is the whole mechanism.
+      await burnEquivalentBcrypt(password);
+
       sendSignupAttemptNotice(email, existing.name).catch((e) =>
         console.error("[auth] signup-attempt notice failed:", e && e.message)
       );
@@ -251,7 +263,21 @@ router.post("/signup/verify-otp", authLimiter, async (req, res) => {
     // The attempt cap still runs; it simply does not announce itself. A real
     // user who exhausts it requests a new code and it works.
     const pending = await pendingSignups.findByEmail(email);
-    if (!pending) return refuse(res, 400, "Invalid OTP");
+    if (!pending) {
+      // BG1, AND THIS IS THE LINE MY OWN ENUMERATION MISSED.
+      //
+      // I read the `pendingSignups.verifyPassword` call below, concluded the
+      // leak was the repository returning false without reaching bcrypt, and
+      // fixed it there. THE ROUTE RETURNS HERE FIRST, so that fix never ran on
+      // this path and the 240 ms separation was unchanged. Re-measuring is what
+      // caught it - inspection had already said it was fixed.
+      //
+      // That is the whole argument for measurement as the acceptance criterion:
+      // I was looking at the right endpoint, for the right reason, with the
+      // right fix, and still fixed a line the request never reaches.
+      await burnEquivalentBcrypt(password);
+      return refuse(res, 400, "Invalid OTP");
+    }
 
     // =========================================================================
     // SIGNUP-01 - THE CONTROL THAT BREAKS PRE-REGISTRATION TAKEOVER
@@ -279,9 +305,16 @@ router.post("/signup/verify-otp", authLimiter, async (req, res) => {
     // signup (see above) - the precedent was in this file and the strictly more
     // dangerous endpoint did not have it.
     //
-    // ANSWERS "Invalid OTP" like every other failure here, so it adds no oracle:
-    // a caller cannot learn whether the address has a signup in flight, nor
-    // whether their password guess was right.
+    // ANSWERS "Invalid OTP" like every other failure here, so it adds no oracle
+    // IN THE BODY OR THE STATUS: a caller cannot learn whether the address has
+    // a signup in flight, nor whether their password guess was right.
+    //
+    // THE ORIGINAL OF THIS COMMENT SAID "adds no oracle" FLATLY, AND WAS WRONG
+    // (BG4). It was true of the body and false of the CLOCK - 240.7 ms of
+    // separation, because `verifyPassword` returned false without reaching
+    // bcrypt when there was no pending row. Body, status and timing are
+    // SEPARATE CHANNELS, and a claim covering one is not a claim covering the
+    // others. Closed in the repository by BG1; the claim now names its channels.
     if (!password || !(await pendingSignups.verifyPassword(email, password))) {
       await pendingSignups.incrementOtpAttempts(email);
       return refuse(res, 400, "Invalid OTP");
@@ -366,13 +399,23 @@ router.post("/login", authLimiter, async (req, res) => {
     }
 
     const user = await users.findByEmail(email);
+
     // SEC-08, and the shape that must not change: an unknown address and a
     // wrong password answer IDENTICALLY. The natural repository implementation
     // returns null for one and false for the other, and reporting those
     // separately reads like better error handling - see the warning on
     // repositories/users.verifyPassword.
-    if (!user) return refuse(res, 400, "Invalid credentials");
-    if (!(await users.verifyPassword(user.id, password))) {
+    //
+    // CHANGED BY BG1, AND THE OLD SHAPE WAS `if (!user) return refuse(...)`.
+    // That answered in 4 ms where a known address took 240, so the identical
+    // bodies were decorating a 60x timing oracle on the canonical enumeration
+    // endpoint. Passing a null id is how this route says "no account here", and
+    // the repository spends the same bcrypt either way.
+    //
+    // ONE EXPRESSION, NOT TWO BRANCHES. Written as `user ? ... : ...` there
+    // would be a branch for somebody to shortcut later; written like this the
+    // work is unconditional.
+    if (!(await users.verifyPassword(user ? user.id : null, password))) {
       return refuse(res, 400, "Invalid credentials");
     }
 

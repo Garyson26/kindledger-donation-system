@@ -177,31 +177,37 @@ test('BB3: the two /signup branches are TIMED, and the number is recorded', asyn
   assert.ok(mUnknown > 0 && mKnown > 0, 'both branches were actually exercised');
 
   // =========================================================================
-  // THE PIN. This asserts a KNOWN DEFECT, on the BB2 model.
+  // FLIPPED BY BG1. This asserted a DEFECT; it now asserts the CLOSURE.
   // =========================================================================
-  // bcrypt at cost 12 is deliberately expensive - SEC-18 - and the whole point
-  // of the cost factor is that it cannot be made cheap. So the separation is
-  // not an accident of implementation that a tidy-up removes; it is the direct
-  // consequence of a control the system wants.
+  // BEFORE: 242.4 ms separation, 51.9x, distributions not overlapping - one
+  //         request classified the address.
+  // AFTER:  the existing-address branch spends the same bcrypt (cost 12)
+  //         against a throwaway hash, so both paths pay for the hash.
   //
-  // The threshold is far below the measured value so the test is not a
-  // benchmark. It answers one question: is the difference LARGER THAN NOISE?
+  // The test is kept and inverted rather than deleted, because the property to
+  // defend now is "these stay equal" - and the thing most likely to break it is
+  // somebody removing work whose result is discarded.
   assert.ok(
-    separation > 20,
-    `PINNED DEFECT: the branches are separable by timing (${separation.toFixed(1)} ms). ` +
-      'If this now FAILS, the separation has closed - constant-time signup, or a ' +
-      'deferred hash - so close the residual audit row and delete this test ' +
-      'rather than lowering the threshold.'
+    separation < 60,
+    `REGRESSION: the /signup branches are separable again by ${separation.toFixed(1)} ms. ` +
+      'config/passwordTiming.burnEquivalentBcrypt exists to stop this. Check that ' +
+      'the existing-address branch still awaits it, and that BCRYPT_COST has not ' +
+      'drifted between the real hash and the dummy one.'
   );
 
-  // And it is not one unlucky sample: the SLOWEST known-address response is
-  // still faster than the FASTEST unknown one. That is total separation, which
-  // means a single request classifies the address.
+  // THE RESIDUAL, ASSERTED RATHER THAN NOTED (BA3).
+  //
+  // The unknown-address branch also WRITES the pending row; the known branch
+  // does not. That is a few milliseconds and it is not equalised, deliberately:
+  // equalising it means performing a dummy database write on behalf of an
+  // address that does not exist, which hands an unauthenticated caller unbounded
+  // writes - a worse problem than the one it closes.
+  //
+  // So a small separation REMAINS here, and this asserts it stays small rather
+  // than pretending it is zero.
   assert.ok(
-    Math.max(...known) < Math.min(...unknown),
-    'TOTAL separation: the distributions do not overlap at all, so ONE request ' +
-      'is enough to tell a registered address from an unregistered one. This is ' +
-      'the strongest form the finding can take, and it is the one that holds.'
+    separation < 60,
+    'the residual is the pending-row WRITE, not the hash - see the comment above'
   );
 });
 
@@ -258,18 +264,25 @@ test('BE1: /login separates a KNOWN address from an UNKNOWN one by timing', asyn
       `    ratio                                         : ${(mKnown / mUnknown).toFixed(2)}x\n`
   );
 
+  // FLIPPED BY BG1. Was 236.0 ms and 60.0x with no overlap; the route now passes
+  // a null id to `users.verifyPassword`, which spends the same bcrypt when there
+  // is no row. This is the canonical enumeration endpoint, so the threshold is
+  // the tightest of the three.
   assert.ok(
-    separation > 20,
-    `PINNED DEFECT: /login is separable by timing (${separation.toFixed(1)} ms), so an ` +
+    Math.abs(separation) < 40,
+    `REGRESSION: /login is separable by ${separation.toFixed(1)} ms again, so an ` +
       'unauthenticated caller can enumerate registered addresses one request at a ' +
-      'time. If this FAILS the oracle has been closed - update the map and delete ' +
-      'this test rather than lowering the threshold.'
+      'time. The fix is `users.verifyPassword(user ? user.id : null, password)` - ' +
+      'check nobody reintroduced an `if (!user) return` ahead of it.'
   );
+
+  // NO TOTAL SEPARATION. The strongest form the oracle can take is that the
+  // distributions do not overlap; asserting they DO overlap is the direct
+  // negation of what was measured before the fix.
   assert.ok(
-    Math.max(...unknownTimes) < Math.min(...knownTimes),
-    'TOTAL separation on /login: the distributions do not overlap, so ONE request ' +
-      'decides. This is the canonical enumeration endpoint and the oracle is the ' +
-      'same size as /signup - which was measured first only because it was noticed first.'
+    Math.min(...knownTimes) <= Math.max(...unknownTimes),
+    'the distributions must OVERLAP now - if they separate cleanly again, one ' +
+      'request decides and the oracle is back whatever the medians say'
   );
 });
 
@@ -317,10 +330,161 @@ test('BE1: /signup/verify-otp leaks whether a signup is IN FLIGHT, contradicting
       `    SEPARATION                       : ${(mWith - mWithout).toFixed(1)} ms\n`
   );
 
+  // FLIPPED BY BG1 - AND THIS ONE TOOK TWO ATTEMPTS.
+  //
+  // The first fix equalised `pendingSignups.verifyPassword`, which was the line
+  // the comment pointed at. The separation did not move, because the ROUTE
+  // returns at `if (!pending)` before that function is ever called. Inspection
+  // said fixed; the measurement said 234.1 ms.
+  //
+  // That is the argument for measurement as the acceptance criterion, made by
+  // the work rather than asserted about it.
   assert.ok(
-    mWith - mWithout > 20,
-    `PINNED DEFECT: the endpoint's own comment claims it adds no oracle. It adds ` +
-      `a ${(mWith - mWithout).toFixed(1)} ms one. Fix the code or fix the comment; ` +
-      'do not lower this threshold.'
+    Math.abs(mWith - mWithout) < 40,
+    `REGRESSION: whether a signup is IN FLIGHT is observable again ` +
+      `(${(mWith - mWithout).toFixed(1)} ms). Both the early return at ` +
+      '`if (!pending)` and the repository must spend the bcrypt.'
   );
+});
+
+// =============================================================================
+// BG3 - THE sha256-SCALE ENDPOINTS: measured, then decided
+// =============================================================================
+// Three endpoints have the same SHAPE at a different SCALE: one branch does a
+// sha256 hash and a single UPDATE, the sibling does nothing.
+//
+//   /signup/resend-otp        pendingSignups.setOtp   (sha256 + UPDATE)
+//   /login/resend-otp         users.setLoginOtp       (sha256 + UPDATE)
+//   /forgot-password/request  users.setResetCode      (sha256 + UPDATE)
+//
+// MY ENUMERATION HAD /signup/resend-otp IN THE WRONG CLASS. I recorded it as
+// "structurally identical to /signup/verify-otp, bcrypt-sized", from a grep hit
+// on `pendingSignups.verifyPassword` that is actually inside `/login`. It does
+// not call verifyPassword at all. Measuring is what corrected it - the same
+// reason BG1 said to measure rather than assume.
+//
+// "Real but small" with no number is exactly the state BB3 was commissioned to
+// end, so each of these gets a number and a verdict.
+//
+// MORE SAMPLES THAN THE BCRYPT CASES. A 240 ms separation is visible in twelve
+// samples. A separation of a few milliseconds is the same size as the noise, so
+// deciding it needs enough samples for the medians to be stable.
+// =============================================================================
+
+const SHA_SAMPLES = 40;
+
+/**
+ * The question is NOT "do the medians differ" - they will, by some amount, in
+ * any two sets of measurements. It is whether the difference is usable as an
+ * oracle: can a caller decide which branch ran, from timings they can obtain?
+ *
+ * The strongest usable form is TOTAL separation, as all three bcrypt cases
+ * have. Short of that, the honest comparison is the gap between the medians
+ * against the SPREAD of each sample - if the distributions interleave, a single
+ * request decides nothing and an attacker needs many, per address, through a
+ * rate limiter.
+ */
+function decide(label, hot, cold) {
+  const mHot = median(hot);
+  const mCold = median(cold);
+  const separation = mHot - mCold;
+  const overlap = Math.min(...hot) <= Math.max(...cold);
+  const spread = Math.max(...cold) - Math.min(...cold);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `\n  BG3 ${label} (${SHA_SAMPLES} samples each, medians):\n` +
+      `    branch that WORKS (sha256 + UPDATE): ${mHot.toFixed(2)} ms\n` +
+      `    branch that does NOTHING           : ${mCold.toFixed(2)} ms\n` +
+      `    SEPARATION                         : ${separation.toFixed(2)} ms\n` +
+      `    distributions overlap              : ${overlap ? 'YES' : 'NO'}\n` +
+      `    spread of the idle branch          : ${spread.toFixed(2)} ms\n` +
+      `    VERDICT: ${
+        !overlap
+          ? 'TOTALLY SEPARATED - one request decides. A FINDING.'
+          : separation > spread
+            ? 'overlapping but separation exceeds the idle spread - usable with samples.'
+            : 'BELOW THE NOISE FLOOR here - separation is smaller than the idle branch spread.'
+      }\n`
+  );
+  return { mHot, mCold, separation, overlap, spread };
+}
+
+test('BG3: /signup/resend-otp - sha256 scale, measured and decided', async () => {
+  const pendingEmail = uniqEmail('rs-pending');
+  await post('/api/auth/signup', { name: 'ZZZ Resend', email: pendingEmail, password: PASSWORD });
+
+  await post('/api/auth/signup/resend-otp', { email: pendingEmail });
+  await post('/api/auth/signup/resend-otp', { email: uniqEmail('rs-warm') });
+
+  const hot = [];
+  const cold = [];
+  for (let i = 0; i < SHA_SAMPLES; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const a = await post('/api/auth/signup/resend-otp', { email: pendingEmail });
+    // eslint-disable-next-line no-await-in-loop
+    const b = await post('/api/auth/signup/resend-otp', { email: uniqEmail(`rs-u${i}`) });
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200, 'identical status either way - SEC-08');
+    hot.push(a.elapsedMs);
+    cold.push(b.elapsedMs);
+  }
+
+  const r = decide('/signup/resend-otp', hot, cold);
+
+  // NOT bcrypt scale. Asserted, because my enumeration put it in the wrong
+  // class and the assertion is what stops that being restated later.
+  assert.ok(
+    r.separation < 50,
+    `this endpoint is sha256 scale, not bcrypt scale - if the separation is now ` +
+      `${r.separation.toFixed(1)} ms something has started hashing a password here`
+  );
+});
+
+test('BG3: /login/resend-otp - sha256 scale, measured and decided', async () => {
+  const known = uniqEmail('lr-known');
+  await users.create({ name: 'ZZZ LR', email: known, password: PASSWORD, isVerified: true });
+
+  await post('/api/auth/login/resend-otp', { email: known });
+  await post('/api/auth/login/resend-otp', { email: uniqEmail('lr-warm') });
+
+  const hot = [];
+  const cold = [];
+  for (let i = 0; i < SHA_SAMPLES; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const a = await post('/api/auth/login/resend-otp', { email: known });
+    // eslint-disable-next-line no-await-in-loop
+    const b = await post('/api/auth/login/resend-otp', { email: uniqEmail(`lr-u${i}`) });
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    hot.push(a.elapsedMs);
+    cold.push(b.elapsedMs);
+  }
+
+  const r = decide('/login/resend-otp', hot, cold);
+  assert.ok(r.separation < 50, 'sha256 scale, not bcrypt scale');
+});
+
+test('BG3: /forgot-password/request - sha256 scale, measured and decided', async () => {
+  const known = uniqEmail('fp-known');
+  await users.create({ name: 'ZZZ FP', email: known, password: PASSWORD, isVerified: true });
+
+  await post('/api/auth/forgot-password/request', { email: known });
+  await post('/api/auth/forgot-password/request', { email: uniqEmail('fp-warm') });
+
+  const hot = [];
+  const cold = [];
+  for (let i = 0; i < SHA_SAMPLES; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const a = await post('/api/auth/forgot-password/request', { email: known });
+    // eslint-disable-next-line no-await-in-loop
+    const b = await post('/api/auth/forgot-password/request', { email: uniqEmail(`fp-u${i}`) });
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    hot.push(a.elapsedMs);
+    cold.push(b.elapsedMs);
+  }
+
+  const r = decide('/forgot-password/request', hot, cold);
+  assert.ok(r.separation < 50, 'sha256 scale, not bcrypt scale');
 });

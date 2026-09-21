@@ -40,7 +40,8 @@
     "test:charset": "node db/check-charset.js",
     "test:bridge-exit": "node test/bridge-exit-check.js",
     "test:preflight-findings": "node --test test/preflight-findings.test.js",
-    "test:signup-timing": "node test/signup-timing.test.js"
+    "test:signup-timing": "node test/signup-timing.test.js",
+    "test:password-timing": "node test/password-timing.test.js"
   },
   "keywords": [],
   "author": "",

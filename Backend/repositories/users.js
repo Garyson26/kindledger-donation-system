@@ -16,13 +16,18 @@
 'use strict';
 
 const bcrypt = require('bcryptjs');
+const { burnEquivalentBcrypt } = require('../config/passwordTiming');
 const crypto = require('node:crypto');
 const { client, newUuid, iso } = require('./_shared');
 // For createFromPendingSignup: the account and the pending row must move together.
 const { withTransaction } = require('../config/prisma');
 
 // SEC-18 asks for cost 12 rather than the 10 used throughout the legacy code.
-const BCRYPT_COST = 12;
+// BG1: ONE definition of the cost factor, in config/passwordTiming.js. It was
+// duplicated here and there, which would have let the dummy bcrypt that
+// equalises the missing-row branch drift away from the real one - and a
+// partial equalisation reopens the oracle without saying so.
+const { BCRYPT_COST } = require('../config/passwordTiming');
 
 const SELECT = {
   uuid: true,
@@ -128,11 +133,29 @@ async function findByEmail(email, tx) {
  * and must continue to.
  */
 async function verifyPassword(id, candidate, tx) {
+  // BG1: A NULL id IS A SUPPORTED CALL, and it is how the caller says "there is
+  // no account here". It exists so that `/login` cannot answer before spending
+  // the same bcrypt it would have spent on a real one - see below.
+  if (id == null) return burnEquivalentBcrypt(candidate);
+
   const row = await client(tx).user.findUnique({
     where: { uuid: id },
     select: { passwordHash: true },
   });
-  if (!row) return false;
+
+  // BG1: THE MISSING ROW COSTS THE SAME AS A PRESENT ONE.
+  //
+  // `return false` here is the natural implementation and it was a measured
+  // oracle: 236 ms of separation on /login, with distributions that do not
+  // overlap, so ONE request distinguished a registered address from an unknown
+  // one. The bodies were already identical - SEC-08 saw to that - and the cost
+  // of SEC-18's bcrypt is what carried the answer instead.
+  //
+  // CONSTANT TIME IS THE REPOSITORY'S JOB, NOT THE ROUTE'S. Put it in the route
+  // and every future route that looks a user up has to remember; put it here
+  // and forgetting is not available.
+  if (!row) return burnEquivalentBcrypt(candidate);
+
   return bcrypt.compare(String(candidate), row.passwordHash);
 }
 

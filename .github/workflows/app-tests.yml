@@ -248,9 +248,21 @@ jobs:
       # Runs the file DIRECTLY, not under `node --test`: both branches start an
       # SMTP connection that cannot complete in CI, and nodemailer holds the
       # sockets past the test.
-      - name: Signup timing separation, pinned (BB3)
+      # BB3/BE1/BG1/BG3. Six timing measurements. Three were oracles with
+      # non-overlapping distributions and are now equalised; three are
+      # sha256-scale and accepted with their numbers. The tests assert the
+      # separations STAY closed.
+      - name: Endpoint timing separations (BB3, BE1, BG1, BG3)
         working-directory: Backend
         run: npm run test:signup-timing
+
+      # BG2. BG1's equalisation converts an information leak into a CPU cost,
+      # and authLimiter is the only bound on it. This fails if any equalised
+      # endpoint loses its limiter - which would silently turn a closed oracle
+      # into a 60x CPU amplifier. SEC-04 is why this is asserted, not noted.
+      - name: Password-timing mitigation dependency (BG2)
+        working-directory: Backend
+        run: npm run test:password-timing
 
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)

@@ -4144,6 +4144,156 @@ stray keystroke, a tool writing a file.
 > future bisect believes.**
 
 
+---
+
+## BG1 - THE THREE ORACLES, CLOSED AND RE-MEASURED
+
+| Endpoint | Before | After | Change |
+|---|---|---|---|
+| `POST /signup` | 237.7 ms, 51.9x, **no overlap** | **13.0 ms, 1.06x** | equalised |
+| `POST /login` | 236.0 ms, 60.0x, **no overlap** | **3.6 ms, 1.02x** | equalised |
+| `POST /signup/verify-otp` | 240.7 ms, **no overlap** | **9.3 ms** | equalised |
+
+`config/passwordTiming.js` holds the equaliser. The branch with no row to check
+spends a bcrypt against a throwaway hash and discards the result.
+
+**The dummy hash is GENERATED at load from `BCRYPT_COST`, not hardcoded**, and
+`BCRYPT_COST` now has one definition that both repositories import. A literal
+`$2a$12$...` would be a second place encoding the cost, and when SEC-18 next
+revisits it the dummy would drift away from the real work - turning a full
+equalisation into a partial one by an amount nobody chose.
+
+### The residual, which is the database write and is deliberately NOT equalised
+
+The remaining 3-13 ms is the row each unknown-address branch WRITES and the
+known branch does not. Equalising it means performing a dummy database write on
+behalf of an address that does not exist, which hands an unauthenticated caller
+unbounded writes - **a worse problem than the one it closes**. Asserted as small
+rather than claimed to be zero.
+
+### THE FIX I GOT WRONG, WHICH ONLY RE-MEASUREMENT FOUND
+
+`/signup/verify-otp` leaks whether a signup is in flight. The comment pointed at
+`pendingSignups.verifyPassword`, I equalised that function, and **the separation
+did not move at all - still 234.1 ms.**
+
+The route returns at `if (!pending) return refuse(...)` **before that function is
+ever called.** I was looking at the right endpoint, for the right reason, with
+the right fix, and fixed a line the request never reaches.
+
+> **Inspection said fixed. The measurement said 234.1 ms.** That is the entire
+> argument for re-measurement as the acceptance criterion, demonstrated by the
+> work rather than asserted about it - and it is the second time in this package
+> that measuring corrected something reading had settled.
+
+### And an error in my own enumeration, corrected the same way
+
+I recorded `/signup/resend-otp` as "structurally identical to
+`/signup/verify-otp`, bcrypt-sized", from a grep hit on
+`pendingSignups.verifyPassword` **that is actually inside `/login`**. That
+endpoint does not call it at all - it calls `setOtp`, which is sha256.
+
+So Class A is THREE endpoints, not four. The enumeration was right to exist and
+wrong in a detail, and the detail was caught by measuring the endpoint instead
+of trusting the row.
+
+---
+
+## BG2 - THE MITIGATION'S DEPENDENCY, ASSERTED
+
+> **The dummy-bcrypt mitigation is safe only while `authLimiter` is wired and
+> effective on `/signup`, `/login` and `/signup/verify-otp`.**
+
+BG1 converts an information leak into a CPU cost: a request refused in 4 ms now
+costs ~240 ms, and an unauthenticated caller can force it. `authLimiter` at 5
+per minute per IP is the only bound. **Unlimited, each of those endpoints is a
+60x CPU amplifier.**
+
+That bound is a control which has already failed once here - SEC-04 was a
+limiter built, not wired, and reported closed while it was not. A mitigation
+resting on it cannot rest on a comment.
+
+`test/password-timing.test.js` asserts it **behaviourally**, not structurally:
+it bursts requests from one address until refused. "A limiter is in the chain"
+and "the endpoint is limited" are different claims, and a limiter keyed on
+something an attacker varies would satisfy the first and not the second. It also
+asserts that `burnEquivalentBcrypt` still costs a real bcrypt - if somebody stubs
+it out, every oracle reopens and the timing tests would still pass, because they
+compare two branches that would both have become fast.
+
+---
+
+## BG3 - THE sha256-SCALE ENDPOINTS: MEASURED, AND CLOSED AS ACCEPTED
+
+"Real but small" with no number was BB3's original state, so each got one.
+
+| Endpoint | Working branch | Idle branch | Separation |
+|---|---|---|---|
+| `POST /signup/resend-otp` | 7.81 ms | 2.62 ms | **5.2-5.4 ms** |
+| `POST /login/resend-otp` | 9.74 ms | 2.63 ms | **6.2-7.1 ms** |
+| `POST /forgot-password/request` | 9.15 ms | 2.81 ms | **6.2-6.5 ms** |
+
+All three are one sha256 plus one UPDATE - the same work, and the numbers agree.
+
+**The "distributions overlap" verdict is NOT a reliable discriminator, and
+saying so is part of the finding.** Across runs it flipped for
+`/signup/resend-otp` on the strength of one or two outliers in the idle branch.
+The stable quantity is the separation: **5-7 ms, everywhere.**
+
+### The decision: ACCEPTED, not equalised
+
+- **5-7 ms is not a single-request oracle across a network.** Internet jitter is
+  tens of milliseconds; one request decides nothing. Recovering the signal needs
+  many samples per address, through a limiter of 5 per minute per IP.
+- **The fix would be worse than the finding.** These branches differ by a
+  database WRITE, not a hash. Equalising means writing a row for an address that
+  does not exist - unbounded writes from unauthenticated callers.
+- It is **pinned anyway**: each test asserts the separation stays under 50 ms,
+  which is what fails if somebody moves a password hash onto one of these paths.
+
+This is the first row in the audit closed by MEASURING IT AND ACCEPTING IT
+rather than by fixing it, and the number is what makes that a decision instead
+of a shrug.
+
+---
+
+## BG4 - A CLAIM THAT SOMETHING "ADDS NO ORACLE" MUST NAME ITS CHANNELS
+
+`/signup/verify-otp` carried, in this project, written by me:
+
+> "ANSWERS 'Invalid OTP' like every other failure here, **so it adds no oracle**:
+> a caller cannot learn whether the address has a signup in flight, nor whether
+> their password guess was right."
+
+**True of the body. False of the clock.** 240.7 ms of separation, and the
+distributions did not overlap - one request answered the exact question the
+sentence says cannot be answered.
+
+### Against AZ3: proximity in TIME is no better than proximity in the FILE
+
+AZ3 found correct reasoning failing to travel three functions. BA3 found it
+failing to travel three lines, same author, same session. **This is shorter
+still: the author knew the timing class and wrote a claim the class contradicts.**
+
+There is no distance left to shorten. Nearness - in the file, in the session, in
+the author's own attention - does not propagate anything. Only a check does.
+
+### The countermeasure is AU2's, and the citation rule gains a clause
+
+The comment asserted a closure and **cited nothing**. Under AU2 it was already
+defective before it was wrong.
+
+> **A claim that something "adds no oracle" must name which CHANNELS were
+> checked. Body, status and timing are separate channels, and a claim covering
+> one is not a claim covering the others.**
+
+Applied: the comment now reads "adds no oracle IN THE BODY OR THE STATUS", and
+the timing channel is closed by code with a test rather than by a sentence. The
+same clause applies to the SEC-08 closures generally - 3.5a closed SEC-08 *in the
+body*, and writing those three words at the time would have left the clock
+visibly open instead of implicitly so (BE2).
+
+
 ## Counts
 
 | State | Count | Rows |
