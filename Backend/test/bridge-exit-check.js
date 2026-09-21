@@ -73,6 +73,41 @@ const suites = fs
   .filter((f) => f.endsWith('.test.js'))
   .sort();
 
+// =============================================================================
+// THE SCAN MUST HAVE SCANNED SOMETHING (BH3)
+// =============================================================================
+// Found by BH3's sweep, in the check that AUTHORISES DELETING THE BRIDGES -
+// which is the highest-harm place it could have been.
+//
+// Without this, a renamed directory or a changed suffix makes `suites` empty,
+// every loop body is skipped, no offender is found, and the runner prints
+// "AE3 PART 1 PASSES" and exits 0. A green exit check over zero suites is not
+// weaker evidence than a real one; it is no evidence wearing its clothes.
+//
+// `migration-state.test.js` already had this property - "CONTROL FAILED:
+// nothing imports models/X, so the scan finds nothing" - and this file did not.
+// The control existed one suite away, which is AY2 for the seventh time.
+const KNOWN = ['payment-callbacks.test.js', 'auth-characterisation.test.js', 'etl.test.js'];
+if (suites.length < 10) {
+  // eslint-disable-next-line no-console
+  console.error(
+    `SCAN FAILED: found only ${suites.length} suite file(s) in ${dir}. The exit ` +
+      'check cannot report a clean sweep over a directory it did not read.'
+  );
+  process.exit(1);
+}
+for (const k of KNOWN) {
+  if (!suites.includes(k)) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `SCAN FAILED: ${k} is not among the discovered suites. Named explicitly ` +
+        'because a pattern that quietly stops matching is the failure this guard ' +
+        'exists for, and a count alone would not notice one file dropping out.'
+    );
+    process.exit(1);
+  }
+}
+
 let failed = 0;
 const offenders = [];
 

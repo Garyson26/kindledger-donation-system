@@ -46,9 +46,23 @@ const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 
-/** Files a self-hoster copies and runs. */
+/**
+ * Files a self-hoster copies and runs.
+ *
+ * ANY TRACKED `.env*` ANYWHERE, and the widening is a finding of its own. The
+ * first version named `.env.example` and `Backend/.env.example` - the two I
+ * knew about - and would not have seen `Frontend/.env`, which is tracked.
+ *
+ * That file holds only `VITE_API_URL`, a value Vite embeds in the bundle and
+ * which is public by construction, so nothing is exposed today. The hazard is
+ * the next person adding a real value to a file git is already watching.
+ *
+ * A pattern listing the files you expect cannot see the one you did not expect
+ * (AT4's dead imports, AR1's out-of-routes crossings, BJ4's second env
+ * template). So the rule is the SHAPE of the name, not a list.
+ */
 const IN_SCOPE =
-  /^(\.env\.example|Backend\/\.env\.example|docker-compose.*\.ya?ml|db\/.*\.sql|\.github\/workflows\/.*\.ya?ml|Backend\/(?!test\/).*\.js)$/;
+  /(^|\/)\.env($|\.)|^(docker-compose.*\.ya?ml|db\/.*\.sql|\.github\/workflows\/.*\.ya?ml|Backend\/(?!test\/).*\.js|Frontend\/src\/.*\.(js|jsx|ts|tsx))$/;
 
 /**
  * A name that, holding a real value, would be a credential.
@@ -101,6 +115,19 @@ function offendersIn(file) {
     // `FOO: ${BAR}` and `FOO: process.env.BAR` are references, not values.
     if (value.startsWith('process.env') || value.startsWith('require')) return;
 
+    // A URL IS NOT A CREDENTIAL, whatever the constant is called.
+    //
+    // Widening the scope to Frontend/src immediately flagged four lines of
+    // `Frontend/src/config/constants.js` - RESET_PASSWORD, CHANGE_PASSWORD,
+    // FORGOT_PASSWORD, REFRESH_TOKEN - whose values are template literals
+    // building API paths. The NAMES are credential-shaped and the VALUES are
+    // routes.
+    //
+    // Recorded rather than quietly patched because it is the failure mode this
+    // file already warns about: a check that flags everything gets turned off,
+    // and the first one turned off is the one that cried wolf.
+    if (value.startsWith('`') || /^https?:\/\//.test(value) || value.startsWith('/')) return;
+
     out.push({ file, line: i + 1, name, value });
   });
 
@@ -124,6 +151,12 @@ test('BJ4: no tracked file a self-hoster deploys carries a working credential', 
   assert.ok(
     scoped.includes('.env.example'),
     'the root env template must be in scope - it is the file people copy'
+  );
+  // Named explicitly because it is the one a pattern-by-list missed, and the
+  // reason the scope is now shaped rather than enumerated.
+  assert.ok(
+    scoped.includes('Frontend/.env'),
+    'EVERY tracked .env must be in scope, not the two we happen to know about'
   );
   assert.ok(
     scoped.some((f) => f.startsWith('docker-compose')),

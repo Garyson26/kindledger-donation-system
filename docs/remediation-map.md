@@ -4492,6 +4492,82 @@ I found it only because BJ4's scan enumerated tracked files. Checking "the
 `.env.example`" by name would not have - AY2 again.
 
 
+---
+
+## BH3 - THE VACUITY SWEEP: three instances, and the third was in the deletion gate
+
+> **A test that can pass while its subject is removed is not a test. It is a
+> comment with a green tick.**
+
+Two instances were known before the sweep: PAY-02 (a removal verified by
+reference-counting when runtime registration was the property) and BH5's forged
+callback (signed with the real salt against an endpoint using a blank one, so it
+would have been refused for a HASH MISMATCH and passed while proving nothing).
+
+The sweep looked for two signatures across all twenty suites.
+
+### Signature 1 - a refusal assertion that accepts ANY error
+
+**One instance, and it was mine.** `null-minted.test.js`'s "the refusal writes
+NOTHING" used `assert.rejects(fn)` with no matcher. The test's point is the
+write-nothing assertions that follow - and those would hold just as well if the
+call had rejected because of a typo in the options object. Now asserts
+`ERR_SOURCE_EMPTY`.
+
+Everything else already asserted a code or a message. `destructive-jobs.test.js`
+is the model: specific codes, a positive control that the purge DOES run with
+both gates open, and a test that discriminates WHICH gate refused.
+
+### Signature 2 - a scan that reports clean because it scanned nothing
+
+**One instance, in the worst possible place: `bridge-exit-check.js`**, the gate
+that authorises deleting the bridges. A renamed directory or a changed suffix
+would empty the suite list, skip every loop body, find no offender, and print
+"AE3 PART 1 PASSES" on zero evidence.
+
+`migration-state.test.js` **already had this property** - *"CONTROL FAILED:
+nothing imports models/X, so the scan finds nothing"* - and the exit check did
+not. The control existed one suite away. **AY2, seventh instance.**
+
+Both now assert they matched files, and name three suites explicitly, because a
+count alone would not notice one file dropping out of the pattern.
+
+### The countermeasure BH2 asks for
+
+> **An acceptance criterion measures the OUTCOME, never the presence of the
+> change.** "The guard is called" is not a finding; "the forged callback is
+> refused" is. This is already how the timing work was accepted and is now
+> standard for every fix.
+
+---
+
+## BH3b - AND THE SWEEP FOUND A THIRD BY DOING THE DAMAGE AGAIN
+
+While re-running `null-minted.test.js` after tightening it, **the suite NULLed
+the two restored category `legacy_id`s a second time.**
+
+The first damage came from pointing the suite at a scratch MongoDB, and was
+closed by `assertSourceMatchesMySQL()`, which checks the REAL MongoDB before any
+write. **That guard cannot see this one.** BB1's tests pass a STUBBED `Category`
+whose `find` returned a fixed list, so every row the suite did not create looked
+absent from MongoDB and was nulled - through the one path where the real
+database is never consulted.
+
+> **A guard on the real dependency does nothing about a stub that lies about it.
+> As far as the code under test is concerned, THE STUB IS THE DEPENDENCY.**
+
+`sourceWith()` now resolves every id the suite did not create against the real
+collection, and invents an answer only for its own fixtures - so each test
+controls exactly the variable it is about. A regression test asserts the
+property directly.
+
+**That regression test is currently vacuous, and saying so is the point.** It
+iterates the rows the suite did not create, and those rows now have NULL
+`legacy_id` because this suite nulled them. It becomes live the moment they are
+restored - which is the third thing the sweep is about: a test whose fixture is
+absent proves nothing, quietly.
+
+
 ## Counts
 
 | State | Count | Rows |

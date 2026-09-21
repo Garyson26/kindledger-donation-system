@@ -250,11 +250,17 @@ test('AE1-a REFUSES when MongoDB is empty - the wrong-database case', async () =
 
   // A models map whose Category reports an empty collection, standing in for
   // "MONGODB_URI names a database the ETL never migrated from".
+  // countDocuments 0 is the whole fixture; `find` must never be reached,
+  // because the guard refuses before any lookup. Asserted rather than stubbed
+  // permissively - if the order ever changes, this says so loudly instead of
+  // silently reporting every row as minted.
   const emptyModels = {
     ...models,
     Category: {
       countDocuments: async () => 0,
-      find: async () => [],
+      find: () => {
+        throw new Error('find() must not be reached - the empty-source guard refuses first');
+      },
     },
   };
 
@@ -285,16 +291,33 @@ test('AE1-a: the refusal writes NOTHING, including for entities it already passe
 
   const emptyModels = {
     ...models,
-    Category: { countDocuments: async () => 0, find: async () => [] },
+    Category: {
+      countDocuments: async () => 0,
+      find: () => {
+        throw new Error('find() must not be reached - the empty-source guard refuses first');
+      },
+    },
   };
 
-  await assert.rejects(() =>
-    nullMintedLegacyIds({
-      prisma: getPrisma(),
-      models: emptyModels,
-      dryRun: false,
-      entities: ['category'],
-    })
+  // BH3: THE ERROR CODE IS ASSERTED, not merely that something threw.
+  //
+  // Found by BH3's own sweep - this was the one refusal assertion in the whole
+  // suite that accepted ANY error. The test's point is that nothing is written,
+  // and the write-nothing assertions below would hold just as well if the call
+  // had rejected because of a typo in the options object. That is the shape:
+  // an assertion that survives the removal of its subject.
+  await assert.rejects(
+    () =>
+      nullMintedLegacyIds({
+        prisma: getPrisma(),
+        models: emptyModels,
+        dryRun: false,
+        entities: ['category'],
+      }),
+    (err) => {
+      assert.equal(err.code, 'ERR_SOURCE_EMPTY', 'it must fail for the REASON under test');
+      return true;
+    }
   );
 
   assert.equal((await categories.findById(genuine.uuid)).legacyId, genuine.legacyId);
@@ -373,15 +396,54 @@ test("THE SUITE'S OWN GUARD refuses when MySQL holds rows this MongoDB cannot ex
 /**
  * A MongoDB that HAS documents but is not ours.
  *
- * `matching` is the set of our legacy_ids it happens to contain - empty for a
+ * `matching` is the set of THIS SUITE'S legacy_ids it contains - empty for a
  * different database, partial for an OLD SNAPSHOT of the right one.
+ *
+ * -----------------------------------------------------------------------------
+ * IT ANSWERS TRUTHFULLY FOR EVERY ROW THE SUITE DID NOT CREATE, AND THAT IS
+ * NOT A DETAIL - IT IS THE SECOND TIME THIS FILE DESTROYED REAL DATA
+ * -----------------------------------------------------------------------------
+ * The first version returned `matching` and nothing else. The operation runs
+ * against the SHARED development MySQL, which holds the categories the ETL
+ * migrated, so every one of those looked absent from MongoDB and was NULLed -
+ * the exact damage `assertSourceMatchesMySQL` was added to prevent, committed
+ * again through the one path that guard cannot see.
+ *
+ * **A guard on the real MongoDB does nothing about a stub that lies about it.**
+ * The stub is the database as far as the operation is concerned, so it has to
+ * be honest about everything it is not deliberately testing.
+ *
+ * So: real lookups for real rows, and fiction only for the ids this suite
+ * created. Each test then controls exactly the variable it is about.
  */
 function sourceWith(documentCount, matching) {
+  const controlled = new Set(matching);
   return {
     ...models,
     Category: {
       countDocuments: async () => documentCount,
-      find: () => ({ lean: async () => matching.map((id) => ({ _id: id })) }),
+      find: (query) => ({
+        lean: async () => {
+          const asked = (query && query._id && query._id.$in) || [];
+          const mine = new Set(
+            (await categories.list())
+              .filter((c) => String(c.name || '').startsWith(CAT_PREFIX))
+              .map((c) => c.legacyId)
+              .filter(Boolean)
+          );
+          // Anything this suite did not create is resolved against the REAL
+          // collection. Anything it did create resolves only if the test says so.
+          const real = await MongoCategory.find(
+            { _id: { $in: asked.filter((id) => !mine.has(id)) } },
+            { _id: 1 }
+          ).lean();
+
+          return [
+            ...real.map((d) => ({ _id: String(d._id) })),
+            ...asked.filter((id) => mine.has(id) && controlled.has(id)).map((_id) => ({ _id })),
+          ];
+        },
+      }),
     },
   };
 }
@@ -491,4 +553,47 @@ test('PINNED, NOT CLOSED: a PARTIAL overlap is NOT caught, and destroys genuine 
   const cat = report.find((r) => r.entity === 'category');
   assert.ok(cat.matchRate < 1, 'the match rate is the only signal, and it is reported');
   assert.ok(cat.matchRate > 0, 'while being high enough that the identity guard passed');
+});
+
+test('THE STUBS MUST NOT TOUCH ROWS THIS SUITE DID NOT CREATE', async () => {
+  // ===========================================================================
+  // THE REGRESSION GUARD FOR THE DAMAGE THIS FILE DID TWICE
+  // ===========================================================================
+  // First time: the suite was pointed at a scratch MongoDB and NULLed the
+  // legacy_id of both ETL-migrated categories. Fixed by
+  // `assertSourceMatchesMySQL`, which checks the REAL MongoDB in `before()`.
+  //
+  // Second time: the BB1 stubs answered `find` with a fixed list, so every real
+  // row looked absent and was NULLed anyway. The guard could not see it,
+  // because as far as the operation is concerned THE STUB IS THE DATABASE.
+  //
+  // This asserts the property directly: run the operation through a stub, and
+  // the rows this suite did not create must come out untouched.
+  await reset();
+  await genuineCategory('untouched');
+
+  const foreignBefore = (await categories.list())
+    .filter((c) => c.legacyId && !String(c.name || '').startsWith(CAT_PREFIX))
+    .map((c) => ({ id: c.id, legacyId: c.legacyId }));
+
+  // The most hostile stub in the file - it claims a populated database that
+  // contains exactly one of our ids and says nothing about anything else.
+  await nullMintedLegacyIds({
+    prisma: getPrisma(),
+    models: sourceWith(5000, []),
+    dryRun: false,
+    entities: ['category'],
+  }).catch(() => {});
+
+  for (const row of foreignBefore) {
+    const after = await categories.findById(row.id);
+    assert.equal(
+      after.legacyId,
+      row.legacyId,
+      `A ROW THIS SUITE DID NOT CREATE WAS MODIFIED (${row.legacyId}). The stub ` +
+        'must answer truthfully for everything it is not deliberately testing - ' +
+        'see sourceWith(). This assertion exists because the same damage was ' +
+        'done twice, the second time through a path the before() guard cannot see.'
+    );
+  }
 });
