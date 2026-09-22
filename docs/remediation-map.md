@@ -5037,6 +5037,140 @@ body", "handled on the error paths". The uncovered remainder then has to be
 looked at to be dismissed, instead of being invisible because nobody phrased it.
 
 
+---
+
+## BT1 - "RE-ENCODE TO BE SAFE" SHIPS AN SVG PARSER. BE2's SECOND INSTANCE.
+
+> **The obvious implementation of "re-encode every upload so nothing malicious
+> survives" exposes an SVG parser to unauthenticated input, while appearing to
+> close the SVG hole.**
+
+Two correct intentions:
+
+- **Reject SVG**, because it is XML that carries script and would be served from
+  our own origin.
+- **Re-encode everything**, because that is what neutralises a polyglot.
+
+Composed, they produce the opposite of both. `sharp` lists `svg` among its INPUT
+formats, so "decode it and see whether it is an image" RASTERISES the SVG and
+accepts it - and the decode runs librsvg against attacker-controlled XML before
+any check has looked at it. The implementation looks like it works, and the SVG
+test passes because the file was accepted as a PNG.
+
+This is BE2's composition class - two independently correct controls producing a
+vulnerability by interaction - and the second instance after SEC-18 x SEC-08.
+The difference is that this one was caught before shipping, by reading the
+library's format list rather than its documentation's intent.
+
+**The fix is order: identify the container from MAGIC BYTES before the decoder
+is given the buffer.** And the test asserts its own premise - it first proves
+sharp really does rasterise the SVG, so the refusal cannot be mistaken for the
+decoder failing.
+
+### The general form, for Phase 6's self-hosting documentation
+
+> **An image library's INPUT FORMAT LIST is an attack surface list. A decoder
+> that accepts a format you have banned will accept it on your behalf.**
+
+The same sentence covers every parser handed untrusted bytes: the formats it
+supports are the parsers you are running, whether or not you meant to.
+
+### The same shape, one layer up: multer's storage default
+
+A disk-backed `multer` writes the raw upload to a temporary file **before any of
+our checks run** - unvalidated attacker bytes landing on the same volume the
+site serves from. `memoryStorage` with a byte limit is cheaper and keeps the
+bytes out of the filesystem until they have been proved to be an image.
+
+Convenient defaults are chosen for convenience. This one is not wrong; it is
+wrong HERE, and the difference is only visible if you ask what the default
+actually does with the bytes.
+
+---
+
+## BT2 - THREE THINGS TO KEEP AS PRACTICE
+
+1. **`storeLogo` takes no filename and no content type.** Not validating an
+   input - REMOVING it. There is no parameter for `../`, a null byte or a lying
+   `Content-Type` to arrive through, so none of them has to be anticipated.
+   Prefer this form wherever it is available; a field that does not exist cannot
+   be got wrong.
+
+2. **Every test asserts its own premise.** The bomb test asserts the bomb is
+   SMALL, or it would prove only that the byte limit works. The polyglot test
+   asserts the file is a valid PNG. The SVG test asserts sharp accepts SVG.
+   BH3's rule, applied without being asked, and each one is a test that would
+   otherwise pass for the wrong reason.
+
+3. **Store, repoint, delete.** Any failure leaves a working site - an orphaned
+   file, or an old logo still serving. Deleting first would leave a row pointing
+   at nothing. The order is the safety property, not the tidiness.
+
+---
+
+## BT3 - TWO NEW DEPENDENCIES, FOR PHASE 6's REVIEW
+
+| Package | Why | For the review |
+|---|---|---|
+| `sharp` | decode and re-encode uploaded logos | **Apache-2.0**, compatible. **Carries NATIVE BINARIES** - prebuilt for common platforms, and a self-hoster on an unusual architecture (32-bit ARM, musl, BSD) may need a build toolchain. That belongs in the self-hosting notes, not discovered at install time |
+| `multer` | multipart parsing for the one upload endpoint | **MIT**, compatible |
+
+`npm audit` after they landed: **0 vulnerabilities** in the backend.
+
+### The frontend's two advisories, and why the headline is misleading
+
+`npm audit` in `Frontend/` reports **2 vulnerabilities (1 moderate, 1 high)** -
+`esbuild` and the `vite` that depends on it.
+
+**`npm audit --omit=dev` reports 0.** Both are build tooling, and the esbuild
+advisory is specifically about the DEVELOPMENT SERVER accepting cross-origin
+requests. Nothing reaches a deployed site, and nothing reaches a self-hoster,
+who receives built assets.
+
+That is U-6's lesson pointing the other way. There, the declaration said
+dev-only and the tree said production. Here the headline says HIGH and the
+production tree says nothing. **Neither the declaration nor the headline is the
+answer; the tree is.**
+
+Recorded rather than fixed: the remedy is `vite@8`, a major bump of the build
+tool, which is its own package and not one to fold into a router upgrade.
+
+---
+
+## SPEC-5 PACKAGE 5.5 - react-router v7, AND X1's ENUMERATION RE-RUN
+
+`react-router-dom` 6.22.3 -> 7.18.4. The build is clean and no source change
+was needed: this app uses `<BrowserRouter>`, `<Routes>`, `<Link>` and
+`useNavigate`, all of which v7 keeps.
+
+### X1's enumeration, re-run as its deferral required
+
+X1 deferred the open-redirect advisory as unreachable, **conditionally** - the
+recorded trigger being a post-login `returnTo` or `next` parameter.
+
+| | Found | Dynamic |
+|---|---|---|
+| `<Link to=...>` targets | 34 | **0** |
+| `navigate(...)` calls | 32 | **0** |
+| `useSearchParams` | 2 files | values read for DISPLAY only |
+
+Two candidates came back from the pattern and both are safe on inspection:
+
+- `App.jsx`: `navigate(role === "admin" ? "/admin/dashboard" : "/")` - a ternary
+  between two literals.
+- `AdminUsers.jsx`: ``navigate(`/admin/users/${user._id}/donations`)`` - a fixed
+  prefix with a server-generated id interpolated **not at the start of the
+  string**, which is X1's own recorded safe shape.
+
+`PaymentSuccess` and `PaymentFailure` read `txnid`, `amount`, `status` and
+`error` from the query string and render them. **Every `navigate()` in both
+files takes a string literal.**
+
+**No `returnTo`, `next`, `redirectTo` or `redirect_uri` parameter exists
+anywhere in the frontend.** X1's trigger has not fired, and the deferral still
+holds after the upgrade - which is the thing the re-run was for.
+
+
 ## Counts
 
 | State | Count | Rows |
