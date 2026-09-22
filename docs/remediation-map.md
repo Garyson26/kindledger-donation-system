@@ -4860,6 +4860,102 @@ The same holds for BJ1's compose audit: 35 of 36 variables correct, and the one
 that was not was the payment secret.
 
 
+---
+
+## BO2 - THE STRONGEST AZ3 EVIDENCE YET: THE WARNING PREDICTED THE OUTCOME
+
+`docker-compose.legacy-mongo.yml` says of the `mongo` service:
+
+> "No volume, deliberately. State that survives a restart would start looking
+> like a development database people rely on."
+
+Package 3.6 then made that database **AE1-a's oracle** - the thing distinguishing
+a minted legacy_id from a genuine one - and `null-minted.test.js`'s guard
+consults it before deciding what to destroy. A `docker compose down` destroyed
+it, and the restored ids pointed at nothing.
+
+### Why this is the strongest instance
+
+| | |
+|---|---|
+| AZ3 | correct reasoning failed to travel **three functions** |
+| BA3 | failed to travel **three lines**, same author, same session |
+| BG4 | **zero distance** - the author knew the class and wrote a claim it contradicts |
+| **BO2** | the warning was **correct, specific, written at the site, and read by the author who then built a dependency on the very thing it warned about** |
+
+The comment did not merely fail to prevent the outcome. **It described the
+outcome in advance**, in the sentence the author read while wiring the
+dependency. There is no version of that comment that would have worked.
+
+> **THE COUNTERMEASURE IS NOT BETTER COMMENTS.** It is making the thing
+> reproducible, so that depending on it is cheap to recover from rather than
+> forbidden. `scripts/rebuildLegacyMongo.js` rebuilds the oracle from MySQL's
+> own legacy_id values in one command.
+>
+> **Reproducible beats precious.** A resource that must not be lost is a
+> resource whose loss is a crisis; a resource that can be rebuilt is neither.
+
+---
+
+## BO3 - A PROXY APPLIED SYSTEMATICALLY IS WORSE THAN JUDGEMENT
+
+> **A systematic negative result is evidence only when the rule measures THE
+> PROPERTY. When it measures a proxy for the property, applying it everywhere
+> does not make it true - it makes it look rigorous.**
+
+Paired with BN4, which stands as stated: BH1's thirty-of-thirty-five clean cells
+are evidence *because* the rule measured the channels directly.
+
+The 5.1 UI audit counted `catch` blocks and called it error handling. The count
+was accurate; the conclusion was false; two of seven items were wrong.
+
+### The audit BO3 asked for: every systematic check in this project
+
+| Check | Measures | Verdict |
+|---|---|---|
+| **AT4's import scan** (`migration-state.test.js`) | "no file outside the allowlist IMPORTS a migrated model" | **PROXY** - importing is not writing. **Already paired**: the boot-registration gate below exists *because* this proxy failed as PAY-02, and its comment says so. The gap is also empirically EMPTY: nothing writes MongoDB without importing `models/X` - the only raw `mongoose.connection` uses in the tree are `.close()` in the ETL and scripts |
+| **The boot-registration gate** | `mongoose.modelNames()` on the booted process, as an EXACT SET | **PROPERTY.** Asks the running system. Catches both directions - a model dropped (PAY-02) and one reintroduced |
+| **`bridge-exit-check.js`** | the fallback log lines the bridges emit | **PROPERTY** - the line is emitted exactly when a fallback occurs, so it observes the event rather than a correlate. **One dependency worth naming**: it measures the LOG, so deleting the `console.warn` would report clean. Moot now that the bridges are deleted, and it applies to anything that replaces them |
+| **`no-committed-secrets.test.js`** | "no non-placeholder value under a CREDENTIAL-SHAPED NAME" | **PROXY**, and now says so in the file. A real secret stored as `FOO=8f3a...` is invisible, and no refinement of the name pattern fixes that - the information is not in the name. Kept because the failure it catches is the one that happens |
+| **`preflight-findings.test.js`** | the invariant at construction time | **PROPERTY.** It throws when the bad thing is built, not when somebody looks |
+| **`password-timing.test.js`** | bursts one address until refused | **PROPERTY.** "A limiter is in the chain" and "the endpoint is limited" are different claims, and it tests the second |
+| **`signup-timing.test.js`** | the quantity itself, in milliseconds | **PROPERTY** |
+| **`destructive-jobs.test.js`** | specific error codes, plus a positive control that the purge DOES run with both gates open | **PROPERTY** |
+| **`null-minted.test.js`** | the rows afterwards | **PROPERTY** |
+| **`schema.test.js`, `server-guard.test.js`** | database behaviour and version parsing | **PROPERTY** |
+| **The 5.1 UI audit** | grep counts | **PROXY, and it failed.** Corrected in `docs/ui-audit.md` rather than deleted |
+
+**Three proxies out of eleven.** One is paired and its gap verified empty; one
+now declares its own limits in the file it lives in; one failed and is corrected.
+No unpaired, undeclared proxy remains.
+
+---
+
+## BO4 - "DO WE HANDLE BUG-11's SHAPE?" ANSWERED CORRECTLY ABOUT THE WRONG SUBSET
+
+Seventeen frontend reads of a server message. Sixteen correct, one - the SUCCESS
+path of `ChangePassword` - still reading `data.msg`, which BUG-11 removed.
+
+**It survived because `utils/api.js` normalises FAILURES** to
+`data.error || data.message`. Every error path was therefore already right, so a
+reader asking "do we handle the new shape?" would look at the error handling,
+find it correct, and answer yes. **The one site that did not was on the success
+path, which reads the body directly.**
+
+### The same shape as the timing channel
+
+| | The question | The honest answer | Why it was missed |
+|---|---|---|---|
+| **SEC-08** | "is the oracle closed?" | closed in the BODY, open on the CLOCK at 60x | the body was checked because the body was the finding |
+| **BUG-11** | "do we handle the new shape?" | handled on every FAILURE path, missed on one SUCCESS path | failures were checked because failures were the finding |
+
+> **A question answered correctly about the subset the original finding named
+> will keep being answered correctly while the remainder drifts.** The
+> countermeasure is BG4's channels clause generalised: name the subset the
+> answer covers - "closed in the body", "handled on the error paths" - and the
+> uncovered part becomes visible instead of implied.
+
+
 ## Counts
 
 | State | Count | Rows |

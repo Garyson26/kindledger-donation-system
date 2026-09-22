@@ -69,6 +69,26 @@ const IN_SCOPE =
  * ALL-CAPS only: lowercase `token`, `passwordHash` and `credentials: true` are
  * code, not configuration, and matching them produced 70 hits of pure noise on
  * the first run of this check.
+ *
+ * -----------------------------------------------------------------------------
+ * THIS IS A PROXY, AND SAYING SO IS PART OF THE CHECK (BO3)
+ * -----------------------------------------------------------------------------
+ * The PROPERTY is "no tracked file carries a working credential". What this
+ * measures is "no tracked file assigns a non-placeholder value to a
+ * CREDENTIAL-SHAPED NAME". Those are not the same claim.
+ *
+ * **A real secret stored as `FOO=8f3a...` is invisible to this check**, and no
+ * refinement of the name pattern fixes that - the information simply is not in
+ * the name.
+ *
+ * It is kept because the failure it does catch is the one that actually
+ * happens: somebody writes `JWT_SECRET=` followed by something that works. It
+ * is NOT a claim that the repository is free of secrets, and a green run must
+ * not be cited as one.
+ *
+ * The second mechanism BC1 asks for is human review before publication - which
+ * is weaker than a check, and is why this says so here rather than leaving a
+ * green tick to be read as more than it is.
  */
 const CREDENTIAL_NAME = /^[A-Z][A-Z0-9_]*(SECRET|PASSWORD|SALT|KEY|TOKEN|CREDENTIALS?)$/;
 
