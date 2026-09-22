@@ -9,6 +9,17 @@ documents a stranger needs before they can run or contribute to this.
 
 ## 1. The history scrub
 
+> ### THE SCRUB IS NOT THE REMEDIATION. ROTATION IS.
+>
+> **A history scrub does not undo past public exposure.** It rewrites what a
+> FUTURE clone receives. It does nothing about clones and forks already taken,
+> GitHub's cached views of removed commits, or anything a crawler indexed while
+> the repository was public.
+>
+> **Any credential that was ever public must be treated as compromised and
+> rotated.** The scrub is housekeeping performed afterwards, and doing it first
+> produces a clean-looking repository and a live key.
+
 ### 1.1 Scope — what is actually in the history
 
 | Item | Where | Why it has to go |
@@ -18,19 +29,7 @@ documents a stranger needs before they can run or contribute to this.
 | **`Frontend/.env`** | tracked today | Holds only `VITE_API_URL`, which Vite embeds in the bundle and which is public by construction. **Scrubbed for the shape, not the value** — a tracked `.env` is where the next secret lands |
 | **`docs/for_ocean_security_review.md`** | removed from HEAD in package 3.0, still in history | Exploit-level detail (U-5 / ADR-030) |
 
-### 1.2 THE THING THE SCRUB DOES NOT DO
-
-> **A history scrub does not undo past public exposure.**
-
-It rewrites what a future clone receives. It does nothing about:
-
-- clones and forks already taken;
-- GitHub's own cached views of removed commits, which can outlive the rewrite;
-- anything a crawler indexed while the repository was public.
-
-**So the scrub is not the remediation — rotation is.** Any credential that was
-ever public must be treated as compromised and rotated, and the scrub is
-housekeeping performed afterwards.
+### 1.2 One thing that is easy to mis-read as reassurance
 
 The one piece of good news here is recorded and should not be over-read: the GPL
 commit `4f3b7ec` was made **while the repository was private**, so no public GPL
@@ -163,6 +162,33 @@ Logos are stored on local disk in the `uploads` volume, deliberately — an NGO
 running `docker compose up` on a small VPS should not need an S3 account. **A
 host with ephemeral storage loses uploaded logos on restart.** Object storage is
 recorded as a deferred option (DEF-05).
+
+---
+
+## 5.4 The defaults audit (BV2)
+
+`docs/defaults-audit.md` walks every default in the codebase and asks whether it
+is a fact about THIS deployment or a decision about an installation nobody has
+met. **Four are facts about For Ocean Foundation**, and one of them is the most
+serious item found outside security work:
+
+> **`PAYU_BASE_URL` defaults to PayU's TEST gateway.** A self-hoster who does not
+> set it runs the whole donation flow against the sandbox. The site works,
+> donors complete payments, receipts render, the dashboard fills in - **and no
+> money moves.** Every symptom points away from the cause.
+
+It is ENV-01's shape at product scale: ENV-01 was a missing variable that
+silently disabled a security check; this is a present variable that silently
+disables the point of the software. Both fail in the direction that looks like
+success.
+
+The other three are `SCHEDULER_TIMEZONE=Asia/Kolkata`, `INR` hardcoded in three
+places, and `RETENTION_YEARS = 10` - a jurisdiction-specific legal figure on a
+job that deletes donation records.
+
+**None is urgent for this deployment and all four become urgent at
+publication**, which is exactly BU1's point: the audience changes, and a value
+changes status without changing content.
 
 ---
 

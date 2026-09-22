@@ -26,8 +26,24 @@ written any of the code.
 
 Lead and verifier being the same person is acceptable for a project this size
 and is worth naming as a known weakness: **nobody independent is reading the
-verification output.** If a second pair of eyes is available on the day, put
-them on §5.
+verification output.**
+
+### What would reduce it, in order of cost
+
+1. **A second person reads §5's output without running anything.** They need no
+   access, no context and no commands - only the numbers and this document. That
+   alone breaks the single point of judgement, because the failure mode here is
+   not incompetence, it is an operator who has been reading their own output for
+   three hours and knows what it is supposed to say.
+2. **They hold the go/no-go veto** at §6. Not the decision - the veto. The lead
+   still decides to proceed; the second person can stop it.
+3. Failing both: **read §5's output in a different session from the one that
+   produced it** - after a break, from the log rather than the terminal. Weaker
+   than a second person and better than nothing.
+
+Gary decides whether (1) is available. It is worth asking for even from somebody
+non-technical: every §5 check is a comparison of two numbers, and "these two
+should be equal and are not" needs no context to notice.
 
 ---
 

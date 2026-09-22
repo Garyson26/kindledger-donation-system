@@ -37,6 +37,11 @@ for_ocean_security_review.md
 # nobody can read on the day is not a runbook, and both are procedure rather
 # than exploit detail. BOTH INHERIT THE AC3 PUBLICATION GATE - a file added to
 # the tracked set does not get a quiet exception for being new.
+# BV2's defaults audit. TRACKED and under the same AC3 gate: it names
+# configuration values and their failure modes, which is procedure rather than
+# exploit detail, and it is a list Phase 6 has to act on.
+!docs/defaults-audit.md
+
 !docs/phase-4b-runbook.md
 !docs/phase-6-checklist.md
 
