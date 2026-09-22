@@ -1,0 +1,180 @@
+# Phase 6 — release checklist
+
+**Document only. Nothing here has been executed.**
+
+Phase 6 is the release: the history scrub, the publication gate, and the
+documents a stranger needs before they can run or contribute to this.
+
+---
+
+## 1. The history scrub
+
+### 1.1 Scope — what is actually in the history
+
+| Item | Where | Why it has to go |
+|---|---|---|
+| **The JWT fallback secret** | an earlier commit, since corrected — `config/jwt.js` now throws instead | A fallback in history is a **working signing key** for anyone who reads the repository. Every token it signed is forgeable |
+| **`Password@123`** | seed and fixture history | A default credential. Harmless in a fixture, and indistinguishable from a real one to a reader |
+| **`Frontend/.env`** | tracked today | Holds only `VITE_API_URL`, which Vite embeds in the bundle and which is public by construction. **Scrubbed for the shape, not the value** — a tracked `.env` is where the next secret lands |
+| **`docs/for_ocean_security_review.md`** | removed from HEAD in package 3.0, still in history | Exploit-level detail (U-5 / ADR-030) |
+
+### 1.2 THE THING THE SCRUB DOES NOT DO
+
+> **A history scrub does not undo past public exposure.**
+
+It rewrites what a future clone receives. It does nothing about:
+
+- clones and forks already taken;
+- GitHub's own cached views of removed commits, which can outlive the rewrite;
+- anything a crawler indexed while the repository was public.
+
+**So the scrub is not the remediation — rotation is.** Any credential that was
+ever public must be treated as compromised and rotated, and the scrub is
+housekeeping performed afterwards.
+
+The one piece of good news here is recorded and should not be over-read: the GPL
+commit `4f3b7ec` was made **while the repository was private**, so no public GPL
+grant exists (ADR-061). That is a statement about the licence, **not** about
+whether secrets were exposed — those are separate questions and the second one
+needs answering on its own.
+
+### 1.3 Method
+
+`git filter-repo` over a fresh clone, then force-push. Every collaborator
+re-clones; nobody rebases onto a rewritten history. Tag the pre-scrub commit
+somewhere private first, because a scrub that removes something needed is not
+reversible from the rewritten repository.
+
+---
+
+## 2. The publication gate (AC3)
+
+> **Publication requires EITHER zero open findings, OR redaction of file and
+> line for everything still open — in `docs/remediation-map.md` AND
+> `docs/entity-ownership-audit.md`.**
+
+The audit carries the same exposure in a more concentrated form: it indexes
+exactly where each entity is written and read, by file and line, which is a
+faster route to the seams than the finding list.
+
+**A file added to the tracked set inherits this gate. It does not get a quiet
+exception for being new** — which now includes `docs/ui-audit.md`,
+`docs/phase-4b-runbook.md` and this file.
+
+### 2.1 WHAT A GREEN `test:no-secrets` DOES NOT MEAN
+
+> **A passing run is NOT evidence that this repository contains no secrets, and
+> must not be cited as such at this gate.**
+
+It measures *"no tracked file assigns a non-placeholder value to a
+**credential-shaped name**"*. A real secret committed as `FOO=8f3a...` is
+invisible to it, and **no refinement of the name pattern can fix that** — the
+information is not in the name.
+
+It is kept because the failure it catches is the one that happens: somebody
+writes `JWT_SECRET=` followed by something that works.
+
+**This gate therefore requires a human read of the tracked file list.** That is
+weaker than a check, it is the strongest thing available, and per AY1 it does
+not on its own carry a closure claim.
+
+---
+
+## 3. `SECURITY.md`
+
+- How to report a vulnerability, and to whom. A named contact, not an issue
+  tracker — a public issue is a disclosure.
+- What is in scope: this repository. What is not: an NGO's own deployment, which
+  the maintainers cannot see and cannot fix.
+- Expected response time, stated honestly for a project maintained by one
+  person. **An unrealistic SLA is worse than none**, because missing it teaches
+  a reporter to go public next time.
+- The supported version. There is one: the latest release.
+
+### 3.1 Say plainly what the operator is responsible for
+
+A self-hoster inherits decisions this project cannot make for them:
+
+- **`PAYU_MERCHANT_SALT` must be set.** Without it the API refuses to build or
+  verify a PayU hash — but a stack that refuses payments is still a stack that
+  needs an operator to notice (ENV-01).
+- **`JWT_SECRET` must be ≥ 32 characters and unique per installation.** Shared
+  between two deployments, a token from one authenticates on the other.
+- **`ALLOWED_ORIGINS` must list the real frontend origins.** It fails closed
+  when blank — verified, not assumed — so a blank value is a broken site rather
+  than an open one, which is the right direction but still needs saying.
+- **The destructive jobs are OFF by default** (AT1) and each states what leaving
+  it off costs. Turning one on is a decision with a data-loss consequence.
+
+---
+
+## 4. `CONTRIBUTING.md`
+
+- How to run it: `docker compose up`, four services, and the acceptance that a
+  plain `up` works with no override.
+- How to run the tests: `npm run test:all` in the container, plus the two that
+  run elsewhere and **why** — `trust-proxy` needs the nginx stack from the host,
+  `no-committed-secrets` needs `git`, which is not in the api image.
+- The standing rules that survive this project's phases, stated once:
+  - **Measure outcomes, not presence** (BH2). A fix is verified by the behaviour
+    changing, never by the change being present.
+  - **Enumerate and state** (AY2). List every sibling and say whether each has
+    the same property. "Check nearby" has failed repeatedly.
+  - **Every closure names its channels** (BG4). Body, status, timing and
+    response size are separate channels.
+  - **Deletions get the injection-proof standard** (AV2).
+  - **No prose-only residuals** (BB5). Every residual carries a test name or the
+    word UNPINNED.
+  - **A threshold needs a derivation** (BJ2), not a comfortable number.
+- `db/schema.sql` is normative. Prisma follows it, and the drift gate is what
+  keeps that true.
+
+---
+
+## 5. Self-hosting notes
+
+### 5.1 `sharp` carries native binaries
+
+Prebuilt for common platforms. A self-hoster on an unusual architecture —
+32-bit ARM, musl without the prebuilt, a BSD — needs a build toolchain, and
+**that belongs here rather than being discovered at install time**.
+
+### 5.2 The general form worth passing on (BT1)
+
+> **An image library's INPUT FORMAT LIST is an attack surface list. A decoder
+> that accepts a format you have banned will accept it on your behalf.**
+
+This project's logo upload rejects SVG by identifying the container from its
+**magic bytes before the decoder is given the buffer** — because `sharp` decodes
+SVG happily, so "decode it and see whether it is an image" would rasterise the
+SVG and accept it, running an XML parser against attacker-controlled input on
+the way.
+
+The same sentence covers every parser handed untrusted bytes: **the formats it
+supports are the parsers you are running, whether or not you meant to.**
+
+The same shape one layer up: a disk-backed `multer` writes the raw upload to the
+serving volume **before any check runs**. Convenient defaults are chosen for
+convenience.
+
+### 5.3 The uploads volume must be persistent
+
+Logos are stored on local disk in the `uploads` volume, deliberately — an NGO
+running `docker compose up` on a small VPS should not need an S3 account. **A
+host with ephemeral storage loses uploaded logos on restart.** Object storage is
+recorded as a deferred option (DEF-05).
+
+---
+
+## 6. Open at the time of writing
+
+| Item | State |
+|---|---|
+| `SIGNUP-01` rec 3 | **Open, PINNED.** No per-address limit on `/signup`; `upsert` lets an attacker destroy a legitimate in-flight signup. A denial of registration, not a takeover |
+| The 3.5a timing separation | **Open, PINNED and MEASURED.** 5–7 ms on three sha256-scale endpoints; accepted, because equalising means a dummy database write for an address that does not exist |
+| AE1-a's partial-overlap case | **Open, PINNED.** An old snapshot of the right database shares most ids, so the identity guard passes by construction |
+| `vite` major (frontend build tooling) | **Queued.** `npm audit --omit=dev` reports 0; the advisories are dev-server only. `vite@8` is its own package |
+| Guest donation retrieval (D1 / AG4) | **Deferred with triggers**, not a phase |
+
+**Every one carries a test.** An open residual with a test cannot change without
+somebody noticing; one with a prose note can.

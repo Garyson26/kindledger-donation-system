@@ -5171,6 +5171,68 @@ anywhere in the frontend.** X1's trigger has not fired, and the deferral still
 holds after the upgrade - which is the thing the re-run was for.
 
 
+---
+
+## BU1 - THE FIRST FINDING THAT CAME FROM THE WHITELABEL FRAMING, NOT FROM SECURITY
+
+Every finding in this map so far arrived by asking a security question. This one
+arrived by asking a **product** one.
+
+Package 5.4 replaced nine hardcoded `For Ocean Foundation` strings with the
+configured organisation name, and left `"For Ocean Foundation"` as the FALLBACK
+in three places - the React default, the PDF generator's parameter default, and
+`index.html`'s `<title>`.
+
+**Correct for this deployment. Wrong for a product.** A fallback renders before
+the branding fetch resolves, so every OTHER charity installing this would show
+For Ocean Foundation's name on their own site for that moment - and
+`index.html`'s title would show it before any JavaScript ran at all.
+
+> **A default is a decision about the installation you have not met.**
+
+`organisationName` now defaults to empty - which renders as nothing, and
+**nothing beats briefly rendering the wrong organisation**. The PDF defaults to a
+generic title and `index.html` says "Donations".
+
+SPEC-5 section 10 asked for exactly this ("no hardcoded For Ocean Foundation
+string remains in the frontend") and the first pass satisfied it in spirit while
+leaving four. The literal reading was the correct one.
+
+### Why it is worth recording as a class
+
+The security questions this project has been asking - what does an attacker see,
+what does a control actually measure - do not reach it. Nothing about a fallback
+organisation name is exploitable. It is wrong because **the audience changed**:
+the code is no longer for one NGO, and a value that was a fact became an
+assumption the moment the software acquired a second possible installer.
+
+Phase 5 is the first phase where that question applies, and it should be asked
+of every remaining default before publication.
+
+---
+
+## BT3b - `npm audit` HEADLINES AND DEPENDENCY TREES DISAGREE IN BOTH DIRECTIONS
+
+Two findings, one lesson, pointing opposite ways:
+
+| | The claim | The tree | The lesson |
+|---|---|---|---|
+| **U-6** | `package.json` lists `prisma` under `devDependencies` | `@prisma/client` (a PRODUCTION dependency) pulls `prisma`, so three HIGH advisories were in the production tree | **the declaration was wrong** |
+| **BT3** | `npm audit` in `Frontend/` reports 2 vulnerabilities, **1 high** | `npm audit --omit=dev` reports **0**. Both are build tooling, and the esbuild advisory is specifically about the DEVELOPMENT SERVER | **the headline was wrong** |
+
+> **Neither the declaration nor the headline is the answer. The tree is.**
+
+And U-6 added the other half, which is the one most likely to be skipped:
+**an advisory names a vulnerable PACKAGE and a vulnerable RANGE.** Upgrading the
+thing that depends on it is a different claim - bumping Prisma to v7 would have
+changed a major version of the data layer and left all three advisories in
+place, because the vulnerable range covers v7.
+
+**Queued, not started:** `vite@8`, a build-tool major. It fixes a dev-server
+advisory that reaches no deployed site and no self-hoster, so it is its own
+package rather than something to fold into a router upgrade.
+
+
 ## Counts
 
 | State | Count | Rows |
