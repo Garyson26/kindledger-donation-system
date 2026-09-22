@@ -1,9 +1,11 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { donationsAPI, categoriesAPI } from "../utils/api";
 import { generateDonationReceipt } from "../utils/pdfGenerator";
 
 function MyDonations({ userId }) {
+  const { organisationName } = useBranding();
   const navigate = useNavigate();
   const [donations, setDonations] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -126,7 +128,7 @@ function MyDonations({ userId }) {
         {/* Filters Section */}
         <div className="bg-white rounded-lg shadow-sm p-6 mb-6 border border-gray-200">
           <div className="flex items-center gap-3 mb-4">
-            <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
             </svg>
             <h2 className="text-lg font-semibold text-gray-900">Filters</h2>
@@ -141,7 +143,7 @@ function MyDonations({ userId }) {
               <select
                 value={filters.category}
                 onChange={(e) => handleFilterChange('category', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
               >
                 <option value="all">All Categories</option>
                 {categories.map(cat => (
@@ -159,7 +161,7 @@ function MyDonations({ userId }) {
                 type="date"
                 value={filters.dateFrom}
                 onChange={(e) => handleFilterChange('dateFrom', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
               />
             </div>
 
@@ -172,7 +174,7 @@ function MyDonations({ userId }) {
                 type="date"
                 value={filters.dateTo}
                 onChange={(e) => handleFilterChange('dateTo', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
               />
             </div>
           </div>
@@ -219,7 +221,7 @@ function MyDonations({ userId }) {
                 <p className="text-gray-600 mb-6">You haven't made any donations. Start by making your first donation!</p>
                 <a
                   href="/donate"
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
                 >
                   Make a Donation
                 </a>
@@ -231,7 +233,7 @@ function MyDonations({ userId }) {
                   <div className="text-gray-600">
                     You have made <strong className="text-gray-900">{totalDonations}</strong> donation{totalDonations !== 1 ? 's' : ''}
                     {(filters.category !== 'all' || filters.dateFrom || filters.dateTo) && (
-                      <span className="text-sm text-[#05699e] ml-2">(filtered)</span>
+                      <span className="text-sm text-[var(--kl-primary)] ml-2">(filtered)</span>
                     )}
                   </div>
                   {totalDonations > 0 && (
@@ -318,13 +320,13 @@ function MyDonations({ userId }) {
                               <div className="flex gap-2 justify-center">
                                 <button
                                   onClick={() => navigate(`/my-donations/${donation._id}`)}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#05699e] hover:bg-[#044d75] text-white text-sm font-medium rounded-lg transition-colors duration-200"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white text-sm font-medium rounded-lg transition-colors duration-200"
                                   title="View Details"
                                 >
                                   👁️ View
                                 </button>
                                 <button
-                                  onClick={() => generateDonationReceipt(donation)}
+                                  onClick={() => generateDonationReceipt(donation, organisationName)}
                                   className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-medium rounded-lg transition-colors duration-200"
                                   title="Download Receipt PDF"
                                 >
@@ -348,7 +350,7 @@ function MyDonations({ userId }) {
                       className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                         currentPage === 1
                           ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                          : 'bg-[#05699e] text-white hover:bg-[#044d73] cursor-pointer'
+                          : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] cursor-pointer'
                       }`}
                     >
                       ← Previous
@@ -361,8 +363,8 @@ function MyDonations({ userId }) {
                           onClick={() => setCurrentPage(page)}
                           className={`px-3 py-2 rounded-lg font-medium min-w-[40px] transition-all duration-200 ${
                             currentPage === page
-                              ? 'bg-[#05699e] text-white font-bold'
-                              : 'bg-white text-[#05699e] border border-[#05699e] hover:bg-[#05699e]/10'
+                              ? 'bg-[var(--kl-primary)] text-white font-bold'
+                              : 'bg-white text-[var(--kl-primary)] border border-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10'
                           }`}
                         >
                           {page}
@@ -376,7 +378,7 @@ function MyDonations({ userId }) {
                       className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                         currentPage === totalPages
                           ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                          : 'bg-[#05699e] text-white hover:bg-[#044d73] cursor-pointer'
+                          : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] cursor-pointer'
                       }`}
                     >
                       Next →

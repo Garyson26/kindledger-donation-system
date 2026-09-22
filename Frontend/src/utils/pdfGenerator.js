@@ -1,7 +1,18 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
-export const generateDonationReceipt = (donation) => {
+/**
+ * SPEC-5 5.4. `organisationName` is a PARAMETER, not a constant.
+ *
+ * This file is one of the two places a component-level find-and-replace would
+ * miss - it renders a PDF rather than a page, so it has no access to React
+ * context and no `useBranding()` to call. The caller passes the name it already
+ * holds.
+ *
+ * The default keeps every existing call site working and rendering exactly as
+ * before, so this change is additive rather than a coordinated edit.
+ */
+export const generateDonationReceipt = (donation, organisationName = 'Donation Receipt') => {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.width;
 
@@ -49,7 +60,7 @@ export const generateDonationReceipt = (donation) => {
   doc.setFontSize(18);
   doc.setFont(undefined, 'bold');
   doc.setTextColor(255, 255, 255);
-  doc.text('For Ocean Foundation', pageWidth / 2, 18, { align: 'center' });
+  doc.text(organisationName, pageWidth / 2, 18, { align: 'center' });
 
   // Receipt Title
   doc.setFontSize(14);
@@ -255,7 +266,7 @@ export const generateDonationReceipt = (donation) => {
   doc.save(fileName);
 };
 
-export const generateUserDonationReport = (userGroup) => {
+export const generateUserDonationReport = (userGroup, organisationName = 'Donation Report') => {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.width;
   const primaryColor = [5, 105, 158];
@@ -283,7 +294,7 @@ export const generateUserDonationReport = (userGroup) => {
   doc.setFontSize(18);
   doc.setFont(undefined, 'bold');
   doc.setTextColor(255, 255, 255);
-  doc.text('For Ocean Foundation', pageWidth / 2, 18, { align: 'center' });
+  doc.text(organisationName, pageWidth / 2, 18, { align: 'center' });
 
   // Report Title
   doc.setFontSize(14);

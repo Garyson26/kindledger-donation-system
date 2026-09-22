@@ -3,7 +3,7 @@ import { adminAPI } from "../utils/api";
 
 function StatCard({ icon, title, value, subtitle, color, loading }) {
   const colorMap = {
-    blue: "bg-[#05699e] text-white",
+    blue: "bg-[var(--kl-primary)] text-white",
     green: "bg-green-600 text-white",
     purple: "bg-purple-600 text-white",
     orange: "bg-orange-600 text-white",
@@ -47,7 +47,7 @@ function QuickActionCard({ icon, title, description, link }) {
           <h3 className="text-lg font-semibold text-gray-900 mb-1">{title}</h3>
           <p className="text-sm text-gray-600">{description}</p>
         </div>
-        <div className="flex-shrink-0 text-xl text-[#05699e]">
+        <div className="flex-shrink-0 text-xl text-[var(--kl-primary)]">
           →
         </div>
       </div>
@@ -90,7 +90,7 @@ function AdminDashboard() {
             <h3 className="text-2xl font-bold text-gray-900 mb-2">Unable to load dashboard</h3>
             <p className="text-gray-600 mb-6">{error}</p>
             <button
-              className="px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+              className="px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
               onClick={() => window.location.reload()}
             >
               Try Again

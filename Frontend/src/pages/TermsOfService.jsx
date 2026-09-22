@@ -1,7 +1,9 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React from 'react';
 import '../styles/TermsOfService.css';
 
 const TermsOfService = () => {
+  const { organisationName } = useBranding();
   return (
     <div className="terms-container">
       <div className="terms-content">
@@ -14,7 +16,7 @@ const TermsOfService = () => {
         <section>
           <h2>1. Agreement to Terms</h2>
           <p>
-            By accessing and using the For Ocean Foundation Donation, you accept and agree to be bound by the terms and provision of this agreement. If you do not agree to abide by the above, please do not use this service.
+            By accessing and using the {organisationName} Donation, you accept and agree to be bound by the terms and provision of this agreement. If you do not agree to abide by the above, please do not use this service.
           </p>
         </section>
 

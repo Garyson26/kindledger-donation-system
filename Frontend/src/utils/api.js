@@ -288,3 +288,8 @@ export const paymentAPI = {
 
 export default apiRequest;
 
+// SPEC-5 5.4. PUBLIC and unauthenticated - the donor app needs branding before
+// login, and before it knows whether anyone will log in at all.
+export const brandingAPI = {
+  get: () => apiRequest("/branding"),
+};

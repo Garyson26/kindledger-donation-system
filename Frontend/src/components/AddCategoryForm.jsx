@@ -46,7 +46,7 @@ function AddCategoryForm({
             placeholder="e.g., Education, Healthcare, Food"
             value={form.name}
             onChange={e => setForm({ ...form, name: e.target.value })}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
             name="name"
             required
           />
@@ -64,7 +64,7 @@ function AddCategoryForm({
               placeholder="e.g., 5000"
               value={form.donationAmount}
               onChange={e => setForm({ ...form, donationAmount: e.target.value })}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
               name="donationAmount"
               required
             />
@@ -80,7 +80,7 @@ function AddCategoryForm({
             placeholder="Brief one-line description"
             value={form.sortDescription}
             onChange={e => setForm({ ...form, sortDescription: e.target.value })}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
             name="sortDescription"
             required
           />
@@ -107,10 +107,10 @@ function AddCategoryForm({
 
           <div className="space-y-3">
             {form.descriptions.map((desc, index) => (
-              <div key={index} className="flex gap-2 items-start bg-white rounded-lg p-3 border border-gray-200 hover:border-[#05699e]/50 transition-colors duration-200">
+              <div key={index} className="flex gap-2 items-start bg-white rounded-lg p-3 border border-gray-200 hover:border-[var(--kl-primary)]/50 transition-colors duration-200">
                 <div className="flex-1 relative">
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="inline-flex items-center justify-center w-6 h-6 text-xs font-bold text-white bg-[#05699e] rounded-full">
+                    <span className="inline-flex items-center justify-center w-6 h-6 text-xs font-bold text-white bg-[var(--kl-primary)] rounded-full">
                       {index + 1}
                     </span>
                     <span className="text-xs font-medium text-gray-500">Description {index + 1}</span>
@@ -119,7 +119,7 @@ function AddCategoryForm({
                     placeholder={`Enter description details here...`}
                     value={desc}
                     onChange={e => updateDescription(index, e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent resize-none text-sm"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent resize-none text-sm"
                     rows="3"
                   />
                 </div>
@@ -154,7 +154,7 @@ function AddCategoryForm({
         <div className="flex gap-3 pt-4 border-t border-gray-200">
           <button
             type="submit"
-            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={editing ? "M5 13l4 4L19 7" : "M12 4v16m8-8H4"} />

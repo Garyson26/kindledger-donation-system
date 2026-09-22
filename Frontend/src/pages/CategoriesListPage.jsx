@@ -144,7 +144,7 @@ function CategoriesListPage() {
           </div>
           <button
             onClick={() => navigate("/admin/add-category")}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -157,7 +157,7 @@ function CategoriesListPage() {
         {loading ? (
           <div className="flex items-center justify-center py-20">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#05699e] mx-auto mb-4"></div>
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[var(--kl-primary)] mx-auto mb-4"></div>
               <p className="text-gray-600">Loading categories...</p>
             </div>
           </div>
@@ -201,7 +201,7 @@ function CategoriesListPage() {
                           onClick={() => setCurrentPage(page)}
                           className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                             currentPage === page
-                              ? 'bg-[#05699e] text-white'
+                              ? 'bg-[var(--kl-primary)] text-white'
                               : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
                           }`}
                         >

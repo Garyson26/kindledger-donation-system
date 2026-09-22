@@ -345,7 +345,7 @@ function AdminCharts() {
             <div className="flex items-end">
               <button
                 onClick={handleApplyFilter}
-                className="w-full px-4 py-2 bg-[#05699e] text-white font-medium rounded-lg hover:bg-[#044d73] transition-colors duration-200"
+                className="w-full px-4 py-2 bg-[var(--kl-primary)] text-white font-medium rounded-lg hover:bg-[var(--kl-primary-dark)] transition-colors duration-200"
               >
                 Apply Filter
               </button>

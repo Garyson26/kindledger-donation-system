@@ -1,3 +1,4 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import Input from "../components/Input";
@@ -9,6 +10,7 @@ import { useToast } from "../utils/useToast";
 import "../styles/LoginPage.css";
 
 function SignupPage({ onSignup }) {
+  const { organisationName } = useBranding();
   const [form, setForm] = useState({ name: "", email: "", password: "" });
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -137,7 +139,7 @@ function SignupPage({ onSignup }) {
           <div className="flex justify-center mb-6">
             <img
               src="/images/logo.jpg"
-              alt="For Ocean Foundation Logo"
+              alt={`${organisationName} logo`}
               className="h-20 w-20 rounded-full shadow-lg ring-4 ring-blue-100"
             />
           </div>
@@ -145,7 +147,7 @@ function SignupPage({ onSignup }) {
             Create Account
           </h1>
           <p className="text-gray-600 text-lg">
-            Join For Ocean Foundation and make a difference
+            Join {organisationName} and make a difference
           </p>
         </div>
 
@@ -198,7 +200,7 @@ function SignupPage({ onSignup }) {
                   onChange={handleChange}
                   disabled={loading}
                   required
-                  className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                 />
                 <button
                   type="button"
@@ -243,7 +245,7 @@ function SignupPage({ onSignup }) {
                 Already have an account?{" "}
                 <Link
                   to="/login"
-                  className="font-medium text-[#05699e] hover:text-[#044d73] transition-colors duration-200"
+                  className="font-medium text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] transition-colors duration-200"
                 >
                   Sign in here
                 </Link>
@@ -281,7 +283,7 @@ function SignupPage({ onSignup }) {
                   }}
                   placeholder="000000"
                   maxLength={6}
-                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                   disabled={loading}
                 />
               </div>
@@ -327,14 +329,14 @@ function SignupPage({ onSignup }) {
             By creating an account, you agree to our{" "}
             <Link
               to="/terms"
-              className="text-[#05699e] hover:text-[#044d73] font-medium transition-colors duration-200"
+              className="text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] font-medium transition-colors duration-200"
             >
               Terms of Service
             </Link>{" "}
             and{" "}
             <Link
               to="/privacy"
-              className="text-[#05699e] hover:text-[#044d73] font-medium transition-colors duration-200"
+              className="text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] font-medium transition-colors duration-200"
             >
               Privacy Policy
             </Link>

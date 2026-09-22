@@ -162,7 +162,7 @@ function ForgotPassword() {
         {/* Header */}
         <div className="text-center">
           <div className="flex justify-center mb-6">
-            <div className="bg-[#05699e] p-4 rounded-full shadow-lg">
+            <div className="bg-[var(--kl-primary)] p-4 rounded-full shadow-lg">
               <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
               </svg>
@@ -183,12 +183,12 @@ function ForgotPassword() {
           {[1, 2, 3].map((s) => (
             <div key={s} className="flex items-center flex-1">
               <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${
-                step >= s ? 'bg-[#05699e] text-white' : 'bg-gray-300 text-gray-600'
+                step >= s ? 'bg-[var(--kl-primary)] text-white' : 'bg-gray-300 text-gray-600'
               }`}>
                 {s}
               </div>
               {s < 3 && (
-                <div className={`flex-1 h-1 mx-2 ${step > s ? 'bg-[#05699e]' : 'bg-gray-300'}`} />
+                <div className={`flex-1 h-1 mx-2 ${step > s ? 'bg-[var(--kl-primary)]' : 'bg-gray-300'}`} />
               )}
             </div>
           ))}
@@ -215,7 +215,7 @@ function ForgotPassword() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="Enter your registered email"
                     disabled={loading}
-                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                     required
                   />
                 </div>
@@ -224,7 +224,7 @@ function ForgotPassword() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full inline-flex justify-center items-center gap-2 px-6 py-3 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full inline-flex justify-center items-center gap-2 px-6 py-3 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? (
                   <>
@@ -263,12 +263,12 @@ function ForgotPassword() {
                   placeholder="Enter 6-digit code"
                   maxLength={6}
                   disabled={loading}
-                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                   required
                 />
                 {timer > 0 && (
                   <p className="mt-2 text-sm text-gray-600 text-center">
-                    Code expires in: <strong className="text-[#05699e]">{formatTime(timer)}</strong>
+                    Code expires in: <strong className="text-[var(--kl-primary)]">{formatTime(timer)}</strong>
                   </p>
                 )}
               </div>
@@ -276,7 +276,7 @@ function ForgotPassword() {
               <button
                 type="submit"
                 disabled={loading || code.length !== 6}
-                className="w-full inline-flex justify-center items-center gap-2 px-6 py-3 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full inline-flex justify-center items-center gap-2 px-6 py-3 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? "Verifying..." : "Verify Code"}
               </button>
@@ -286,7 +286,7 @@ function ForgotPassword() {
                   type="button"
                   onClick={handleResendCode}
                   disabled={loading || timer > 0}
-                  className="text-sm text-[#05699e] hover:text-[#044d73] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="text-sm text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Didn't receive code? Resend
                 </button>
@@ -313,7 +313,7 @@ function ForgotPassword() {
                     onChange={(e) => setNewPassword(e.target.value)}
                     placeholder="Enter new password"
                     disabled={loading}
-                    className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                    className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                     required
                   />
                   <button
@@ -355,7 +355,7 @@ function ForgotPassword() {
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Confirm new password"
                     disabled={loading}
-                    className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                    className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                     required
                   />
                   <button
@@ -381,7 +381,7 @@ function ForgotPassword() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full inline-flex justify-center items-center gap-2 px-6 py-3 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full inline-flex justify-center items-center gap-2 px-6 py-3 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? (
                   <>
@@ -409,7 +409,7 @@ function ForgotPassword() {
               Remember your password?{" "}
               <Link
                 to="/login"
-                className="font-medium text-[#05699e] hover:text-[#044d73] transition-colors duration-200"
+                className="font-medium text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] transition-colors duration-200"
               >
                 Back to Login
               </Link>

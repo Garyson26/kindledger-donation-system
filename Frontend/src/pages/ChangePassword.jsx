@@ -66,7 +66,7 @@ function ChangePassword() {
         {/* Change Password Form Card */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <div className="flex items-center gap-3 mb-6">
-            <div className="bg-[#05699e] p-2 rounded-lg">
+            <div className="bg-[var(--kl-primary)] p-2 rounded-lg">
               <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
               </svg>
@@ -94,7 +94,7 @@ function ChangePassword() {
                   value={form.oldPassword}
                   onChange={handleChange}
                   required
-                  className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                 />
                 <button
                   type="button"
@@ -135,7 +135,7 @@ function ChangePassword() {
                   value={form.newPassword}
                   onChange={handleChange}
                   required
-                  className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                 />
                 <button
                   type="button"
@@ -164,7 +164,7 @@ function ChangePassword() {
             <div className="flex items-center gap-3 pt-4">
               <button
                 type="submit"
-                className="inline-flex items-center gap-2 px-6 py-3 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200 shadow-sm"
+                className="inline-flex items-center gap-2 px-6 py-3 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200 shadow-sm"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />

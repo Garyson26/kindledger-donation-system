@@ -99,7 +99,7 @@ function DonationDetails() {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-[#05699e] mx-auto"></div>
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-[var(--kl-primary)] mx-auto"></div>
           <p className="mt-4 text-gray-600">Loading donation details...</p>
         </div>
       </div>
@@ -116,7 +116,7 @@ function DonationDetails() {
             <p className="text-gray-600 mb-6">{error || 'Donation not found'}</p>
             <button
               onClick={() => navigate(-1)}
-              className="px-6 py-2 bg-[#05699e] text-white rounded-lg hover:bg-[#044d75] transition-colors"
+              className="px-6 py-2 bg-[var(--kl-primary)] text-white rounded-lg hover:bg-[var(--kl-primary-dark)] transition-colors"
             >
               Go Back
             </button>
@@ -133,7 +133,7 @@ function DonationDetails() {
         <div className="mb-6 flex items-center justify-between">
           <button
             onClick={() => navigate(-1)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-[#05699e] hover:bg-[#05699e]/10 rounded-lg transition-colors"
+            className="inline-flex items-center gap-2 px-4 py-2 text-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10 rounded-lg transition-colors"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -147,7 +147,7 @@ function DonationDetails() {
         {/* Main Card */}
         <div className="bg-white rounded-lg shadow-md overflow-hidden">
           {/* Header Section */}
-          <div className="bg-gradient-to-r from-[#05699e] to-[#044d75] text-white p-6">
+          <div className="bg-gradient-to-r from-[var(--kl-primary)] to-[var(--kl-primary-dark)] text-white p-6">
             <div className="flex justify-between items-start mb-4">
               <div>
                 <h2 className="text-2xl font-bold mb-2">{donation.category?.name || 'N/A'}</h2>
@@ -171,7 +171,7 @@ function DonationDetails() {
             {/* Donor Information */}
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                 </svg>
                 Donor Information
@@ -211,7 +211,7 @@ function DonationDetails() {
             {/* Amount Breakdown */}
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 Amount Breakdown
@@ -227,7 +227,7 @@ function DonationDetails() {
                 </div>
                 <div className="flex justify-between items-center pt-2">
                   <span className="text-lg font-semibold text-gray-900">Total Amount</span>
-                  <span className="text-xl font-bold text-[#05699e]">{formatCurrency(donation.amount)}</span>
+                  <span className="text-xl font-bold text-[var(--kl-primary)]">{formatCurrency(donation.amount)}</span>
                 </div>
               </div>
             </div>
@@ -235,7 +235,7 @@ function DonationDetails() {
             {/* Payment Information */}
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
                 </svg>
                 Payment Information
@@ -325,7 +325,7 @@ function DonationDetails() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                   </svg>
                   Category
@@ -345,7 +345,7 @@ function DonationDetails() {
 
               <div>
                 <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                   </svg>
                   Date Information

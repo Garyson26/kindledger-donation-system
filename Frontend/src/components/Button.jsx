@@ -17,9 +17,9 @@ const Button = ({
 
   // Variant classes
   const variantClasses = {
-    primary: 'bg-gradient-to-br from-[#05699e] to-[#044d73] text-white shadow-md hover:from-[#044d73] hover:to-[#033a57] hover:-translate-y-0.5 hover:shadow-lg active:translate-y-0 active:shadow-md focus:ring-[#05699e]',
+    primary: 'bg-gradient-to-br from-[var(--kl-primary)] to-[var(--kl-primary-dark)] text-white shadow-md hover:from-[var(--kl-primary-dark)] hover:to-[var(--kl-primary-darkest)] hover:-translate-y-0.5 hover:shadow-lg active:translate-y-0 active:shadow-md focus:ring-[var(--kl-primary)]',
     secondary: 'bg-gradient-to-br from-green-600 to-green-700 text-white shadow-md hover:from-green-700 hover:to-green-800 hover:-translate-y-0.5 hover:shadow-lg active:translate-y-0 active:shadow-md focus:ring-green-600',
-    outline: 'bg-transparent text-[#05699e] border-2 border-[#05699e] hover:bg-[#05699e] hover:text-white hover:-translate-y-0.5 hover:shadow-md focus:ring-[#05699e]',
+    outline: 'bg-transparent text-[var(--kl-primary)] border-2 border-[var(--kl-primary)] hover:bg-[var(--kl-primary)] hover:text-white hover:-translate-y-0.5 hover:shadow-md focus:ring-[var(--kl-primary)]',
     success: 'bg-gradient-to-br from-green-500 to-green-700 text-white shadow-md hover:from-green-700 hover:to-green-800 hover:-translate-y-0.5 hover:shadow-lg active:translate-y-0 active:shadow-md focus:ring-green-600',
     error: 'bg-gradient-to-br from-red-600 to-red-700 text-white shadow-md hover:from-red-700 hover:to-red-800 hover:-translate-y-0.5 hover:shadow-lg active:translate-y-0 active:shadow-md focus:ring-red-600',
     warning: 'bg-gradient-to-br from-yellow-500 to-yellow-600 text-white shadow-md hover:from-yellow-600 hover:to-yellow-700 hover:-translate-y-0.5 hover:shadow-lg active:translate-y-0 active:shadow-md focus:ring-yellow-600',

@@ -1,8 +1,10 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import Button from "../components/Button";
 
 function Navbar({ isAuthenticated, onLogout, userRole }) {
+  const { organisationName } = useBranding();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const location = useLocation();
@@ -33,7 +35,7 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
             <Link to="/" onClick={closeMenu} className="flex items-center">
               <img
                 src="/images/logo.jpg"
-                alt="For Ocean Foundation Logo"
+                alt={`${organisationName} logo`}
                 className="h-10 w-auto rounded-md hover:opacity-90 transition-opacity"
               />
             </Link>
@@ -64,8 +66,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                       isActive('/admin/dashboard')
-                          ? 'bg-[#05699e] text-white'
-                          : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                          ? 'bg-[var(--kl-primary)] text-white'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                   }`}
               >
                 Dashboard
@@ -74,8 +76,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                 to="/donations"
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                   isActive('/donations')
-                    ? 'bg-[#05699e] text-white'
-                    : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                    ? 'bg-[var(--kl-primary)] text-white'
+                    : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                 }`}
               >
                 Donations
@@ -88,8 +90,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                       isActive('/admin/charts')
-                          ? 'bg-[#05699e] text-white'
-                          : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                          ? 'bg-[var(--kl-primary)] text-white'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                   }`}
               >
                 Charts
@@ -99,8 +101,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                       isActive('/admin/users')
-                          ? 'bg-[#05699e] text-white'
-                          : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                          ? 'bg-[var(--kl-primary)] text-white'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                   }`}
               >
                 Users
@@ -113,8 +115,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                       isActive('/admin/branding')
-                          ? 'bg-[#05699e] text-white'
-                          : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                          ? 'bg-[var(--kl-primary)] text-white'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                   }`}
               >
                 Branding
@@ -129,8 +131,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                 to="/my-donations"
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                   isActive('/my-donations')
-                    ? 'bg-[#05699e] text-white'
-                    : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                    ? 'bg-[var(--kl-primary)] text-white'
+                    : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                 }`}
               >
                 My Donations
@@ -139,8 +141,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
               to="/donate"
               className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
               isActive('/donate')
-              ? 'bg-[#05699e] text-white'
-              : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+              ? 'bg-[var(--kl-primary)] text-white'
+              : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
             }`}
           >
             Donate
@@ -155,8 +157,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
                       isActive('/categories')
-                          ? 'bg-[#05699e] text-white'
-                          : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                          ? 'bg-[var(--kl-primary)] text-white'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-[var(--kl-primary)]'
                   }`}
               >
                 Categories
@@ -183,7 +185,7 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
               <div className="relative">
                 <button
                   onClick={toggleDropdown}
-                  className="flex items-center justify-center w-10 h-10 rounded-full bg-[#05699e] text-white hover:bg-[#044d73] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#05699e] transition-colors duration-200"
+                  className="flex items-center justify-center w-10 h-10 rounded-full bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[var(--kl-primary)] transition-colors duration-200"
                   aria-label="User menu"
                 >
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -199,7 +201,7 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`flex items-center px-4 py-2 text-sm transition-colors duration-200 ${
                     isActive('/profile')
-                      ? 'bg-[#05699e]/10 text-[#05699e]'
+                      ? 'bg-[var(--kl-primary)]/10 text-[var(--kl-primary)]'
                       : 'text-gray-700 hover:bg-gray-100'
                   }`}
                 >
@@ -213,7 +215,7 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                   onClick={() => setIsDropdownOpen(false)}
                   className={`flex items-center px-4 py-2 text-sm transition-colors duration-200 ${
                     isActive('/change-password')
-                      ? 'bg-[#05699e]/10 text-[#05699e]'
+                      ? 'bg-[var(--kl-primary)]/10 text-[var(--kl-primary)]'
                       : 'text-gray-700 hover:bg-gray-100'
                   }`}
                 >
@@ -277,8 +279,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
             onClick={closeMenu}
             className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
               isActive('/categories')
-                ? 'bg-[#05699e] text-white'
-                : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                ? 'bg-[var(--kl-primary)] text-white'
+                : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
             }`}
           >
             Categories
@@ -291,8 +293,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
               onClick={closeMenu}
               className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
                 isActive('/donations')
-                  ? 'bg-[#05699e] text-white'
-                  : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                  ? 'bg-[var(--kl-primary)] text-white'
+                  : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
               }`}
             >
               Donations
@@ -306,8 +308,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
               onClick={closeMenu}
               className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
                 isActive('/my-donations')
-                  ? 'bg-[#05699e] text-white'
-                  : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                  ? 'bg-[var(--kl-primary)] text-white'
+                  : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
               }`}
             >
               My DonationsMy Donations
@@ -326,8 +328,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                 onClick={closeMenu}
                 className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
                   isActive('/admin/dashboard')
-                    ? 'bg-[#05699e] text-white'
-                    : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                    ? 'bg-[var(--kl-primary)] text-white'
+                    : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
                 }`}
               >
                 Dashboard
@@ -337,8 +339,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                 onClick={closeMenu}
                 className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
                   isActive('/admin/charts')
-                    ? 'bg-[#05699e] text-white'
-                    : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                    ? 'bg-[var(--kl-primary)] text-white'
+                    : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
                 }`}
               >
                 Charts
@@ -348,8 +350,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                 onClick={closeMenu}
                 className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
                   isActive('/admin/users')
-                    ? 'bg-[#05699e] text-white'
-                    : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                    ? 'bg-[var(--kl-primary)] text-white'
+                    : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
                 }`}
               >
                 Users
@@ -359,8 +361,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
                 onClick={closeMenu}
                 className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
                   isActive('/admin/categories-list') || isActive('/admin/add-category')
-                    ? 'bg-[#05699e] text-white'
-                    : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                    ? 'bg-[var(--kl-primary)] text-white'
+                    : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
                 }`}
               >
                 Categories
@@ -375,8 +377,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
             onClick={closeMenu}
             className={`block px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
               isActive('/donate')
-                ? 'bg-[#05699e] text-white'
-                : 'bg-[#05699e] text-white hover:bg-[#044d73]'
+                ? 'bg-[var(--kl-primary)] text-white'
+                : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)]'
             }`}
           >
             Donate
@@ -413,8 +415,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
             onClick={closeMenu}
             className={`flex items-center px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
               isActive('/profile')
-                ? 'bg-[#05699e] text-white'
-                : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                ? 'bg-[var(--kl-primary)] text-white'
+                : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
             }`}
           >
             <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -427,8 +429,8 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
             onClick={closeMenu}
             className={`flex items-center px-3 py-2 rounded-md text-base font-medium transition-colors duration-200 ${
               isActive('/change-password')
-                ? 'bg-[#05699e] text-white'
-                : 'text-gray-700 hover:bg-gray-200 hover:text-[#05699e]'
+                ? 'bg-[var(--kl-primary)] text-white'
+                : 'text-gray-700 hover:bg-gray-200 hover:text-[var(--kl-primary)]'
             }`}
           >
                 <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">

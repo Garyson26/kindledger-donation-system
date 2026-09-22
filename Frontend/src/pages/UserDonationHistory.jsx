@@ -1,3 +1,4 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { donationsAPI, categoriesAPI, adminAPI } from "../utils/api";
@@ -6,6 +7,7 @@ import Toast from "../components/Toast";
 import { useToast } from "../utils/useToast";
 
 function UserDonationHistory() {
+  const { organisationName } = useBranding();
   const { userId } = useParams();
   const navigate = useNavigate();
   const { toasts, showToast, hideToast } = useToast();
@@ -125,7 +127,7 @@ function UserDonationHistory() {
 
   const handleDownloadReceipt = async (donation) => {
     try {
-      await generateDonationReceipt(donation);
+      await generateDonationReceipt(donation, organisationName);
       showToast("Receipt downloaded successfully", "success");
     } catch (error) {
       console.error("Error generating receipt:", error);
@@ -158,7 +160,7 @@ function UserDonationHistory() {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#05699e] mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[var(--kl-primary)] mx-auto mb-4"></div>
           <p className="text-gray-600">Loading donation history...</p>
         </div>
       </div>
@@ -183,7 +185,7 @@ function UserDonationHistory() {
         <div className="mb-8">
           <button
             onClick={() => navigate(-1)}
-            className="inline-flex items-center gap-2 text-[#05699e] hover:text-[#044d73] font-medium mb-4 transition-colors"
+            className="inline-flex items-center gap-2 text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] font-medium mb-4 transition-colors"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -194,7 +196,7 @@ function UserDonationHistory() {
           {user && (
             <div className="bg-white rounded-lg shadow-sm p-6 border border-gray-200">
               <div className="flex items-center gap-4">
-                <div className="w-16 h-16 bg-[#05699e] rounded-full flex items-center justify-center text-white text-2xl font-bold">
+                <div className="w-16 h-16 bg-[var(--kl-primary)] rounded-full flex items-center justify-center text-white text-2xl font-bold">
                   {user.name?.charAt(0).toUpperCase() || 'U'}
                 </div>
                 <div>
@@ -228,7 +230,7 @@ function UserDonationHistory() {
           <div className="bg-white rounded-lg shadow-sm p-6 border border-gray-200">
             <div className="flex items-center">
               <div className="flex-shrink-0">
-                <svg className="h-8 w-8 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="h-8 w-8 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
@@ -276,14 +278,14 @@ function UserDonationHistory() {
         <div className="bg-white rounded-lg shadow-sm p-6 mb-6 border border-gray-200">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
-              <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
               </svg>
               <h2 className="text-lg font-semibold text-gray-900">Filters</h2>
             </div>
             <button
               onClick={handleResetFilters}
-              className="text-sm text-gray-600 hover:text-[#05699e] font-medium transition-colors"
+              className="text-sm text-gray-600 hover:text-[var(--kl-primary)] font-medium transition-colors"
             >
               Clear All
             </button>
@@ -298,7 +300,7 @@ function UserDonationHistory() {
               <select
                 value={filters.category}
                 onChange={(e) => handleFilterChange('category', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
               >
                 <option value="all">All Categories</option>
                 {categories.map(cat => (
@@ -316,7 +318,7 @@ function UserDonationHistory() {
                 type="date"
                 value={filters.dateFrom}
                 onChange={(e) => handleFilterChange('dateFrom', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
               />
             </div>
 
@@ -329,7 +331,7 @@ function UserDonationHistory() {
                 type="date"
                 value={filters.dateTo}
                 onChange={(e) => handleFilterChange('dateTo', e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
               />
             </div>
           </div>
@@ -339,7 +341,7 @@ function UserDonationHistory() {
         {loading ? (
           <div className="flex items-center justify-center py-12">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#05699e] mx-auto mb-4"></div>
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[var(--kl-primary)] mx-auto mb-4"></div>
               <p className="text-gray-600">Loading donations...</p>
             </div>
           </div>
@@ -401,7 +403,7 @@ function UserDonationHistory() {
                           {donation.paymentStatus === 'Paid' && (
                             <button
                               onClick={() => handleDownloadReceipt(donation)}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 bg-[#05699e] hover:bg-[#044d73] text-white text-xs font-medium rounded-lg transition-colors duration-200"
+                              className="inline-flex items-center gap-1 px-3 py-1.5 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white text-xs font-medium rounded-lg transition-colors duration-200"
                               title="Download Receipt"
                             >
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -483,7 +485,7 @@ function UserDonationHistory() {
                               onClick={() => setCurrentPage(pageNum)}
                               className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
                                 currentPage === pageNum
-                                  ? 'z-10 bg-[#05699e] border-[#05699e] text-white'
+                                  ? 'z-10 bg-[var(--kl-primary)] border-[var(--kl-primary)] text-white'
                                   : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
                               }`}
                             >

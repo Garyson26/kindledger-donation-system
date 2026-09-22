@@ -21,9 +21,9 @@ function ConfirmModal({ isOpen, onClose, onConfirm, title, message, confirmText 
       )
     },
     info: {
-      button: "bg-[#05699e] hover:bg-[#044d73] focus:ring-[#05699e]",
+      button: "bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] focus:ring-[var(--kl-primary)]",
       icon: (
-        <svg className="w-6 h-6 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-6 h-6 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       )

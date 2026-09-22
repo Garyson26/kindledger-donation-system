@@ -20,6 +20,7 @@ import EditCategory from "./pages/EditCategory";
 import Footer from "./pages/Footer";
 import AdminUsers from "./pages/AdminUsers";
 import AdminBranding from "./pages/AdminBranding";
+import { BrandingProvider } from "./branding/BrandingProvider";
 import AdminCharts from "./pages/AdminCharts";
 import UserDonationHistory from "./pages/UserDonationHistory";
 import PaymentSuccess from "./pages/PaymentSuccess";
@@ -59,7 +60,13 @@ const getUserFromToken = () => {
 function App() {
   return (
     <Router>
-      <AppContent />
+      {/* SPEC-5 5.4. One fetch of GET /api/branding, and the configured
+          colours applied as CSS custom properties - so a colour change is
+          visible on the next page load with NO REBUILD, which is the point of
+          the whitelabel phase. An NGO does not run a frontend build. */}
+      <BrandingProvider>
+        <AppContent />
+      </BrandingProvider>
     </Router>
   );
 }
