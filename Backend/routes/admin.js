@@ -483,6 +483,24 @@ router.get("/cleanup/preview", async (req, res) => {
   }
 });
 
+// =============================================================================
+// SPEC-5 5.2 - branding
+// =============================================================================
+// The handler lives in routes/branding.js next to its validation and its public
+// counterpart, so the two projections of one table are read together. It is
+// MOUNTED here because this router is what carries adminAuth.
+router.put("/branding", require("./branding").updateBranding);
+
+// The admin form needs the provenance fields the public view omits.
+router.get("/branding", async (req, res) => {
+  try {
+    const view = await require("../repositories/branding").getForAdmin();
+    return res.json(view || {});
+  } catch (err) {
+    return failed(res, "Could not load branding", err, { tag: "admin" });
+  }
+});
+
 module.exports = router;
 
 

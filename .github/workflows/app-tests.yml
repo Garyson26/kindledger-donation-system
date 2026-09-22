@@ -271,6 +271,13 @@ jobs:
         working-directory: Backend
         run: npm run test:no-secrets
 
+      # SPEC-5 5.2. The branding singleton had zero callers from Phase 1a until
+      # now (AS4), so these tests establish the shape rather than defend it -
+      # including that the PUBLIC projection never carries updated_by.
+      - name: Branding API (SPEC-5 5.2)
+        working-directory: Backend
+        run: npm run test:branding
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------
