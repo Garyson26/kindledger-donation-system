@@ -229,9 +229,9 @@ jobs:
       # one suite that exists to drive it. On its first run it reported 34, of
       # which 32 were a test fixture creating its auth user in MongoDB - the
       # bridge was not carrying traffic, the suite was manufacturing it.
-      - name: Bridge exit check - zero MongoDB fallbacks (AE3 part 1)
+      - name: Run every suite (was AE3 part 1, retired with the bridges)
         working-directory: Backend
-        run: npm run test:bridge-exit
+        run: npm run test:all
 
       # BB4/BC1. A BLOCKING pre-flight finding that the load does NOT refuse
       # cannot be added silently. Writing this check found TWO existing errors:

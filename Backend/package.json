@@ -38,13 +38,13 @@
     "test:payment-char": "node --test test/payment-characterisation.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
     "test:charset": "node db/check-charset.js",
-    "test:bridge-exit": "node test/bridge-exit-check.js",
     "test:preflight-findings": "node --test test/preflight-findings.test.js",
     "test:signup-timing": "node test/signup-timing.test.js",
     "test:password-timing": "node test/password-timing.test.js",
     "test:no-secrets": "node --test test/no-committed-secrets.test.js",
     "fixture:legacy-mongo": "node scripts/rebuildLegacyMongo.js",
-    "test:branding": "node --test test/branding.test.js"
+    "test:branding": "node --test test/branding.test.js",
+    "test:all": "node test/run-all-suites.js"
   },
   "keywords": [],
   "author": "",

@@ -132,6 +132,27 @@ a checkable condition rather than by a coupling to DEF-01:
 
 **Recorded as a Phase 6 gate.**
 
+### WHAT A GREEN `test:no-secrets` DOES AND DOES NOT MEAN (BQ1)
+
+> **A passing `no-committed-secrets` run is NOT evidence that this repository
+> contains no secrets, and must not be cited as such at this gate.**
+
+It measures *"no tracked file assigns a non-placeholder value to a
+CREDENTIAL-SHAPED NAME"*. A real secret committed as `FOO=8f3a...` is invisible
+to it, and **no refinement of the name pattern can fix that** - the information
+simply is not in the name.
+
+It is a proxy, kept because the failure it catches is the one that actually
+happens: somebody writes `JWT_SECRET=` followed by something that works. The
+caveat is written HERE, in the gate, and not only in the test file, because
+**the gate is where a green result gets read and a conclusion drawn from it.**
+A limitation recorded only next to the code is a limitation the person doing
+the release never sees.
+
+**This gate therefore requires a human read of the tracked file list before
+publication.** That is weaker than a check and is the strongest thing available,
+and per AY1 it does not on its own carry a closure claim.
+
 **THE AUDIT IS COVERED BY THE SAME GATE, added in AR1.** It is tracked for the
 same reason - a per-package gate cannot be enforced on an untracked file - and
 it carries the same exposure in a more concentrated form: it is an index of
@@ -4954,6 +4975,66 @@ path, which reads the body directly.**
 > countermeasure is BG4's channels clause generalised: name the subset the
 > answer covers - "closed in the body", "handled on the error paths" - and the
 > uncovered part becomes visible instead of implied.
+
+
+---
+
+## BQ1 - `bridge-exit-check.js` IS RETIRED, BECAUSE IT IS NOW VACUOUS BY CONSTRUCTION
+
+It measured the **log lines** the bridges emitted on a fallback. That was a fair
+observation while the bridges existed - the line was written exactly when the
+event occurred.
+
+**Package 3.6 deleted the bridges.** Nothing emits those markers any more, so the
+check can never fire. It would report a clean sweep for ever, on a subject that
+no longer exists - **exactly the shape BH3 was commissioned to find, and this
+check is where BH3 found one.**
+
+BQ1 offered "retire it or make it measure the count directly". The count cannot
+be measured: `fallbackCount()` went with `legacyBridge.js`. So it is retired.
+
+### What is kept, and what is not
+
+- **Retired:** the AE3 apparatus - marker scanning, the exclusion list, the
+  `readyToDelete` framing. AE3 was an EXIT CONDITION for a deletion that has
+  happened. An exit condition outlives its usefulness the moment you are through
+  the exit.
+- **Kept as `npm run test:all`:** the plain "run every suite and say which
+  failed" runner, with the scan guard that BH3 added. That part was useful
+  independently of bridges and is the only single command that runs the lot.
+- **Kept in the map:** the finding. The check's own defect - a clean report over
+  zero suites - is recorded under BH3 and does not depend on the file surviving.
+
+> **A gate built for a migration is a gate with an end date. Leaving it in place
+> afterwards does not make it a safety net; it makes it a green tick with no
+> subject.**
+
+---
+
+## BQ2 - A CLOSURE CHECK SCOPED BY THE FINDING'S DESCRIPTION INHERITS ITS BLIND SPOTS
+
+Two findings, one shape:
+
+| Finding | Described as | So verification checked | What drifted |
+|---|---|---|---|
+| **SEC-08** | "the responses differ for a known and an unknown address" - a MESSAGE difference | the body, and later the status | **the clock.** /login was measurable at 60x while SEC-08 read CLOSED |
+| **BUG-11** | "the error shape is inconsistent" - an ERROR-shape problem | every error path, all sixteen of them | **the success path.** `ChangePassword` still read `data.msg` |
+
+In both cases the verification was correct, thorough, and scoped by the
+sentence that named the finding. **The finding's own wording decided what got
+looked at**, and the wording was a description of where it had been NOTICED, not
+a statement of where the property had to hold.
+
+> **VERIFY THE PROPERTY, NOT THE FINDING'S FRAMING OF IT.**
+>
+> "Responses are indistinguishable" is the property; "the message is the same"
+> is the framing. "Callers read the response shape correctly" is the property;
+> "error handling uses the new shape" is the framing.
+
+The practical form is BG4's channels clause generalised, and it is cheap: when
+closing a finding, **write down the subset the closure covers** - "closed in the
+body", "handled on the error paths". The uncovered remainder then has to be
+looked at to be dismissed, instead of being invisible because nobody phrased it.
 
 
 ## Counts
