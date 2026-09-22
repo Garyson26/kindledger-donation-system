@@ -243,6 +243,20 @@ export const adminAPI = {
       method: "DELETE",
       auth: true,
     }),
+
+  // SPEC-5 5.2. The ADMIN view, which carries updatedBy/updatedAt; the public
+  // `GET /api/branding` deliberately does not, and is fetched without auth.
+  getBranding: () =>
+    apiRequest("/admin/branding", {
+      auth: true,
+    }),
+
+  updateBranding: (settings) =>
+    apiRequest("/admin/branding", {
+      method: "PUT",
+      body: settings,
+      auth: true,
+    }),
 };
 
 // Users API calls

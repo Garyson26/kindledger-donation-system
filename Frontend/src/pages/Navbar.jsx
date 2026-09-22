@@ -105,6 +105,20 @@ function Navbar({ isAuthenticated, onLogout, userRole }) {
               >
                 Users
               </Link>
+              {/* SPEC-5 5.2. A settings page nothing links to is a page nobody
+                  finds, and this one is how an NGO makes the installation
+                  theirs - the reason the whitelabel phase exists. */}
+              <Link
+                  to="/admin/branding"
+                  onClick={() => setIsDropdownOpen(false)}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 ${
+                      isActive('/admin/branding')
+                          ? 'bg-[#05699e] text-white'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-[#05699e]'
+                  }`}
+              >
+                Branding
+              </Link>
                 </>
             )}
 

@@ -19,6 +19,7 @@ import CategoriesListPage from "./pages/CategoriesListPage";
 import EditCategory from "./pages/EditCategory";
 import Footer from "./pages/Footer";
 import AdminUsers from "./pages/AdminUsers";
+import AdminBranding from "./pages/AdminBranding";
 import AdminCharts from "./pages/AdminCharts";
 import UserDonationHistory from "./pages/UserDonationHistory";
 import PaymentSuccess from "./pages/PaymentSuccess";
@@ -187,6 +188,7 @@ function AppContent() {
           <Route path="/admin/categories-list" element={<AdminRoute><CategoriesListPage /></AdminRoute>} />
           <Route path="/admin/add-category" element={<AdminRoute><AddCategory /></AdminRoute>} />
           <Route path="/admin/edit-category/:id" element={<AdminRoute><EditCategory /></AdminRoute>} />
+          <Route path="/admin/branding" element={<AdminRoute><AdminBranding /></AdminRoute>} />
           <Route path="/admin/users" element={<AdminRoute><AdminUsers /></AdminRoute>} />
           <Route path="/admin/users/:userId/donations" element={<AdminRoute><UserDonationHistory /></AdminRoute>} />
         </Routes>
