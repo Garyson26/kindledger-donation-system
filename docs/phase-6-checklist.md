@@ -156,7 +156,28 @@ The same shape one layer up: a disk-backed `multer` writes the raw upload to the
 serving volume **before any check runs**. Convenient defaults are chosen for
 convenience.
 
-### 5.3 The uploads volume must be persistent
+### 5.3 VERIFY THE FIRST REAL DONATION AGAINST THE BANK, BEFORE ANNOUNCING
+
+**This is the only detection available for ENV-02, and there cannot be a
+code-level one.**
+
+`PAYU_BASE_URL` decides whether payments are real. The stack now refuses to
+start without it - but it cannot tell whether the host you gave it is the
+sandbox or production, because **both are valid, both answer, and both sign
+correctly.**
+
+So, on every new deployment and after any change to that variable:
+
+1. Make one real donation of the smallest amount the gateway accepts.
+2. Confirm it appears in the admin list and the receipt renders.
+3. **Confirm the money arrived in the bank account.** Not the dashboard - the
+   bank.
+4. Only then announce the site.
+
+Step 3 is the whole step. Steps 1 and 2 pass identically against the sandbox,
+which is exactly what makes this necessary.
+
+### 5.4 The uploads volume must be persistent
 
 Logos are stored on local disk in the `uploads` volume, deliberately — an NGO
 running `docker compose up` on a small VPS should not need an S3 account. **A
@@ -165,7 +186,7 @@ recorded as a deferred option (DEF-05).
 
 ---
 
-## 5.4 The defaults audit (BV2)
+## 5.5 The defaults audit (BV2)
 
 `docs/defaults-audit.md` walks every default in the codebase and asks whether it
 is a fact about THIS deployment or a decision about an installation nobody has

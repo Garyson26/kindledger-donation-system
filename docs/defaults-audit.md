@@ -1,6 +1,7 @@
 # The defaults audit (BV2)
 
-**No code changed. This is the list.**
+> **STATUS: acted on. §1.1, §1.2 and §1.4 are FIXED; §1.3 is recorded as a
+> constraint of the gateway choice rather than a default. See §5.**
 
 BU1 found the first defect that came from the *whitelabel* framing rather than
 from security: `"For Ocean Foundation"` as a fallback organisation name is
@@ -195,3 +196,18 @@ None of these is urgent for **this** deployment — For Ocean Foundation is in
 India, uses PayU, and the defaults are all correct for them. **They become
 urgent at publication**, which is the point BU1 makes: the audience changed, and
 these values changed status without changing content.
+
+---
+
+## 5. What was done (BW1, BW3)
+
+| Item | Disposition |
+|---|---|
+| **§1.1 `PAYU_BASE_URL`** | **FIXED.** `:?` in compose, the second fallback in `config/payu.js` removed, `.env.example` blanked with both hosts named, and CI asserts the stack refuses to start. Recorded as **ENV-02 (High)** |
+| **§1.2 `SCHEDULER_TIMEZONE`** | **FIXED.** `Asia/Kolkata` -> `UTC` |
+| **§1.4 `RETENTION_YEARS`** | **FIXED.** Reads from the environment, refuses a non-positive value, default stays 10 for continuity |
+| **§1.3 `INR`** | **LEFT, and recorded as a gateway constraint.** PayU is India-only, so currency is downstream of a choice already made. A configurable currency would be a field an NGO can set and still not be paid in. **Trigger: supporting a second gateway** |
+
+And the detection that has no code-level form: **the first real donation after
+any deployment is reconciled against the bank before the site is announced.**
+It is in the Phase 6 self-hosting notes and in the 4b runbook.

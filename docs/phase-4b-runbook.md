@@ -343,6 +343,24 @@ verify.**
 
 ---
 
+## 7a. The first real donation — reconcile it against the bank
+
+**Before announcing that the cutover is complete.**
+
+`PAYU_BASE_URL` must name production (`https://secure.payu.in`). The stack
+refuses to start without the variable, but **it cannot tell the sandbox from
+production** - both are valid hosts, both answer, both sign correctly (ENV-02).
+
+So the first real donation after the cutover is reconciled against the **bank**,
+not the dashboard. A sandbox configuration produces a donation that appears in
+the admin list, renders a receipt, and is marked Paid, with no money behind it.
+
+This is after §7's boundary has closed and that is correct: it is a check on the
+ENVIRONMENT, not on the migration, and it cannot be performed before a real
+payment exists.
+
+---
+
 ## 8. After the cutover
 
 - MongoDB is **not deleted**. It stays read-only and untouched until Phase 4c,

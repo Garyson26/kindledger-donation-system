@@ -428,6 +428,24 @@ jobs:
           docker version --format '{{.Server.Version}}'
           docker compose version
 
+      # BW1, ASSERTED BY OUTCOME. A test that greps docker-compose.yml for `:?`
+      # would measure the DECLARATION; this measures the BEHAVIOUR - the stack
+      # will not start. It runs BEFORE the .env is written, which is the only
+      # moment the variable is genuinely absent.
+      - name: The stack REFUSES to start without PAYU_BASE_URL
+        run: |
+          if docker compose config >/dev/null 2>&1; then
+            echo "FAILED: compose accepted a configuration with no PAYU_BASE_URL."
+            echo "Without it a self-hoster runs the whole donation flow against"
+            echo "PayU's sandbox. Everything works and no money moves."
+            exit 1
+          fi
+          docker compose config 2>&1 | grep -q "PAYU_BASE_URL" || {
+            echo "FAILED: compose refused, but not because of PAYU_BASE_URL."
+            exit 1
+          }
+          echo "OK: compose refuses, and names PAYU_BASE_URL as the reason."
+
       - name: Write a CI .env for the compose stack
         # CI-only values. Every one of these is a throwaway on a runner that
         # is destroyed at the end of the job, and none of them is a secret -
@@ -443,6 +461,9 @@ jobs:
         run: |
           cat > .env <<'ENVEOF'
           NODE_ENV=production
+          # Required since BW1 - the stack refuses to start without it. The
+          # sandbox host is correct here: this job serves no real donor.
+          PAYU_BASE_URL=https://test.payu.in
           MYSQL_ROOT_PASSWORD=ci-root-password
           MYSQL_DATABASE=kindledger
           MYSQL_USER=kindledger

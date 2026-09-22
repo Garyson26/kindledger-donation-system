@@ -110,8 +110,14 @@ module.exports = {
   MERCHANT_SALT: process.env.PAYU_MERCHANT_SALT,
 
   // PayU URLs
-  PAYU_BASE_URL: process.env.PAYU_BASE_URL || 'https://test.payu.in', // Test environment
-  // PAYU_BASE_URL: 'https://secure.payu.in', // Production environment
+  // NO FALLBACK (BW1). This read `|| 'https://test.payu.in'`, which is the
+  // same defect as the compose default one layer down - and worse, because it
+  // would have survived the compose file being fixed.
+  //
+  // `docker-compose.yml` now refuses to start without it. An installation that
+  // runs the API some other way gets `undefined`, which PayU rejects, which is
+  // a loud failure rather than a silent sandbox.
+  PAYU_BASE_URL: process.env.PAYU_BASE_URL,
 
   // Response URLs - Update with your domain
   SUCCESS_URL: process.env.SUCCESS_URL,

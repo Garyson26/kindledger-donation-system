@@ -5233,6 +5233,140 @@ advisory that reaches no deployed site and no self-hoster, so it is its own
 package rather than something to fold into a router upgrade.
 
 
+---
+
+## ENV-02 (HIGH) - THE GATEWAY DEFAULT TOOK DONATIONS THAT NEVER ARRIVED
+
+**Severity: HIGH. Fails in the direction that looks like success.**
+
+```yaml
+PAYU_BASE_URL: ${PAYU_BASE_URL:-https://test.payu.in}     # was
+```
+
+A self-hoster who did not set it ran the **entire donation flow against PayU's
+sandbox**. The site works. Donors complete payments. Receipts render, the admin
+dashboard fills in, donations are marked Paid.
+
+**No money moves.**
+
+Every symptom points away from the cause: the code is correct, the hashes
+verify, the callbacks arrive, the database is consistent. **The only way to
+notice is reconciling against a bank account that never received anything.**
+
+### Beside ENV-01, because the pair is the lesson
+
+| | ENV-01 | **ENV-02** |
+|---|---|---|
+| The variable | **ABSENT** | **PRESENT** |
+| What it silently disabled | a security check - PayU response hashes became publicly computable | **the purpose of the software** - donations that never arrive |
+| The symptom | none. A hash verified and matched | none. A donation completed and was marked Paid |
+
+> **ENV-01 was an absent variable silently disabling a security check. ENV-02 is
+> a present variable silently disabling the point of the software. Both fail in
+> the direction that looks like success.**
+
+### Why `:?` and not a runtime guard, which is where ENV-01 went
+
+`PAYU_MERCHANT_SALT` is guarded at the point of use, because a blank salt is
+**detectable by the code**: it refuses at the moment it would have signed
+something, and that leaves the stack running for people not working on payments.
+
+**A test gateway and a production gateway are indistinguishable to the code.**
+Both are valid hosts, both answer, both sign correctly. There is no observation
+the software can make that separates them. Only the operator knows which one
+they meant, so the only place to ask is before the stack starts.
+
+### Fixed, and asserted BY OUTCOME
+
+- `docker-compose.yml`: `${PAYU_BASE_URL:?...}` with the two hosts named in the
+  message.
+- **`config/payu.js` had a SECOND fallback** - `|| 'https://test.payu.in'` -
+  which would have survived the compose file being fixed. Removed. AY2 again:
+  the same default, one layer down, in the file the first one is about.
+- `.env.example` is **deliberately blank** with both hosts in the comment. A
+  value there is inherited by everyone who copies it.
+- CI asserts the stack **refuses to start**, before the `.env` is written, which
+  is the only moment the variable is genuinely absent. A test grepping the
+  compose file for `:?` would measure the declaration; this measures the
+  behaviour (BO3).
+
+### The only detection available, written down rather than assumed
+
+**The first real donation after any deployment must be reconciled against the
+bank before the site is announced.** There is no code-level check for this and
+there cannot be one. It is in the self-hosting notes and in the 4b runbook.
+
+---
+
+## BW2 - THE OPERATIVE RULE FOR DEFAULTS
+
+> **A default is acceptable when it is universal, or when it fails safe, or when
+> getting it wrong is VISIBLE and CHEAP TO CORRECT.**
+>
+> **A default is not acceptable when an installer must get it right for their
+> own context and THE WRONG VALUE WORKS.**
+
+### It supersedes BU1's first version, and the difference is instructive
+
+BU1 framed it as **"a fact about this deployment versus a decision about an
+installation nobody has met"**. That framing found the organisation-name
+fallback, which is why it was written - but applied consistently it is wrong in
+both directions:
+
+- **It flags the branding seed colours**, which are For Ocean Foundation's blue
+  and therefore a local fact. Keeping them is required by SPEC-5 section 10, and
+  a wrong colour is visible on first load and fixed in thirty seconds.
+- **It misses the cost asymmetry entirely.** `PAYU_BASE_URL` and a hex colour
+  are both local facts. One costs an NGO every donation until somebody reads a
+  bank statement; the other costs a click.
+
+The operative question is not *where did this value come from* but **what does
+getting it wrong cost, and how soon does anyone find out**. BU1's version is
+recorded as the weaker first attempt rather than deleted - it produced the
+finding that led here.
+
+---
+
+## BW3 - THE OTHER THREE DEFAULTS
+
+### `SCHEDULER_TIMEZONE`: `Asia/Kolkata` -> `UTC`. DONE.
+
+A fact about one deployment. An NGO elsewhere had destructive jobs firing at
+whatever local hour 02:00 IST happens to be for them - quietly, because a cron
+at the wrong hour still fires. **Neutral beats somebody else's local time**: an
+operator who wants their own hour sets the variable, and one who never thinks
+about it gets a value that is wrong for nobody in particular.
+
+### `RETENTION_YEARS`: hardcoded -> environment, with validation. DONE.
+
+Ten years is a **legal** figure that varies by jurisdiction, and it was not even
+environment-configurable, on a job that **deletes donation records**.
+
+AT1 keeping `JOB_RETENTION_PURGE` off by default is a **mitigation, not a fix**:
+nothing is deleted on a number nobody chose *until somebody turns the job on and
+inherits a figure they never saw*. It now reads from the environment and refuses
+a non-positive value, and the default stays 10 for continuity with this
+deployment.
+
+### `INR`: LEFT, and recorded as a constraint of the gateway rather than a default
+
+Hardcoded in the donations repository, the schema default and the branding seed.
+
+**It is not independently changeable.** PayU is an India-only gateway, so an
+installation outside India cannot use the payment flow at all - the currency is
+*downstream* of a gateway choice this project already made.
+
+Making the currency configurable would produce a field an NGO can set to EUR and
+still not be paid in, which is worse than the honest statement:
+
+> **This software supports PayU. PayU is India-only. An NGO outside India needs
+> gateway work, which is a piece of engineering and not a configuration value.**
+
+**What would unblock it: supporting a second gateway.** Recorded as the trigger,
+so the currency question is revisited then rather than being rediscovered as a
+bug.
+
+
 ## Counts
 
 | State | Count | Rows |
