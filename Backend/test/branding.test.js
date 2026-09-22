@@ -26,6 +26,7 @@ process.env.ADMIN_CREATION_KEY = process.env.ADMIN_CREATION_KEY || 'test-admin-k
 process.env.PAYU_MERCHANT_KEY = 'TESTMERCHANTKEY';
 process.env.PAYU_MERCHANT_SALT = 'TESTMERCHANTSALT0000000000000000';
 
+const sharp = require('sharp');
 const users = require('../repositories/users');
 const branding = require('../repositories/branding');
 const brandingRoute = require('../routes/branding');
@@ -335,4 +336,149 @@ test('an over-long value is refused by the API rather than truncated or thrown',
   );
   assert.equal(res.status, 400);
   assert.match(String(res.body.error || res.body.message), /organisationName/);
+});
+
+// =============================================================================
+// SPEC-5 5.3 over HTTP - the serving path (BS2's second and third additions)
+// =============================================================================
+
+/** Upload through the real multipart endpoint, with a DECLARED type we choose. */
+async function uploadLogo(buffer, { filename, declaredType, token }) {
+  const form = new FormData();
+  form.append('logo', new Blob([buffer], { type: declaredType }), filename);
+  const res = await fetch(`${base}/api/admin/branding/logo`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'X-Forwarded-For': nextIp() },
+    body: form,
+  });
+  const raw = await res.text();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  return { status: res.status, body: parsed, raw };
+}
+
+test('5.3 HTTP: the served Content-Type comes from the DECODE, not the upload claim', async () => {
+  // ==========================================================================
+  // THE DECISIVE TEST FOR BS2's THIRD ADDITION.
+  // ==========================================================================
+  // The file is a real JPEG. The multipart part DECLARES image/png and the
+  // filename says .png. If anything anywhere trusted either of those, the
+  // response would be typed image/png - and the one header that decides how a
+  // browser treats the bytes would be attacker-chosen.
+  const realJpeg = await sharp({
+    create: { width: 24, height: 24, channels: 3, background: { r: 200, g: 30, b: 30 } },
+  })
+    .jpeg()
+    .toBuffer();
+
+  const up = await uploadLogo(realJpeg, {
+    filename: 'logo.png',
+    declaredType: 'image/png',
+    token: adminToken,
+  });
+  assert.equal(up.status, 200, up.raw.slice(0, 200));
+  assert.equal(up.body.logo.mime, 'image/jpeg', 'stored mime must follow the decode');
+
+  const served = await fetch(`${base}/api/branding/logo`, {
+    headers: { 'X-Forwarded-For': nextIp() },
+  });
+  assert.equal(served.status, 200);
+  assert.equal(
+    served.headers.get('content-type'),
+    'image/jpeg',
+    'THE SERVED TYPE FOLLOWED THE UPLOAD CLAIM instead of the decoded format'
+  );
+  assert.equal(
+    served.headers.get('x-content-type-options'),
+    'nosniff',
+    'without nosniff a browser can still sniff the body and render it as something else'
+  );
+
+  // And the bytes served really are the re-encoded image.
+  const body = Buffer.from(await served.arrayBuffer());
+  const meta = await sharp(body).metadata();
+  assert.equal(meta.format, 'jpeg');
+  assert.equal(meta.width, 24);
+});
+
+test('5.3 HTTP: an SVG is refused by the endpoint, not only by the library', async () => {
+  const svg = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><script>alert(1)</script></svg>',
+    'utf8'
+  );
+  const res = await uploadLogo(svg, {
+    filename: 'logo.png',
+    declaredType: 'image/png',
+    token: adminToken,
+  });
+  assert.equal(res.status, 400, res.raw.slice(0, 200));
+  assert.match(String(res.body.error || res.body.message), /SVG/i);
+});
+
+test('5.3 HTTP: the upload endpoint refuses anonymous and non-admin callers', async () => {
+  const png = await sharp({
+    create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 1, b: 1 } },
+  })
+    .png()
+    .toBuffer();
+
+  const form = new FormData();
+  form.append('logo', new Blob([png], { type: 'image/png' }), 'x.png');
+  const anon = await fetch(`${base}/api/admin/branding/logo`, {
+    method: 'POST',
+    headers: { 'X-Forwarded-For': nextIp() },
+    body: form,
+  });
+  assert.equal(Math.floor(anon.status / 100), 4, 'anonymous upload must be refused');
+});
+
+test('5.3 HTTP: replacing a logo removes the previous file and serves the new one', async () => {
+  const first = await sharp({
+    create: { width: 16, height: 16, channels: 3, background: { r: 0, g: 0, b: 255 } },
+  })
+    .png()
+    .toBuffer();
+  const second = await sharp({
+    create: { width: 48, height: 48, channels: 3, background: { r: 0, g: 255, b: 0 } },
+  })
+    .webp()
+    .toBuffer();
+
+  const a = await uploadLogo(first, { filename: 'a.png', declaredType: 'image/png', token: adminToken });
+  assert.equal(a.status, 200, a.raw.slice(0, 200));
+
+  const b = await uploadLogo(second, { filename: 'b.webp', declaredType: 'image/webp', token: adminToken });
+  assert.equal(b.status, 200, b.raw.slice(0, 200));
+  assert.equal(b.body.previousRemoved, true, 'the previous file must be deleted, or they accumulate');
+
+  const served = await fetch(`${base}/api/branding/logo`, { headers: { 'X-Forwarded-For': nextIp() } });
+  assert.equal(served.headers.get('content-type'), 'image/webp');
+  const meta = await sharp(Buffer.from(await served.arrayBuffer())).metadata();
+  assert.equal(meta.width, 48, 'the NEW logo is served');
+});
+
+test('5.3 HTTP: a stored path that escapes the uploads root is refused at SERVE time', async () => {
+  // BS2's second addition. The serving route takes no path parameter, so a
+  // caller cannot ask for a file - but the row is still not trusted, because it
+  // could have been written by an older version or a migration.
+  //
+  // Planted directly in the database, which is the only way this state arises.
+  await getPrisma().brandingSettings.update({
+    where: { id: 1 },
+    data: { logoPath: '../../../../etc/passwd', logoMime: 'image/png' },
+  });
+
+  const res = await fetch(`${base}/api/branding/logo`, { headers: { 'X-Forwarded-For': nextIp() } });
+  const body = await res.text();
+
+  assert.notEqual(res.status, 200, 'a traversing stored path was SERVED');
+  assert.equal(
+    body.includes('root:'),
+    false,
+    'the response body contains /etc/passwd - containment failed at the read'
+  );
 });

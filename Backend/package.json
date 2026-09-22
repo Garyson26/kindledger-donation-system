@@ -44,7 +44,8 @@
     "test:no-secrets": "node --test test/no-committed-secrets.test.js",
     "fixture:legacy-mongo": "node scripts/rebuildLegacyMongo.js",
     "test:branding": "node --test test/branding.test.js",
-    "test:all": "node test/run-all-suites.js"
+    "test:all": "node test/run-all-suites.js",
+    "test:logo": "node --test test/logo-upload.test.js"
   },
   "keywords": [],
   "author": "",
@@ -66,10 +67,12 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
     "morgan": "^1.10.1",
+    "multer": "^2.4.0",
     "node-cron": "^4.2.1",
     "nodemailer": "^10.0.3",
     "rate-limit-redis": "^6.0.1",
-    "redis": "^6.2.1"
+    "redis": "^6.2.1",
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.10",

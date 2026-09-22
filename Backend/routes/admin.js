@@ -490,6 +490,9 @@ router.get("/cleanup/preview", async (req, res) => {
 // counterpart, so the two projections of one table are read together. It is
 // MOUNTED here because this router is what carries adminAuth.
 router.put("/branding", require("./branding").updateBranding);
+// SPEC-5 5.3. New attack surface; the constraints live in
+// services/logoStorage.js next to the attacks they stop.
+router.post("/branding/logo", require("./branding").uploadBrandingLogo);
 
 // The admin form needs the provenance fields the public view omits.
 router.get("/branding", async (req, res) => {

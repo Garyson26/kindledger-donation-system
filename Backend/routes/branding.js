@@ -24,10 +24,28 @@
 'use strict';
 
 const express = require('express');
+const fs = require('node:fs');
+const multer = require('multer');
 const branding = require('../repositories/branding');
+const logoStorage = require('../services/logoStorage');
 const { refuse, failed } = require('../utils/respond');
 
 const router = express.Router();
+
+/**
+ * THE FIRST SIZE BOUND, and it is before anything holds the whole request.
+ *
+ * memoryStorage on purpose: a disk-backed multer writes the raw upload to a
+ * temporary file BEFORE any of our checks run, which means unvalidated
+ * attacker bytes land on the same volume the site serves from. Two megabytes
+ * in memory is cheaper than that, and the limit is what keeps it cheap.
+ *
+ * `files: 1` because a request carrying ten files is not a logo upload.
+ */
+const uploadLogo = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: logoStorage.MAX_BYTES, files: 1, fields: 4 },
+}).single('logo');
 
 /** The same expression as `ck_branding_settings_primary_colour`. */
 const HEX_COLOUR = /^#[0-9A-Fa-f]{6}$/;
@@ -164,6 +182,138 @@ router.get('/', async (req, res) => {
   }
 });
 
+/**
+ * =============================================================================
+ * GET /api/branding/logo - serve the stored logo
+ * =============================================================================
+ * PUBLIC, because the donor site renders it before anyone logs in.
+ *
+ * -----------------------------------------------------------------------------
+ * THE PATH COMES FROM THE DATABASE AND IS STILL NOT TRUSTED (BS2)
+ * -----------------------------------------------------------------------------
+ * There is no path parameter here - the row says which file to serve, so a
+ * caller cannot ask for one. That alone is most of the protection, and it is
+ * NOT all of it: a stored path joined to a directory is a traversal sink
+ * whatever the upload did, because the row could have been written by an older
+ * version, a migration, or a bug that has since been fixed.
+ *
+ * So it goes through `resolveWithin()` exactly as the write does.
+ *
+ * -----------------------------------------------------------------------------
+ * THE CONTENT-TYPE IS DERIVED FROM WHAT WAS DECODED
+ * -----------------------------------------------------------------------------
+ * `logo_mime` is written by `storeLogo()` from the format sharp actually
+ * decoded and re-encoded - never from the upload's declared type and never from
+ * its extension. Serving a type taken from the request would hand the attacker
+ * the one header that decides how a browser treats the bytes.
+ *
+ * `nosniff` stops the browser second-guessing it. Without that header a
+ * response typed `image/png` whose body looks like HTML can still be rendered
+ * as HTML by content sniffing - which is the whole class this and the re-encode
+ * are defending against, from two directions.
+ */
+router.get('/logo', async (req, res) => {
+  try {
+    const row = await branding.getPublic();
+    if (!row || !row.logoPath) return refuse(res, 404, 'No logo has been uploaded');
+
+    let absolute;
+    try {
+      absolute = logoStorage.resolveWithin(row.logoPath);
+    } catch (err) {
+      // A STORED PATH THAT ESCAPES IS A 500, NOT A 404. It means the row is
+      // wrong, which is an operator problem worth seeing in the logs rather
+      // than a missing file worth shrugging at.
+      return failed(res, 'The stored logo path is not inside the uploads directory', err, {
+        tag: 'branding',
+      });
+    }
+
+    if (!fs.existsSync(absolute)) return refuse(res, 404, 'No logo has been uploaded');
+
+    res.setHeader('Content-Type', row.logoMime || 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // A logo changes rarely and the filename changes when it does, so this is
+    // safe to cache - but not for long enough that a rebrand looks broken.
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return fs.createReadStream(absolute).pipe(res);
+  } catch (err) {
+    return failed(res, 'Could not serve the logo', err, { tag: 'branding' });
+  }
+});
+
+/**
+ * POST /api/admin/branding/logo - mounted by routes/admin.js behind adminAuth.
+ *
+ * The order is deliberate: store the new file FIRST, then point the row at it,
+ * then delete the old one. A failure at any step leaves a working site -
+ * an orphaned new file, or an old logo still serving. Deleting first would
+ * leave a row pointing at nothing if the store then failed.
+ */
+async function uploadBrandingLogo(req, res) {
+  uploadLogo(req, res, async (multerErr) => {
+    try {
+      if (multerErr) {
+        // multer's own limit fires before the body is fully read.
+        if (multerErr.code === 'LIMIT_FILE_SIZE') {
+          return refuse(res, 413, `The image must be at most ${logoStorage.MAX_BYTES / 1024 / 1024} MB`);
+        }
+        return refuse(res, 400, 'That upload could not be read');
+      }
+
+      if (!req.file || !req.file.buffer) return refuse(res, 400, 'No image was uploaded');
+
+      let stored;
+      try {
+        stored = await logoStorage.storeLogo(req.file.buffer);
+      } catch (err) {
+        // Every refusal from the storage layer is a 400 naming the reason. A
+        // rejected upload is the caller's problem, not a server fault - the
+        // SEC-14 shape again, and this endpoint is the one an admin will hit
+        // with a file their designer sent.
+        const known = [
+          'ERR_NO_FILE',
+          'ERR_TOO_LARGE',
+          'ERR_UNSUPPORTED_FORMAT',
+          'ERR_UNDECODABLE',
+          'ERR_FORMAT_MISMATCH',
+        ];
+        if (known.includes(err.code)) {
+          return refuse(res, err.code === 'ERR_TOO_LARGE' ? 413 : 400, err.message);
+        }
+        throw err;
+      }
+
+      const previous = await branding.getPublic();
+      const result = await branding.update(
+        { logoPath: stored.relativePath, logoMime: stored.mime },
+        req.user ? req.user.uuid : null
+      );
+
+      // The old file, by the path the DATABASE held - never anything from req.
+      let removed = { deleted: false, reason: 'nothing stored' };
+      if (previous && previous.logoPath && previous.logoPath !== stored.relativePath) {
+        removed = await logoStorage.deleteLogo(previous.logoPath);
+      }
+
+      return res.json({
+        message: 'Logo updated',
+        logo: {
+          path: stored.relativePath,
+          mime: stored.mime,
+          width: stored.width,
+          height: stored.height,
+          bytes: stored.bytes,
+        },
+        previousRemoved: removed.deleted,
+        branding: result.row,
+      });
+    } catch (err) {
+      return failed(res, 'Could not store the logo', err, { tag: 'branding' });
+    }
+  });
+}
+
 /** Mounted by routes/admin.js behind adminAuth. */
 async function updateBranding(req, res) {
   try {
@@ -193,4 +343,4 @@ async function updateBranding(req, res) {
   }
 }
 
-module.exports = { router, updateBranding, validate, normalise, HEX_COLOUR, MAX };
+module.exports = { router, updateBranding, uploadBrandingLogo, validate, normalise, HEX_COLOUR, MAX };

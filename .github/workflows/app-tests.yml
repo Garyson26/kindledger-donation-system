@@ -274,9 +274,17 @@ jobs:
       # SPEC-5 5.2. The branding singleton had zero callers from Phase 1a until
       # now (AS4), so these tests establish the shape rather than defend it -
       # including that the PUBLIC projection never carries updated_by.
-      - name: Branding API (SPEC-5 5.2)
+      - name: Branding API and logo serving (SPEC-5 5.2, 5.3)
         working-directory: Backend
         run: npm run test:branding
+
+      # SPEC-5 5.3. New attack surface: no SVG whatever the declared type,
+      # re-encode from decoded pixels, generated filenames, size limits before
+      # full decode, and containment asserted at the file FINAL LOCATION rather
+      # than at the name.
+      - name: Logo upload constraints (SPEC-5 5.3)
+        working-directory: Backend
+        run: npm run test:logo
 
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
