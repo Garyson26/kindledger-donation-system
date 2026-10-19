@@ -5495,6 +5495,39 @@ SMTP handshake with `EAUTH`; an API break would throw before that.
 runbook.
 
 
+---
+
+## CB2 - FOUND WHILE BUILDING THE ENVIRONMENT LIST
+
+Full list: `docs/deployment-environment.md`. These are the items that are
+findings rather than configuration.
+
+| # | Finding | Severity | Disposition |
+|---|---|---|---|
+| CB2-1 | **Frontend CSP `connect-src` hardcodes the old backend hostname** (`Frontend/vercel.json`). Any new backend host is blocked by the browser | **Blocks step 5** | PR after F, once hostnames are chosen |
+| CB2-2 | **Tracked `Frontend/.env` names the old backend.** If `VITE_API_URL` is unset on the new project, the build falls back to a hostname that will have no owner once the old project is deleted. **The CSP also allows that host.** Whether `*.vercel.app` names are re-claimable is UNVERIFIED | **High if claimable** | Same PR: remove the value so the fallback is `localhost` (fails loud) |
+| CB2-3 | **No `prisma generate` in the backend build.** Prisma documents stale-client failures on Vercel's dependency cache. Not reproduced: the cache cannot be simulated locally | Medium. The first deploy works | Same PR: `"postinstall": "prisma generate"` |
+| CB2-4 | **`REDIS_URL` absent means per-instance in-memory rate limits on serverless.** Fails silent | **High on Vercel** | Required in the list. Check the boot log after first deploy |
+| CB2-5 | **`PRISMA_CONNECTION_LIMIT` default of 10 is derived for one container.** On serverless it multiplies by instance count | Medium | Derivation in the list. Start at 1 |
+| CB2-6 | **Logo upload and the scheduler cannot work on Vercel.** Read-only filesystem; no long-running process. `UPLOADS_DIR=/tmp` or `SCHEDULER_ENABLED=true` would turn a loud failure into a silent one | Recorded | Documented as unsupported on Vercel. DEF-05 |
+| CB2-7 | **A MongoDB credential was set on the FRONTEND project** (Atlas Marketplace integration, production). Vite only bundles `VITE_*`, so it was not shipped to browsers | Low | Not carried over |
+| CB2-8 | **Four secrets were stored as readable, not Sensitive.** Vercel flagged `MONGODB_URI`, `JWT_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` as `readable-secret` | Low | New project: create all as Sensitive |
+| CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **UNPINNED.** Queue for a follow-up: read from branding |
+| CB2-10 | **`npm run test:bridge` points at a test deleted in 3.6** | Trivial. Fails loud | **UNPINNED.** Remove the script line |
+
+**And one correction to how ENV-02 had been described.** "The stack refuses to
+start without `PAYU_BASE_URL`" is true of **compose only**. Vercel has no
+compose file. There, a missing value fails loud at the first donation, because
+there is no fallback (BW1), and a **wrong** value is still silent. The list says
+so.
+
+### Checked and clean
+
+**PayU salt history.** Every salt-shaped value ever committed (`git log --all
+-G`) is the `TEST…` fixture in a test file. No evidence the production salt was
+ever in the repository, so carrying it over is not contradicted.
+
+
 ## Counts
 
 | State | Count | Rows |

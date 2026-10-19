@@ -2842,3 +2842,47 @@ Commit `4f3b7ec` added GPL v3 while the repository was private. No public
 distribution occurred under it, so no public grant exists and nothing is
 revoked. This is a first choice, not a relicensing.
 
+---
+
+## ADR-062: ADR-028 is superseded BY CIRCUMSTANCE, not solved
+
+**Status:** accepted (CB1)
+**Supersedes:** ADR-028, *as an operating constraint for this migration only*.
+ADR-028 is on `docs/incident-j1-j6` and arrives in `main` before this one.
+
+### What changed
+
+Gary is deleting both Vercel projects and creating new ones after Phase 4c
+(CB3 step 5). Until then, **nothing deploys on merge**, which removes three
+blockers at once:
+
+- the `Resource provisioning failed` errors on PR #5 (both projects, under a
+  second, before install);
+- **ADR-028's commit-authorship block**;
+- the risk of `main` auto-deploying a MySQL application while production runs
+  MongoDB. That risk is why the migration PRs were going to carry a
+  `[DO NOT DEPLOY]` title prefix and why Vercel's production branch was going to
+  be moved off `main`. **Both steps are dropped.** The deploy guidance stays in
+  each PR description as information, because the order still matters when the
+  new project is first deployed.
+
+### What did NOT change
+
+**ADR-028's constraint was not fixed. The project it applied to is going away.**
+Whether the authorship block reappears depends on how the new projects are
+connected to the repository: which account owns them, which Git integration is
+used, and who authors the merge commits. **None of that is known yet.**
+
+So:
+
+- **Do not cite ADR-028 as resolved.** Its status is "not currently reachable".
+- **On the new project's first deploy, check for `BLOCKED` explicitly.** A
+  merge that does not deploy looks identical to one that did, from GitHub.
+- If it reappears, ADR-028's analysis applies unchanged.
+
+### Why record it at all
+
+A constraint that goes away because its context was deleted is easy to remember
+as a constraint that was dealt with. The next person to connect a Vercel project
+to this repository should find this, and not an absence.
+

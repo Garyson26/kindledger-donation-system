@@ -42,6 +42,11 @@ for_ocean_security_review.md
 # exploit detail, and it is a list Phase 6 has to act on.
 !docs/defaults-audit.md
 
+# CB2's deployment environment list. TRACKED and under the AC3 gate: it names
+# variables, formats and failure modes, never a value. A list of what a new
+# project needs is no use if it lives only on one laptop.
+!docs/deployment-environment.md
+
 !docs/phase-4b-runbook.md
 !docs/phase-6-checklist.md
 
