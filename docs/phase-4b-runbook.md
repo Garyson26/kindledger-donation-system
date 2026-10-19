@@ -361,6 +361,19 @@ payment exists.
 
 ---
 
+## 7b. One real OTP — the only proof that email is delivered
+
+Every suite reaches `nodemailer`'s `createTransport().sendMail()` and stops at the
+SMTP handshake, because no suite has a mail server. That proves the library's
+API works on the installed version (10.x); it proves nothing about delivery.
+
+**After the cutover, trigger one real login OTP to a mailbox you can read, and
+confirm it arrives.** If it does not, signup, login and password reset are all
+broken for every donor, and nothing in the application will say so - the sends
+are fire-and-forget by design, so a delivery failure is a log line, not an error.
+
+---
+
 ## 8. After the cutover
 
 - MongoDB is **not deleted**. It stays read-only and untouched until Phase 4c,

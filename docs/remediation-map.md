@@ -5367,6 +5367,134 @@ so the currency question is revisited then rather than being rediscovered as a
 bug.
 
 
+---
+
+## FE-01 - `main`'s FRONTEND CANNOT BE INSTALLED AS COMMITTED
+
+**Not ours. Introduced by Dependabot's grouped bump, PR #5, already merged to
+`main`.**
+
+PR #5 raised `vite` to `^8.3.0`. `@vitejs/plugin-react` `^4.2.1` resolves to
+4.7.0, whose peer range is `^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0`. vite 8 is
+outside it.
+
+| npm | What it says |
+|---|---|
+| **11** | `ERESOLVE unable to resolve dependency tree ... peer vite@"^4.2.0 \|\| ^5.0.0 \|\| ^6.0.0 \|\| ^7.0.0" from @vitejs/plugin-react@4.7.0` - the real error |
+| **10** - which Node 20 ships, and which CI uses | `Cannot read properties of null (reading 'edgesOut')` - **an opaque crash naming nothing in this project** |
+
+The symptom under the npm most likely to hit it gives no indication of the
+cause.
+
+### Fix, proven on `main`'s own tree
+
+`@vitejs/plugin-react` `^6.1.2` (the line declaring vite 8 support) **and a
+committed lockfile**. Without the lockfile npm 10 still crashes on fresh
+resolution even with compatible versions - its own bug. With one, npm 10's
+`npm ci` and `npm install` both succeed and the lockfile is stable across runs.
+Then: vite 8.3.4 builds, and **ten routes load in headless Chromium with zero
+uncaught exceptions.**
+
+Both Vercel projects run Node `24.x`, which satisfies vite 8's and plugin-react
+6's `^20.19 || >=22.12`. The fix will not fail on the Node setting.
+
+### Two moderate advisories that the fix does NOT touch, and why both are unreachable
+
+`npm audit --omit=dev` on `main`'s frontend reports two `react-router` 6
+advisories. They are pre-existing and the fix cannot have introduced them - it
+changes one devDependency.
+
+- **Open redirect via backslash in `<Link>`/`useNavigate`.** X1's enumeration,
+  re-run in 5.5: every navigation target is a literal or a fixed prefix with a
+  server id interpolated not at the start. Unreachable.
+- **Constructor injection via `deserializeErrors()` in SSR hydration.** The app
+  calls `createRoot`, uses `BrowserRouter`, and has no `hydrateRoot`, data
+  router or hydration data anywhere. The vulnerable function only runs when
+  hydrating server-rendered router state, which this client-only app never
+  does. Unreachable - checked, not assumed.
+
+Both are closed by react-router 7.18.4, which PR-F delivers.
+
+---
+
+## THE RULE: "NO CONFLICTS" IS NOT EVIDENCE A MERGE WORKS
+
+Merging `origin/main` into phase-2, `Frontend/package.json` merged with **no git
+conflict** to `vite ^8` - phase-2 never touched that line - while phase-2's
+lockfile still pinned vite 5. **Git saw a clean merge. npm refused to install
+it.**
+
+> **For any merge touching either frontend package file, regenerate the
+> lockfile with npm 10 and run `npm ci`. A clean merge of a manifest says
+> nothing about whether the manifest and its lockfile still agree.**
+
+It generalises past npm: git merges TEXT, and any pair of files that must agree
+- manifest and lockfile, schema and generated client, migration and snapshot -
+can each merge cleanly into a pair that no longer does. The check has to be the
+tool that reads both, not the one that merged them.
+
+---
+
+## VERCEL - WHAT PRODUCTION IS ACTUALLY SERVING
+
+Read from both projects, environment values not touched:
+
+| | Frontend | Backend |
+|---|---|---|
+| Node | `24.x` | `24.x` |
+| **Serving** | `58bdadf` - PR #14, 10 Sept, `READY` | `58bdadf` - PR #14, 10 Sept, `READY` |
+| PR #5 (`17b30a1`), 18 Oct | **`ERROR`** - `BUILD_FAILED: Resource provisioning failed`, 784 ms | **`ERROR`** - same, 835 ms |
+
+**PR #5 never reached production.** So production is still on `nodemailer` 7,
+and the earlier concern that production email had been running on v10 does not
+apply.
+
+**PR #5 did not fail on FE-01.** It failed in under a second, before any install
+could run - and the backend, which has no vite at all, failed identically. The
+cause is account- or project-level, not code.
+
+**It is also a DIFFERENT failure from ADR-028.** The same deployment list shows
+ADR-028's commit-authorship block as `BLOCKED`. This is `ERROR` with a
+provisioning message. The cause is not visible from the API and needs the
+dashboard.
+
+> **Why this matters now: the hotfix is planned as "merge and deploy now".** If
+> provisioning is still failing, the merge will succeed and the deploy will not,
+> and production will keep serving the auth bypass while the PR shows as merged.
+> **The hotfix's deploy has to be confirmed `READY`, not assumed** - and the
+> provisioning failure is worth diagnosing before relying on it.
+
+---
+
+## BZ4 - AN UNRELATED PROJECT'S BRANCHES ARE IN THIS REPOSITORY
+
+`origin/setup-12` and `origin/setup-13` (identical) are **"Sentinel"**
+(`sentinel-tip`): their own initial commit on 22 Feb, no shared history with
+`main`, lowercase `backend/`/`frontend/`, a TypeScript frontend. **12 of 13
+commits are by Viraj.**
+
+They contain a fallback secret - `SECRET_KEY=${SECRET_KEY:-change-me-in-production}`,
+three times - the JWT-fallback shape: a working key whenever the variable is
+unset.
+
+**Left alone deliberately.** It is a colleague's work, possibly live elsewhere.
+It is added to Phase 6's scrub scope as a decision that **needs Viraj and is
+Gary's to make.**
+
+---
+
+## BZ5 - NODEMAILER 10: THE CORRECTION, AND WHAT IS STILL UNPROVEN
+
+Phase 2's own commit 3 had already upgraded `nodemailer` to `^10.0.3` -
+identically to Dependabot, which is why that line did not conflict. Every
+signup and login suite reaches `createTransport().sendMail()` and fails at the
+SMTP handshake with `EAUTH`; an API break would throw before that.
+
+**Delivery is still unproven**, and cannot be proven without a real mail server.
+**One real OTP after deployment is the only proof**, and it is in the 4b
+runbook.
+
+
 ## Counts
 
 | State | Count | Rows |

@@ -28,6 +28,7 @@ documents a stranger needs before they can run or contribute to this.
 | **`Password@123`** | seed and fixture history | A default credential. Harmless in a fixture, and indistinguishable from a real one to a reader |
 | **`Frontend/.env`** | tracked today | Holds only `VITE_API_URL`, which Vite embeds in the bundle and which is public by construction. **Scrubbed for the shape, not the value** — a tracked `.env` is where the next secret lands |
 | **`docs/for_ocean_security_review.md`** | removed from HEAD in package 3.0, still in history | Exploit-level detail (U-5 / ADR-030) |
+| **`origin/setup-12`, `origin/setup-13`** | remote branches, unrelated history | **A different project ("Sentinel"), 12 of 13 commits by Viraj**, carrying `SECRET_KEY=${SECRET_KEY:-change-me-in-production}`. Must not be published as part of this repository. **The decision needs Viraj and is Gary's to make** - it is not a branch to delete on anybody else's judgement |
 
 ### 1.2 One thing that is easy to mis-read as reassurance
 
