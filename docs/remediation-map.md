@@ -5940,6 +5940,114 @@ now and goes back ON once #33 has merged.
 
 ---
 
+## MIG-01 (HIGH) - A MIGRATION THAT FAILS PARTWAY LEAVES A PLAUSIBLE HALF-SCHEMA (CY2)
+
+**Found while testing MariaDB (CX1), and worse than the bug that exposed it.**
+`prisma migrate deploy` of the unmodified init migration on MariaDB 11.8 failed
+at statement ten, on `REGEXP_LIKE()`. By then the first six tables existed,
+`_prisma_migrations` held a failed row, and nothing could undo it: **DDL on
+MySQL and MariaDB commits statement by statement.** The database looked nearly
+right. A retry would not have fixed it; Prisma refuses to proceed past a failed
+migration until it is resolved by hand.
+
+That is the shape this project keeps meeting - ENV-01, ENV-02, BUG-02 - **a
+failure that leaves a state which looks like success.** On a shared host where
+dropping tables means clicking through phpMyAdmin, it is also an expensive one
+to be in.
+
+**Fix, CX1. The defence is ordering, because rollback does not exist:**
+
+1. **Refuse before the first statement.** `npm run db:migrate` runs the guard
+   first, and the guard now checks every server property the migration depends
+   on: CHECK enforcement, the 0900 collations by behaviour, strict mode in both
+   scopes. Every reason the migration could stop partway *because of the server*
+   is a reason the guard refuses.
+2. **The REGEXP change removes the one statement MariaDB could not run.**
+3. **Proved both ways in CI.** `schema-mariadb` asserts the migration applies in
+   full (8 tables, 1 finished migration, drift gate clean), not just exit 0.
+   `refuse-unsupported` runs `db:migrate` against MariaDB 10.11 and a non-strict
+   11.8 and asserts **zero tables** afterwards.
+4. **Recovery is written down** (deployment-environment §1.4): drop every table
+   including `_prisma_migrations`, then `npm run db:migrate` again.
+
+**What is NOT closed, stated.** `npx prisma migrate deploy` on its own still
+skips the guard; the docs say never, nothing enforces it. And a migration can
+still stop partway for reasons no pre-check sees - a dropped connection, a
+killed process. The guard closes the class "the server cannot run this", not
+every class.
+
+---
+
+## CX1 - MARIADB 11.4.5+ IS SUPPORTED. HOSTINGER IS FINAL
+
+Hostinger shared hosting runs MariaDB 11.8 and is the only host available. The
+guard refused MariaDB by name on a premise - "no utf8mb4_0900_* collations" -
+that MariaDB 11.4.5 made false. ADR-063 records the decision; this records what
+was measured against `mariadb:11.8.9` with `mysql:8.4.13` as the reference.
+
+| Area | Result |
+|---|---|
+| Email collation (c) | `utf8mb4_0900_as_ci` is an alias of `utf8mb4_uca1400_nopad_as_ci`. **22 pairs identical** on both servers, under both collations and through a unique index: jose@/josé@ distinct, case folded, trailing space distinct, Cyrillic homoglyph distinct. Config, not schema |
+| CHECK (d) | **One schema change:** MariaDB has no `REGEXP_LIKE()`, so `branding_settings` could not be created. Now the `REGEXP` operator. All 10 CHECK probes then enforce identically. errno differs (3819/4025), read by nothing |
+| ENUM, `ON UPDATE`, nullable UNIQUE (d) | Identical |
+| Strict mode (d) | Identical except **MariaDB's default admits zero dates**. Accepted (CY1-2): Prisma cannot write one |
+| Time zone | Not a dependency. Prisma supplies `now()` itself; with the server at +05:30 both stored UTC |
+| Schema suite (e) | **30/30 on both.** One assertion changed for a server SPELLING, `bigint(20) unsigned` (CY1-3) |
+| Every other suite | **All pass on MariaDB 11.8**, run locally through `npm run test:all` |
+| Guard at start (b) | New. On 10.11: every data route and `/api/health` answer 503, the log says why |
+| TLS | **Measured: without an SSL parameter Prisma connects in PLAINTEXT**, even to a server offering TLS. `sslaccept=strict` refuses a self-signed certificate; `accept_invalid_certs` encrypts without verifying. Documented as the fallback, never "no parameter" |
+
+### CY1-4 - THE IDLE-TIMEOUT INSTRUCTION WAS BACKWARDS, AND WHY
+
+CX1 asked for "the shortest viable idle timeout". **That is the right answer to a
+cap on SIMULTANEOUS connections and the wrong one for Hostinger's cap, which is
+PER HOUR.** Under an hourly cap every reconnect is billed, and a short idle
+timeout turns one long-lived connection into a new one after every quiet spell.
+The reasoning for one limit was applied to the other; they need opposite
+settings.
+
+Measured with `connection_limit=1` against mariadb:11.8: 200 queries,
+sequential or 50 at a time, used **one** connection; an idle lifetime of 3 s
+became **two** across a 5 s pause; 3600 s stayed at one. So:
+`PRISMA_CONNECTION_LIMIT=1`, and the new `PRISMA_MAX_IDLE_CONNECTION_LIFETIME`
+set just under Hostinger's `wait_timeout`.
+
+### CY3 - STRICT MODE IS THE GO/NO-GO, AND WHAT EACH ANSWER MEANS
+
+On shared hosting only the provider can set `sql_mode`, and Prisma 6 cannot set
+it per connection. So Hostinger's `@@GLOBAL.sql_mode` decides this, and nothing
+in this repository can change the answer.
+
+**If it contains `STRICT_TRANS_TABLES`:** proceed. The guard passes, CX1 ships.
+
+**If it does not, the guard refuses and the site does not run.** That is
+correct, and here is what the refusal is preventing - measured on mariadb:11.8
+with `sql_mode=''`, through the application's own write path:
+
+| Write | Non-strict result |
+|---|---|
+| A hand-written INSERT with `payment_status='banana'` | **Stored as `''`. Matched by no status filter. BUG-02 by configuration, exactly** |
+| Prisma create/update with an out-of-set enum | Refused by Prisma's own validation before any SQL is sent |
+| A 200-character donor name (column 120) | **Silently stored as 120** |
+| PayU's error text, 1500 characters (column 1000) | **Silently cut to 1000** |
+| A quantity of 5,000,000,000 | **Silently clipped to 4,294,967,295** |
+
+Every application and ETL write goes through Prisma's typed API, so the enum
+case is reachable only by hand-written SQL - phpMyAdmin, a one-off script. That
+narrows it; it does not close it, and the truncation and clipping rows are
+reachable by the application itself, silently. **The options, none of them
+configuration:**
+
+1. **Ask Hostinger to make the account's server strict.** The only fix that
+   keeps the guard as it is.
+2. **A host that allows it** - a Hostinger VPS, where `sql_mode` is yours.
+3. **Run on a non-strict server knowingly.** That means changing the guard to
+   accept it, adding length and range validation for every column the
+   application writes, and accepting that hand-written SQL can recreate BUG-02.
+   That is a decision, not a fix, and it would need recording as one.
+
+---
+
 ## Counts
 
 | State | Count | Rows |

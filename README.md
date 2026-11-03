@@ -82,16 +82,17 @@ Vite inlines `VITE_*` values into the public bundle, so never put a secret there
 
 ## Database requirements
 
-**MySQL 8.0.16 or later. MariaDB is not supported.**
+**MySQL 8.0.16 or later, or MariaDB 11.4.5 or later**, with a strict `sql_mode`.
 
 The floor is 8.0.16 because that is where MySQL began *enforcing* `CHECK`
 constraints. Below it the constraints in `db/schema.sql` parse and are then
 silently ignored, so the schema applies with none of its integrity guarantees.
-MariaDB is excluded because it has no `utf8mb4_0900_*` collations, and the
-email uniqueness guarantee depends on `utf8mb4_0900_as_ci`.
+MariaDB before 11.4.5 has no `utf8mb4_0900_*` collations, and the email
+uniqueness guarantee depends on `utf8mb4_0900_as_ci`. MariaDB 11.4.5+ has them,
+and CI runs the schema suite against MariaDB 11.8 as well as MySQL 8.4.
 
-Both are enforced at runtime: `npm run db:migrate` and `npm run db:seed` refuse
-to proceed on an unsupported server. The bundled `docker-compose.yml` provides
+All of it is enforced: `npm run db:migrate` and `npm run db:seed` refuse to
+proceed on an unsupported server, and the application answers 503 on one. The bundled `docker-compose.yml` provides
 a correctly configured `mysql:8.4`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the schema change process, and note

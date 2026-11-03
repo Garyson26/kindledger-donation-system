@@ -11,7 +11,7 @@ at the cutover (4b runbook §3.4 and §6a). So values marked COPY below are copi
 from the old backend project, not recovered from source systems. Every COPY
 value is stored there as a readable `encrypted` variable, not `sensitive`, so the
 dashboard can reveal it. **Start with §6: it says what to do with each of the
-36 names.**
+37 names.**
 
 > **A new project starts with nothing, and the Vercel CLI cannot tell you what
 > is missing.** Most of these variables, if absent, do not stop the deploy. They
@@ -90,39 +90,114 @@ longer allows that hostname** (§3.1, CX2), so the browser now blocks it as well
 The boot log says which store is in use (`[rateLimiters]`). **After the first
 deploy, check the log says redis.** No user-visible symptom will tell you.
 
-### 1.4 `DATABASE_URL` — the MySQL database
+### 1.4 `DATABASE_URL` — the database (Hostinger MariaDB, CX1)
 
 | | |
 |---|---|
 | Required | **Yes** |
-| Format | `mysql://<user>:<password>@<host>:3306/<database>?sslaccept=strict` |
-| Source | **A choice of provider.** Vercel does not host MySQL. It must be MySQL **8.4** (the schema and `db/require-mysql-version.js` assume it) |
+| Format | `mysql://<user>:<password>@<host>:3306/<database>?sslaccept=strict`. On Hostinger the host is the Remote MySQL hostname hPanel shows (`srvNNNN.hstgr.io`) |
+| Source | Hostinger shared hosting, which runs **MariaDB 11.8**. Supported since CX1: MySQL **8.0.16+** or MariaDB **11.4.5+**, with a strict `sql_mode` |
 | If missing | REFUSES. `/api/health` answers 503 and every data route errors |
+| **If the server is unsupported** | **REFUSES (CX1(b)).** Every data route and `/api/health` answer 503 `Service unavailable`; the log says `[serverGuard] REFUSING:` and why. Before CX1 it booted and wrote data |
 
-**Use TLS** (`sslaccept=strict`). This connection crosses the public internet,
-which it never did in the compose stack.
+#### Two things this deployment cannot fix, said plainly
+
+**1. The database holding donor details is reachable from the whole internet,
+protected by a password and nothing else.** Remote MySQL has to allow **any
+host** (`%`), because Vercel functions have no fixed outbound address to put on
+an allow list. Anyone who learns the hostname - and `srvNNNN.hstgr.io` names are
+not secret - can try passwords against it. There is no network control in front
+of it. So:
+
+- **Use the longest random password hPanel accepts.** Generate 64 characters of
+  `A-Z a-z 0-9` only (the §1.6 generator, with symbols removed), so nothing in it
+  needs percent-encoding in the URL. If hPanel refuses 64, use the longest it
+  takes; Hostinger does not document its limit, and I could not test it.
+- **The password lives in exactly one place:** this variable, set as Sensitive.
+  Not in a note, not in the 4b runbook log, not on the old backend.
+- **Rotate it if it is ever pasted anywhere else.**
+
+**2. TLS is the only thing protecting it in transit, and the URL decides whether
+there is any.** Measured against mariadb:11.8 (CX1), with the server offering
+TLS:
+
+| `DATABASE_URL` ends with | Result |
+|---|---|
+| nothing | **PLAINTEXT.** Prisma does not use TLS unless asked. The password and every donor row cross the internet readable. **This is the silent failure: everything works** |
+| `?sslaccept=strict` | Encrypted and the certificate verified. **Refuses to connect** if the certificate is self-signed |
+| `?sslaccept=accept_invalid_certs` | Encrypted, certificate **not** verified. Stops eavesdropping; does not stop an attacker who can intercept and impersonate the server |
+
+**Start with `strict`.** If the first deploy's log shows `Error opening a TLS
+connection: ... root certificate which is not trusted`, Hostinger is presenting
+a certificate Prisma cannot verify, and `accept_invalid_certs` is the fallback.
+That is still far better than nothing. Never remove the parameter to "fix" a
+connection error.
+
+**Check it rather than assume it.** From a workstation, with the same URL,
+`SHOW SESSION STATUS LIKE 'Ssl_cipher'` must not come back empty.
+
+#### Installing the schema: `npm run db:migrate`, never bare `prisma migrate deploy`
+
+Run it once, from a workstation whose address is on the Remote MySQL list:
+
+```
+DATABASE_URL='<the URL above>' npm run db:migrate
+```
+
+`db:migrate` runs the server guard first, then the migration. **The order is
+the protection (CY2).** DDL on MySQL and MariaDB commits statement by statement,
+so a migration that fails partway cannot be rolled back: before CX1, the init
+migration stopped at `branding_settings` on MariaDB with six tables already
+created and a failed row in `_prisma_migrations` - a schema that looks nearly
+right. `npx prisma migrate deploy` on its own skips the guard.
+
+**If a migration ever does stop partway:** do not retry it on top. In
+phpMyAdmin, drop every table in the database (including `_prisma_migrations`),
+then run `npm run db:migrate` again. A fresh install has no data to lose; a
+database with data needs a backup taken first.
 
 **Fresh.** New database, new credential. **It goes on the new backend only.
 The old backend must never be given it** (CD2c, 4b runbook §1.6).
 
-### 1.5 `PRISMA_CONNECTION_LIMIT` — the default is wrong for serverless
+### 1.5 The connection budget: `PRISMA_CONNECTION_LIMIT` and `PRISMA_MAX_IDLE_CONNECTION_LIFETIME`
 
-| | |
-|---|---|
-| Required | **Set it explicitly on Vercel** |
-| Default | `10`, derived for ONE long-running container (SPEC-1A §3.4) |
-| **If left at 10** | **FAILS LOUD, later.** Each concurrent function instance opens its own pool. Twenty concurrent instances × 10 = 200 connections, and many managed MySQL plans allow fewer. Under a donation spike, new requests are refused |
+Hostinger limits connections **per hour** per database user (its own error text
+shows `max_connections_per_hour`, value 500 in its example; read yours with
+`SHOW GRANTS`). That is a different limit from a cap on simultaneous
+connections, and **it needs the opposite setting** (CY1-4).
 
-**Derivation (BJ2), not a number:**
+| Variable | Set it to | Why |
+|---|---|---|
+| `PRISMA_CONNECTION_LIMIT` | **`1`** | One connection per function instance. Measured: 200 queries, sequential or 50 at a time, used **one** connection. `10` used ten for the same burst |
+| `PRISMA_MAX_IDLE_CONNECTION_LIFETIME` | **Hostinger's `wait_timeout` minus 10** (seconds) | How long Prisma keeps an idle connection. **Longer is cheaper here:** every retired connection is re-opened by the next request, and the re-open is billed. Measured: 3 s turned one connection into two across a 5 s pause; 3600 s kept it at one. Past `wait_timeout` the server closes it anyway, so that is the ceiling |
+
+**What actually spends the hourly allowance** is not requests. A warm instance
+serves any number of requests on its one connection. Connections are spent by:
 
 ```
-PRISMA_CONNECTION_LIMIT = floor( (provider max_connections − headroom) / peak concurrent instances )
+connections per hour ≈ new function instances per hour
+                     + quiet spells longer than the idle lifetime, per instance
+                     + migrations, seeds and people at a prompt
 ```
 
-`headroom` covers the ETL, migrations and a human at a prompt. Use 5.
-`peak concurrent instances` is the unknown. **Start at `1`.** That is the safe
-end, because one connection per instance cannot exhaust the server before the
-instance count does. Raise it only once you have measured the instance count.
+So the ceiling is "how many instances Vercel starts in an hour", which depends
+on how bursty traffic is, not on how much of it there is. A steady trickle of
+donations reuses one or two instances; a sudden spike (a campaign email to the
+whole list) can start many at once. **Measure it in the first week:** count
+cold starts in the Vercel function logs (each instance logs `[serverGuard] ... supported`
+once, on its first request) per hour, and compare with the cap.
+
+**The symptom when the cap is reached.** Every route that touches the database
+starts failing at once, and keeps failing **until the clock hour resets**:
+
+- donors see errors on sign-in, donation and the category list;
+- `/api/health` answers 503;
+- the function log shows `has exceeded the 'max_connections_per_hour' resource`.
+
+Nothing is wrong with the code, the data or the credentials, and redeploying
+does not help - a redeploy starts new instances, which spends more of the
+allowance. Wait for the hour to turn. If it happens more than once, the cap is
+too small for the traffic and only Hostinger can raise it.
 
 ### 1.6 `JWT_SECRET`
 
@@ -167,7 +242,8 @@ The **Action** column is defined in §6.
 |---|---|---|---|---|---|
 | `DATABASE_URL` | **GENERATE FRESH** | **Yes** | REFUSES | Provider (fresh) | §1.4 |
 | `REDIS_URL` | **GENERATE FRESH** | **Yes** | **FAILS SILENT** | Provider (fresh) | §1.3 |
-| `PRISMA_CONNECTION_LIMIT` | NEW | **Set it** | Fails loud under load | Derived | §1.5. Start at `1` |
+| `PRISMA_CONNECTION_LIMIT` | NEW | **Set it** | Fails loud under load | Derived | §1.5. `1` |
+| `PRISMA_MAX_IDLE_CONNECTION_LIFETIME` | NEW | **Set it** | Prisma's default; more reconnects, each billed against the hourly cap | Hostinger `wait_timeout` | §1.5. Seconds: `wait_timeout` minus 10 |
 | `JWT_SECRET` | **GENERATE FRESH** | **Yes** | REFUSES | **Generated fresh** | §1.6 |
 | `ALLOWED_ORIGINS` | **REWRITE** | **Yes** | FAILS CLOSED: every browser request rejected by CORS | The new frontend domain(s) | `https://donate.example.org`. Comma-separated, exact scheme and host, **no trailing slash, no path**. Compared character for character |
 | `PAYU_BASE_URL` | COPY, **then check** | **Yes** | Fails loud. **Wrong = FAILS SILENT** | Old backend | Must read `https://secure.payu.in`. If it reads `test.payu.in`, stop: the key and salt beside it are sandbox ones too (§1.7) |
@@ -287,11 +363,11 @@ refused at use) and retention purges do not run. Both are recorded, not hidden.
 
 ---
 
-## 6. Setting them up by hand: what to do with each of the 36 names (CD3)
+## 6. Setting them up by hand: what to do with each of the 37 names (CD3, CX1)
 
-The code reads **36 names** on the backend (33 directly, plus the three `JOB_*`
+The code reads **37 names** on the backend (34 directly, plus the three `JOB_*`
 names read through `config/destructiveJobs.js`) and **1** on the frontend.
-**You type in 21 of them on the backend and 1 on the frontend.** The other 15
+**You type in 22 of them on the backend and 1 on the frontend.** The other 15
 stay unset.
 
 | Action | Means |
@@ -311,7 +387,7 @@ stay unset.
 > problem arriving through configuration. A copied `VITE_API_URL` does the same
 > for every request (§1.2).
 
-### Backend: 36 names
+### Backend: 37 names
 
 | # | Name | Action | On the old backend? |
 |---|---|---|---|
@@ -336,28 +412,29 @@ stay unset.
 | 19 | `FRONTEND_SUCCESS_URL` | **REWRITE**: new frontend domain | Yes |
 | 20 | `FRONTEND_FAILURE_URL` | **REWRITE**: new frontend domain | Yes |
 | 21 | `PRISMA_CONNECTION_LIMIT` | NEW: set to `1` (§1.5) | No |
-| 22 | `ADMIN_CREATION_KEY` | **GENERATE FRESH** (rotation), **if it is ever set**. Recommended: leave unset (§2.4) | No |
-| 23 | `RATE_LIMIT_PREFIX` | NEW: leave unset unless Redis is shared | No |
-| 24 | `MONGODB_URI` | **DO NOT SET** (CD2c) | Yes |
-| 25 | `MONGO_URI` | **DO NOT SET** (CD2c) | No |
-| 26 | `PORT` | DO NOT SET | Yes |
-| 27 | `NODE_ENV` | DO NOT SET: `vercel.json` sets it | No |
-| 28 | `VERCEL` | DO NOT SET: the platform sets it | No |
-| 29 | `UPLOADS_DIR` | DO NOT SET (§5) | No |
-| 30 | `SCHEDULER_ENABLED` | DO NOT SET (§5) | No |
-| 31 | `SCHEDULER_TIMEZONE` | DO NOT SET (§5) | No |
-| 32 | `RETENTION_YEARS` | DO NOT SET (§5) | No |
-| 33 | `ALLOW_SEED` | DO NOT SET | No |
-| 34 | `JOB_RETENTION_PURGE` | DO NOT SET (§5) | No |
-| 35 | `JOB_INACTIVE_ACCOUNT_PURGE` | DO NOT SET (§5) | No |
-| 36 | `JOB_PENDING_SIGNUP_SWEEP` | DO NOT SET (§5) | No |
+| 22 | `PRISMA_MAX_IDLE_CONNECTION_LIFETIME` | NEW: Hostinger's `wait_timeout` minus 10 (§1.5) | No |
+| 23 | `ADMIN_CREATION_KEY` | **GENERATE FRESH** (rotation), **if it is ever set**. Recommended: leave unset (§2.4) | No |
+| 24 | `RATE_LIMIT_PREFIX` | NEW: leave unset unless Redis is shared | No |
+| 25 | `MONGODB_URI` | **DO NOT SET** (CD2c) | Yes |
+| 26 | `MONGO_URI` | **DO NOT SET** (CD2c) | No |
+| 27 | `PORT` | DO NOT SET | Yes |
+| 28 | `NODE_ENV` | DO NOT SET: `vercel.json` sets it | No |
+| 29 | `VERCEL` | DO NOT SET: the platform sets it | No |
+| 30 | `UPLOADS_DIR` | DO NOT SET (§5) | No |
+| 31 | `SCHEDULER_ENABLED` | DO NOT SET (§5) | No |
+| 32 | `SCHEDULER_TIMEZONE` | DO NOT SET (§5) | No |
+| 33 | `RETENTION_YEARS` | DO NOT SET (§5) | No |
+| 34 | `ALLOW_SEED` | DO NOT SET | No |
+| 35 | `JOB_RETENTION_PURGE` | DO NOT SET (§5) | No |
+| 36 | `JOB_INACTIVE_ACCOUNT_PURGE` | DO NOT SET (§5) | No |
+| 37 | `JOB_PENDING_SIGNUP_SWEEP` | DO NOT SET (§5) | No |
 
 Two names on the old backend are not read by the code at all, so they are not
 among the 36: `foroceanfoundation_MONGODB_URI` and `ADMIN_EMAIL`. **Do not copy
 either** (§4).
 
-**Count check:** 4 generate fresh that are set + 9 copy + 7 rewrite + 1 new =
-**21 typed in.** `ADMIN_CREATION_KEY` (generate fresh, left unset) +
+**Count check:** 4 generate fresh that are set + 9 copy + 7 rewrite + 2 new =
+**22 typed in.** `ADMIN_CREATION_KEY` (generate fresh, left unset) +
 `RATE_LIMIT_PREFIX` (new, left unset) + 13 do-not-set = **15 left off.**
 
 **Rotation list (CG2):** `JWT_SECRET`, `HEALTH_DIAGNOSTIC_SECRET`,
