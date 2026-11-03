@@ -5643,6 +5643,98 @@ locally because the checkout had a `.env`. The step now supplies the other
 five required variables. Checked both ways against a clean copy of the
 compose file: it refuses naming `PAYU_BASE_URL`, and accepts once that is set.
 
+## CG1 - THE REPOSITORY STAYS PUBLIC: WHAT IS EXPOSED, CHECKED 3 NOV 2026
+
+**Decided by Gary: public deliberately, rotate rather than scrub.** No history
+rewrite: it would break all ten stacked PRs and every clone. The Phase 6
+checklist §0 and §1 carry the consequences.
+
+### a. `for_ocean_security_review.md` is on `main`'s front page, not just in history
+
+Added at `bacd6d9` (24 May, "CloudPeak update"), removed in package 3.0
+(`6cfec20`). That removal reaches `main` only when PR C (#20) merges. **Until
+then the file sits at the root of `origin/main` and of 17 other public
+branches**, including the heads of #16, #17, #13, #18 and #19. ADR-030 called it
+"never public", which assumed a private repository and no longer holds. It
+remains in history whatever happens to `main`.
+
+Most of its ~40 findings were fixed before production's `58bdadf`
+(SECURITY-REVIEW.md appendix A). **What it describes that production still
+has.** Production is `58bdadf`; none of the stack's fixes are merged or
+deployed:
+
+| Its ID | Now | In production (`58bdadf`) | Fixed where |
+|---|---|---|---|
+| BE-HIGH-03 | SEC-04: rate limiting non-functional | **Open.** In-memory default limiter, per instance on serverless | D (#21), package 3.2 |
+| BE-HIGH-06 | SEC-08: account enumeration on four endpoints | **Open** | D (#21) and E (#22) |
+| BE-MED-09 | SEC-16 / BUG-02: admin status writes unvalidated | **Open** | D (#21) |
+| BE-HIGH-07 | SEC-15: JWT in `localStorage` | **Open, everywhere.** Not fixed on the stack either | Not scheduled |
+| BE-MED-07 | Seeder sets `Password@123` for 1000 users | **Open in the legacy seeder** (see c) | Seeder deleted in 4c |
+| BE-MED-11 | SEC-12: no lockfiles to audit | **Open** | B (#19) |
+| LOW-02 | SEC-17: `Frontend/.env` tracked | **Open.** Post-F empties it; still tracked | Post-F (#15), partially |
+| LOW-03 to LOW-05 | Duplicate files, dead PDF generators, `console.log` sprawl | Open (hygiene) | Not scheduled |
+
+**Mitigating, and recorded, not leaned on:** production's backend answers
+**every** request with `FUNCTION_INVOCATION_FAILED` today (below), so nothing
+in that table is reachable while it stays down. That is an availability failure
+standing in for access control, the same shape SEC-03 was recorded with.
+
+### b. The JWT fallback is permanently public; production does not use it, confirmed by behaviour
+
+Fallback literals ever committed, values not reproduced here: **30 characters**
+in `Backend/config/jwt.js` from `e11a09e` (17 Jan) to `bacd6d9` (24 May), both
+ancestors of `main`; **43 characters** as a test fallback in
+`Backend/test/branding.test.js` from `3db866a` (22 Sep); 10 characters inside a
+comment in the secrets test.
+
+**Production is not using the 30-character one. Shown by behaviour, without
+reading the secret.** Production's `app.js` requires `routes/auth.js` (line
+12), and so `config/jwt.js`, which throws at load if `JWT_SECRET` is missing or
+under 32 characters, **before** `connectDB()` (line 88). Production's runtime
+logs for 3 Nov show every request reaching "MongoDB Connection Failed". So the
+guard passed, and the value is at least 32 characters.
+
+**Production is not using the 43-character one either.** Vercel records the old
+backend's `JWT_SECRET` as created with the project on 22 Jan and never edited.
+The test value first appeared eight months later. This is metadata, so it would
+miss a value copied *out* of production into the test. Nothing suggests that
+happened, and rotation (CG2) makes it moot.
+
+### c. `Password@123`: no current code path, one data path
+
+At `main` and every stack tip it appears only in `Backend/scripts/seedDatabase.js`
+(the legacy MongoDB seeder, which refuses to run unless `NODE_ENV` is not
+production **and** `ALLOW_SEED=true`), its README, the top-level README's
+warning, and a comment in the MySQL seeder explaining why that one generates a
+random password per run. **No application code uses it.** The seeder an
+installation runs today (`npm run db:seed`) never produces it.
+
+**The one way it reaches a current installation is data.** If the legacy
+seeder ever ran against production MongoDB, those hashes are in production, and
+the ETL copies password hashes verbatim. 4b runbook §2.2 checks every
+production hash against it **before** the ETL. Unknown until then.
+
+### Two things found while checking, both urgent
+
+**1. Production's MongoDB cluster name does not resolve.** Every production
+request (3 Nov, 08:33 UTC) fails with `querySrv ENOTFOUND
+_mongodb._tcp.foroceanfoundation-db.fbjyfvb.mongodb.net`. Google DNS returns
+**NXDOMAIN** for that SRV record. This map had recorded "MongoDB rejects the
+application's credentials", which is a different failure. A cluster whose
+name no longer exists may be **deleted or renamed, not just locked**. **4b's
+entire data source, and AE1-a's minted-id oracle, live there.** Not
+verifiable from here: the Atlas connector needs authorising. **Gary: confirm in
+Atlas that the cluster and its data exist before anything else in 4b is
+planned.** If the integration store (`store_1KY6ODUNmfpdgqg0`) points at a
+different cluster from `MONGODB_URI`, that is worth knowing too.
+
+**2. `main` publishes a GPL v3 `LICENSE` today.** It sits beside ISC in
+`Backend/package.json` (ADR-029). ADR-061's reassurance, that the GPL commit
+`4f3b7ec` was made while private so no public grant exists, does not survive a
+public repository. Apache-2.0 arrives in E (#22). **What the published GPL text
+means for the versions under it is a licensing question for Gary.** Recorded,
+not answered.
+
 ## BRAND-01 (LOW) - THE BRANDING PUT CAN WRITE THE STORAGE FIELDS
 
 Found by an automated review while preparing PR F. **Confirmed by reading the

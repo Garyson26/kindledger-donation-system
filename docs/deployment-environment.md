@@ -133,7 +133,12 @@ instance count does. Raise it only once you have measured the instance count.
 | Source | **GENERATED FRESH (AI1).** Do not carry the old value over |
 | If missing or short | REFUSES. `config/jwt.js` throws on load, so every request fails |
 
-A fresh value invalidates every existing session. That is intended.
+A fresh value invalidates every existing session. **That is intended, and is
+rotation (CG2), not a side effect:** the repository is public, and a
+30-character fallback that once lived in `config/jwt.js` is permanently public
+in its history. Production does not use it (Phase 6 checklist §1.1, confirmed
+by behaviour). Generating fresh means it cannot matter whether any copy of any
+old value is out there.
 
 ### 1.7 `PAYU_MERCHANT_SALT` and `PAYU_MERCHANT_KEY`
 
@@ -181,7 +186,7 @@ The **Action** column is defined in §6.
 | `SMTP_PORT` | COPY | Optional | `587` | Old backend | `587` (STARTTLS) or `465` |
 | `SMTP_SECURE` | COPY | Optional | `false` | Old backend | `true` **only** with port 465 |
 | `HEALTH_DIAGNOSTIC_SECRET` | **GENERATE FRESH** | Optional | FAILS CLOSED: diagnostics unavailable, plain health still works | **Generated fresh** | 16+ chars, same generator as `JWT_SECRET` |
-| `ADMIN_CREATION_KEY` | NEW: **leave unset** | **Leave unset** | FAILS CLOSED: public signup cannot mint admins | — | See §2.4 |
+| `ADMIN_CREATION_KEY` | **GENERATE FRESH** (rotation) if ever set. **Leave unset** | **Leave unset** | FAILS CLOSED: public signup cannot mint admins | — | See §2.4 |
 | `RATE_LIMIT_PREFIX` | NEW: leave unset | Optional | `kl:rl:` | Choice | Set it only if the Redis instance is shared with anything else |
 
 ### 2.2 Frontend project
@@ -290,7 +295,7 @@ stay unset.
 | Action | Means |
 |---|---|
 | **COPY** | Exists on the old backend. Copy the value across unchanged |
-| **GENERATE FRESH** | Make a new value. **Never copy, even where the old project has one** |
+| **GENERATE FRESH** | **Rotation, not convenience (CG2).** The repository is public and its history is permanent (Phase 6 checklist §1), so any value that sat in this project's history, logs or old projects must be assumed known. Make a new one, from the generator in §1.6. **Never copy, even where the old project has one** |
 | **REWRITE** | The name exists on the old project and **the value must change**, because it names an old host. See the warning below |
 | **NEW** | Not on the old project. Added since it was created |
 | **DO NOT SET** | Leave it off the project. §4 and §5 say why |
@@ -308,10 +313,10 @@ stay unset.
 
 | # | Name | Action | On the old backend? |
 |---|---|---|---|
-| 1 | `JWT_SECRET` | **GENERATE FRESH** | Yes. Do not copy (AI1) |
-| 2 | `HEALTH_DIAGNOSTIC_SECRET` | **GENERATE FRESH** | No |
-| 3 | `DATABASE_URL` | **GENERATE FRESH** | No. **Never put it on the old backend** |
-| 4 | `REDIS_URL` | **GENERATE FRESH** | No |
+| 1 | `JWT_SECRET` | **GENERATE FRESH** (rotation) | Yes. Do not copy (AI1). A 30-character fallback and a 43-character test value are permanently public in history. **Every existing session ends when this changes, and that is expected** |
+| 2 | `HEALTH_DIAGNOSTIC_SECRET` | **GENERATE FRESH** (rotation) | No |
+| 3 | `DATABASE_URL` | **GENERATE FRESH** (rotation): new database, new credential | No. **Never put it on the old backend** |
+| 4 | `REDIS_URL` | **GENERATE FRESH** (rotation): new instance, new password | No |
 | 5 | `PAYU_MERCHANT_KEY` | COPY | Yes |
 | 6 | `PAYU_MERCHANT_SALT` | COPY | Yes |
 | 7 | `PAYU_BASE_URL` | COPY, **then check it reads `https://secure.payu.in`** | Yes |
@@ -329,7 +334,7 @@ stay unset.
 | 19 | `FRONTEND_SUCCESS_URL` | **REWRITE**: new frontend domain | Yes |
 | 20 | `FRONTEND_FAILURE_URL` | **REWRITE**: new frontend domain | Yes |
 | 21 | `PRISMA_CONNECTION_LIMIT` | NEW: set to `1` (§1.5) | No |
-| 22 | `ADMIN_CREATION_KEY` | NEW: **leave unset** (§2.4) | No |
+| 22 | `ADMIN_CREATION_KEY` | **GENERATE FRESH** (rotation), **if it is ever set**. Recommended: leave unset (§2.4) | No |
 | 23 | `RATE_LIMIT_PREFIX` | NEW: leave unset unless Redis is shared | No |
 | 24 | `MONGODB_URI` | **DO NOT SET** (CD2c) | Yes |
 | 25 | `MONGO_URI` | **DO NOT SET** (CD2c) | No |
@@ -349,8 +354,15 @@ Two names on the old backend are not read by the code at all, so they are not
 among the 36: `foroceanfoundation_MONGODB_URI` and `ADMIN_EMAIL`. **Do not copy
 either** (§4).
 
-**Count check:** 4 generate fresh + 9 copy + 7 rewrite + 1 new that is set = **21
-typed in.** 2 new left unset + 13 do-not-set = **15 left off.**
+**Count check:** 4 generate fresh that are set + 9 copy + 7 rewrite + 1 new =
+**21 typed in.** `ADMIN_CREATION_KEY` (generate fresh, left unset) +
+`RATE_LIMIT_PREFIX` (new, left unset) + 13 do-not-set = **15 left off.**
+
+**Rotation list (CG2):** `JWT_SECRET`, `HEALTH_DIAGNOSTIC_SECRET`,
+`ADMIN_CREATION_KEY`, `DATABASE_URL`, `REDIS_URL`. **Rotating `JWT_SECRET`
+signs every existing user out**, donors and admins alike. That is the rotation
+taking effect. It is not a fault, and nobody should "fix" it by restoring the
+old value.
 
 ### Frontend: 1 name
 
