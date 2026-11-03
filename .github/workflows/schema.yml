@@ -298,11 +298,16 @@ jobs:
   # ---------------------------------------------------------------------------
   # CY2 - a refused install leaves NOTHING. MySQL-family DDL cannot roll back,
   # so the only defence against a half-applied schema is refusing before the
-  # first statement. This proves the refusal, on the two unsupported shapes most
-  # likely to be met: an older MariaDB, and a current one that is not strict.
+  # first statement.
+  #
+  # DB1 - and a NON-STRICT server is no longer refused, because the
+  # application makes its own sessions strict on connect. This job proves both
+  # halves of that: the application's writes are refused, and a client that
+  # does NOT go through config/prisma.js still stores '' - the accepted
+  # residual (DB3), pinned here so a change in either direction is seen.
   # ---------------------------------------------------------------------------
   refuse-unsupported:
-    name: Unsupported servers are refused before any DDL
+    name: Unsupported servers are refused; a non-strict one is made strict per session
     runs-on: ubuntu-latest
 
     services:
@@ -318,7 +323,8 @@ jobs:
           --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=10s --health-timeout=5s --health-retries=12 --health-start-period=30s
       mariadb_lax:
-        # A supported version with a non-strict GLOBAL sql_mode, set below.
+        # A supported version with a non-strict GLOBAL sql_mode, as on
+        # Hostinger. Set below.
         image: mariadb:11.8
         env:
           MARIADB_ROOT_PASSWORD: ci-root-password
@@ -345,40 +351,66 @@ jobs:
       - name: Make the 11.8 server non-strict
         run: |
           docker exec ${{ job.services.mariadb_lax.id }} mariadb -uroot -pci-root-password -e "
-            SET GLOBAL sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+            SET GLOBAL sql_mode = ''"
 
-      - name: db:migrate refuses, and creates nothing
+      - name: MariaDB 10.11 - db:migrate refuses, and creates nothing
         working-directory: Backend
         run: |
-          check() {
-            local label=$1 port=$2 id=$3
-            if DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:$port/kindledger" npm run db:migrate; then
-              echo "::error::$label: db:migrate SUCCEEDED against an unsupported server"; return 1
-            fi
-            tables=$(docker exec "$id" mariadb -uroot -pci-root-password -N -B -e "
-              SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'kindledger'")
-            echo "$label: refused, tables left behind: $tables"
-            test "$tables" = "0"
-          }
-          check "MariaDB 10.11"            3307 ${{ job.services.mariadb_old.id }}
-          check "MariaDB 11.8, non-strict" 3308 ${{ job.services.mariadb_lax.id }}
+          if DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3307/kindledger" npm run db:migrate; then
+            echo "::error::db:migrate SUCCEEDED against MariaDB 10.11"; exit 1
+          fi
+          tables=$(docker exec ${{ job.services.mariadb_old.id }} mariadb -uroot -pci-root-password -N -B -e "
+            SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'kindledger'")
+          echo "MariaDB 10.11: refused, tables left behind: $tables"
+          test "$tables" = "0"
 
-      - name: The application refuses too - every data route and health answer 503 (CX1(b))
+      - name: MariaDB 10.11 - the application refuses too (CX1(b))
         working-directory: Backend
         run: |
-          for port in 3307 3308; do
-            DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:$port/kindledger" \
-            NODE_ENV=production VERCEL=1 JWT_SECRET=ci-only-jwt-secret-at-least-32-characters \
-            node -e '
-              const app = require("./app.js");
-              const server = app.listen(0, async () => {
-                const base = `http://127.0.0.1:${server.address().port}`;
-                let bad = 0;
-                for (const p of ["/api/categories", "/api/branding", "/api/health"]) {
-                  const r = await fetch(base + p);
-                  console.log(`${process.env.DATABASE_URL.split("@")[1]} ${p} -> ${r.status}`);
-                  if (r.status !== 503) bad++;
-                }
-                process.exit(bad ? 1 : 0);
-              });'
-          done
+          DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3307/kindledger" \
+          NODE_ENV=production VERCEL=1 JWT_SECRET=ci-only-jwt-secret-at-least-32-characters \
+          node -e '
+            const app = require("./app.js");
+            const server = app.listen(0, async () => {
+              const base = `http://127.0.0.1:${server.address().port}`;
+              let bad = 0;
+              for (const p of ["/api/categories", "/api/branding", "/api/health"]) {
+                const r = await fetch(base + p);
+                console.log(`${p} -> ${r.status}`);
+                if (r.status !== 503) bad++;
+              }
+              process.exit(bad ? 1 : 0);
+            });'
+
+      - name: Non-strict 11.8 - db:migrate proceeds, with the WARNING (DB1)
+        working-directory: Backend
+        run: |
+          out=$(DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3308/kindledger" npm run db:migrate 2>&1) || { echo "$out"; exit 1; }
+          echo "$out" | grep -E "WARNING|Database server OK"
+          echo "$out" | grep -q "WARNING: GLOBAL sql_mode is not strict" || { echo "::error::no warning"; exit 1; }
+
+      - name: Non-strict 11.8 - the application's own write is REFUSED; an outside client's is not (DB1, DB3)
+        working-directory: Backend
+        run: |
+          DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3308/kindledger" node -e '
+            const { getPrisma, disconnect } = require("./config/prisma");
+            const { randomUUID } = require("crypto");
+            (async () => {
+              const p = getPrisma();
+              const cat = await p.category.create({ data: { uuid: randomUUID(), name: "ci-db1", shortDescription: "s", donationAmountMinor: 100n } });
+              try {
+                await p.$executeRawUnsafe(
+                  "INSERT INTO donations (uuid, transaction_ref, donor_name, donor_email, category_id, base_amount_minor, amount_minor, payment_status) VALUES (?, ?, \"D\", \"d@x.com\", ?, 100, 100, \"banana\")",
+                  randomUUID(), randomUUID(), cat.id);
+                console.log("::error::the application stored an out-of-set ENUM on a non-strict server"); process.exitCode = 1;
+              } catch (e) { console.log(`application write refused: ${e.code}`); }
+              await disconnect();
+            })();'
+          stored=$(docker exec ${{ job.services.mariadb_lax.id }} mariadb -uroot -pci-root-password -N -B kindledger -e "
+            INSERT INTO donations (uuid, transaction_ref, donor_name, donor_email, category_id, base_amount_minor, amount_minor, payment_status)
+              SELECT UUID(), UUID(), 'D', 'd@x.com', id, 100, 100, 'banana' FROM categories WHERE name = 'ci-db1';
+            SELECT CONCAT('[', payment_status, ']') FROM donations ORDER BY id DESC LIMIT 1")
+          # THE RESIDUAL, PINNED (DB3). If this ever prints [Pending] or fails, the
+          # server became strict and the accepted risk can be closed.
+          echo "outside client stored: $stored"
+          test "$stored" = "[]"
