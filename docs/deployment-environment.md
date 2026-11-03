@@ -411,8 +411,11 @@ it (runbook §3.4). CA's rule applies: a merged PR is not a deployed fix.
 
 So the window is open from now until §3.4. Standing up the new backend does not
 close it by itself, because the old one keeps serving until it is paused.
-**The repository is public, and has been since it was created.** The hotfix
-branch and this map describe the bypass to anyone who reads them. That does not
+**The repository is public** (an unauthenticated API read returned it on
+3 Nov 2026). ADR-028 records it as private in September, so it has changed
+visibility at least twice, and when is not recorded here. While it is public,
+the hotfix branch and this map describe the bypass to anyone who reads them.
+Phase 6's history scrub assumed it would run **before** publication (ADR-030). That does not
 change the options below. It does change what accepting the window means.
 
 The options that close it sooner are Gary's to weigh. **I am not recommending
