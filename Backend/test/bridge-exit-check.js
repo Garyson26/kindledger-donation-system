@@ -65,10 +65,34 @@ const SEPARATE_INVOCATION = new Map([
  * this project's own migrated rows came FROM. Nothing was lost, because the
  * suites clean up by prefix, but the near-miss is why this is DERIVED here
  * rather than taken from the environment.
+ *
+ * Only the database NAME is derived. The SERVER is wherever this process was
+ * told MongoDB is: `mongo:27017` inside the api container (compose), and
+ * 127.0.0.1 on a CI runner, which sets TEST_MONGODB_URI to its service. Hard-
+ * coding the compose host made every MongoDB suite fail on CI while passing in
+ * its own step (CM1). An Atlas host is refused: a test runner never touches a
+ * hosted cluster.
  */
+const MONGO_SERVER = (() => {
+  const m = /^(mongodb:\/\/[^/?]+)/.exec(process.env.TEST_MONGODB_URI || '');
+  const server = m ? m[1] : 'mongodb://mongo:27017';
+  if (/mongodb\.net|^mongodb\+srv:/i.test(server)) {
+    throw new Error(`REFUSING: TEST_MONGODB_URI points at a hosted cluster (${server.replace(/\/\/[^@]*@/, '//***@')}).`);
+  }
+  return server;
+})();
+
 function databaseFor(file) {
+  // `null-minted` is the exception (backported from c937628, which found it
+  // later in run-all-suites.js). It runs a DESTRUCTIVE operation whose oracle is
+  // "does a document with this _id exist", so it must read the database the
+  // ETL migrated FROM. Given a scratch one its own guard REFUSES - correctly -
+  // so the runner supplies the right database rather than the suite relaxing
+  // its guard.
+  if (file === 'null-minted.test.js') return MONGO_SERVER + '/kindledger_legacy';
+
   const slug = file.replace(/\.test\.js$/, '').replace(/[^a-z0-9]+/gi, '_');
-  return 'mongodb://mongo:27017/kindledger_exit_' + slug;
+  return MONGO_SERVER + '/kindledger_exit_' + slug;
 }
 
 /** The tags the bridges emit. Both, because they are emitted in different places. */
