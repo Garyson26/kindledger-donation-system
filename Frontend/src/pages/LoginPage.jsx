@@ -1,3 +1,4 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import Input from "../components/Input";
@@ -9,6 +10,7 @@ import { useToast } from "../utils/useToast";
 import "../styles/LoginPage.css";
 
 function LoginPage({ onLogin }) {
+  const { organisationName } = useBranding();
   const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -139,7 +141,7 @@ function LoginPage({ onLogin }) {
           <div className="flex justify-center mb-6">
             <img
               src="/images/logo.jpg"
-              alt="For Ocean Foundation Logo"
+              alt={`${organisationName} logo`}
               className="h-20 w-20 rounded-full shadow-lg ring-4 ring-blue-100"
             />
           </div>
@@ -147,7 +149,7 @@ function LoginPage({ onLogin }) {
             Welcome Back
           </h1>
           <p className="text-gray-600 text-lg">
-            Sign in to your For Ocean Foundation account
+            Sign in to your {organisationName} account
           </p>
         </div>
 
@@ -178,7 +180,7 @@ function LoginPage({ onLogin }) {
                 </label>
                 <Link
                   to="/forgot-password"
-                  className="text-sm font-medium text-[#05699e] hover:text-[#044d73] transition-colors duration-200"
+                  className="text-sm font-medium text-[var(--kl-primary)] hover:text-[var(--kl-primary-dark)] transition-colors duration-200"
                 >
                   Forgot Password?
                 </Link>
@@ -191,7 +193,7 @@ function LoginPage({ onLogin }) {
                   value={form.password}
                   onChange={handleChange}
                   disabled={loading}
-                  className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                 />
                 <button
                   type="button"
@@ -271,7 +273,7 @@ function LoginPage({ onLogin }) {
                   }}
                   placeholder="000000"
                   maxLength={6}
-                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent outline-none transition-all duration-200"
+                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent outline-none transition-all duration-200"
                   disabled={loading}
                 />
               </div>

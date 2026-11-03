@@ -1,9 +1,11 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { paymentAPI } from "../utils/api";
 import { generateDonationReceipt } from "../utils/pdfGenerator";
 
 function PaymentSuccess() {
+  const { organisationName } = useBranding();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -121,7 +123,7 @@ function PaymentSuccess() {
               {/* Download Receipt Button */}
               {paymentInfo?.donation && (
                 <button
-                  onClick={() => generateDonationReceipt(paymentInfo.donation)}
+                  onClick={() => generateDonationReceipt(paymentInfo.donation, organisationName)}
                   className="w-full bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-200 transform hover:scale-105 flex items-center justify-center gap-2"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

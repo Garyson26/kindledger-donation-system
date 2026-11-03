@@ -4,6 +4,7 @@ import { generateDonationReceipt, generateUserDonationReport } from "../utils/pd
 import { API_BASE_URL } from "../config/constants";
 
 function DonationsPage() {
+  const { organisationName } = useBranding();
   const navigate = useNavigate();
   const [donations, setDonations] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
@@ -169,8 +170,8 @@ function DonationsPage() {
             }}
             className={`px-4 py-2 font-medium rounded-lg transition-colors duration-200 inline-flex items-center gap-2 ${
               viewMode === 'all'
-                ? 'bg-[#05699e] text-white'
-                : 'bg-white text-[#05699e] border-2 border-[#05699e] hover:bg-[#05699e]/10'
+                ? 'bg-[var(--kl-primary)] text-white'
+                : 'bg-white text-[var(--kl-primary)] border-2 border-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10'
             }`}
           >
             📋 All Donations
@@ -182,8 +183,8 @@ function DonationsPage() {
             }}
             className={`px-4 py-2 font-medium rounded-lg transition-colors duration-200 inline-flex items-center gap-2 ${
               viewMode === 'user-wise'
-                ? 'bg-[#05699e] text-white'
-                : 'bg-white text-[#05699e] border-2 border-[#05699e] hover:bg-[#05699e]/10'
+                ? 'bg-[var(--kl-primary)] text-white'
+                : 'bg-white text-[var(--kl-primary)] border-2 border-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10'
             }`}
           >
             👥 User-Wise View
@@ -444,13 +445,13 @@ function DonationsPage() {
                               <div className="flex gap-2 justify-center">
                                 <button
                                   onClick={() => navigate(`/donations/${d._id}`)}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#05699e] hover:bg-[#044d75] text-white text-sm font-medium rounded-lg transition-colors duration-200"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white text-sm font-medium rounded-lg transition-colors duration-200"
                                   title="View Details"
                                 >
                                   👁️ View
                                 </button>
                                 <button
-                                  onClick={() => generateDonationReceipt(d)}
+                                  onClick={() => generateDonationReceipt(d, organisationName)}
                                   className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white text-sm font-medium rounded-lg transition-colors duration-200"
                                   title="Download Receipt PDF"
                                 >
@@ -480,7 +481,7 @@ function DonationsPage() {
                           className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                             currentPage === 1
                               ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                              : 'bg-[#05699e] text-white hover:bg-[#044d73] cursor-pointer'
+                              : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] cursor-pointer'
                           }`}
                         >
                           ← Previous
@@ -543,8 +544,8 @@ function DonationsPage() {
                                   onClick={() => setCurrentPage(page)}
                                   className={`px-3 py-2 rounded-lg font-medium min-w-[40px] transition-all duration-200 ${
                                     currentPage === page
-                                      ? 'bg-[#05699e] text-white font-bold'
-                                      : 'bg-white text-[#05699e] border border-[#05699e] hover:bg-[#05699e]/10'
+                                      ? 'bg-[var(--kl-primary)] text-white font-bold'
+                                      : 'bg-white text-[var(--kl-primary)] border border-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10'
                                   }`}
                                 >
                                   {page}
@@ -560,7 +561,7 @@ function DonationsPage() {
                           className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                             currentPage === totalPages
                               ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                              : 'bg-[#05699e] text-white hover:bg-[#044d73] cursor-pointer'
+                              : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] cursor-pointer'
                           }`}
                         >
                           Next →
@@ -614,7 +615,7 @@ function DonationsPage() {
                         <div className="flex gap-6 mr-5">
                           <div className="text-center">
                             <div className="text-xs text-gray-600 mb-1">Total Donations</div>
-                            <div className="text-xl font-bold text-[#05699e]">
+                            <div className="text-xl font-bold text-[var(--kl-primary)]">
                               {userGroup.totalDonations}
                             </div>
                           </div>
@@ -644,7 +645,7 @@ function DonationsPage() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            generateUserDonationReport(userGroup);
+                            generateUserDonationReport(userGroup, organisationName);
                           }}
                           className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold rounded-lg transition-colors duration-200 inline-flex items-center gap-1.5 whitespace-nowrap mr-4"
                           title="Download User Donation Report"
@@ -652,7 +653,7 @@ function DonationsPage() {
                           📊 Download Report
                         </button>
 
-                        <div className={`text-2xl text-[#05699e] transition-transform duration-300 ${
+                        <div className={`text-2xl text-[var(--kl-primary)] transition-transform duration-300 ${
                           isExpanded ? 'rotate-180' : 'rotate-0'
                         }`}>
                           ▼
@@ -718,7 +719,7 @@ function DonationsPage() {
                                   <td className="px-2 py-2.5 text-center">
                                     <button
                                       onClick={() => navigate(`/donations/${donation._id}`)}
-                                      className="inline-flex items-center gap-1 px-2 py-1 bg-[#05699e] hover:bg-[#044d75] text-white text-xs font-medium rounded-lg transition-colors duration-200"
+                                      className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white text-xs font-medium rounded-lg transition-colors duration-200"
                                       title="View Details"
                                     >
                                       👁️ View
@@ -744,7 +745,7 @@ function DonationsPage() {
                     className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                       userWiseCurrentPage === 1
                         ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                        : 'bg-[#05699e] text-white hover:bg-[#044d73] cursor-pointer'
+                        : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] cursor-pointer'
                     }`}
                   >
                     ← Previous
@@ -757,8 +758,8 @@ function DonationsPage() {
                         onClick={() => setUserWiseCurrentPage(page)}
                         className={`px-3 py-2 rounded-lg font-medium min-w-[40px] transition-all duration-200 ${
                           userWiseCurrentPage === page
-                            ? 'bg-[#05699e] text-white font-bold'
-                            : 'bg-white text-[#05699e] border border-[#05699e] hover:bg-[#05699e]/10'
+                            ? 'bg-[var(--kl-primary)] text-white font-bold'
+                            : 'bg-white text-[var(--kl-primary)] border border-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10'
                         }`}
                       >
                         {page}
@@ -772,7 +773,7 @@ function DonationsPage() {
                     className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                       userWiseCurrentPage === totalUserPages
                         ? 'bg-gray-200 text-gray-600 cursor-not-allowed'
-                        : 'bg-[#05699e] text-white hover:bg-[#044d73] cursor-pointer'
+                        : 'bg-[var(--kl-primary)] text-white hover:bg-[var(--kl-primary-dark)] cursor-pointer'
                     }`}
                   >
                     Next →

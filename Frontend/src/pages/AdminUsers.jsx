@@ -292,7 +292,7 @@ function AdminUsers() {
         return (
             <div className="flex items-center justify-center min-h-screen">
                 <div className="text-center">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#05699e] mx-auto mb-4"></div>
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[var(--kl-primary)] mx-auto mb-4"></div>
                     <p className="text-gray-600">Loading users...</p>
                 </div>
             </div>
@@ -334,11 +334,11 @@ function AdminUsers() {
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
                 <div>
                     <h2 className="text-3xl font-bold text-gray-900">User Management</h2>
-                    <p className="mt-2 text-gray-600">Total users: <span className="font-semibold text-[#05699e]">{totalUsers}</span></p>
+                    <p className="mt-2 text-gray-600">Total users: <span className="font-semibold text-[var(--kl-primary)]">{totalUsers}</span></p>
                 </div>
                 <button
                     onClick={handleAddUser}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
                 >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -351,13 +351,13 @@ function AdminUsers() {
             <div className="bg-white rounded-lg shadow-sm p-6 mb-6 border border-gray-200">
                 <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                        <svg className="w-5 h-5 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="w-5 h-5 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
                         </svg>
                         Filters
                         {filtering && (
                             <span className="ml-2 inline-flex items-center">
-                                <svg className="animate-spin h-4 w-4 text-[#05699e]" fill="none" viewBox="0 0 24 24">
+                                <svg className="animate-spin h-4 w-4 text-[var(--kl-primary)]" fill="none" viewBox="0 0 24 24">
                                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                 </svg>
@@ -366,7 +366,7 @@ function AdminUsers() {
                     </h3>
                     <button
                         onClick={clearFilters}
-                        className="text-sm text-gray-600 hover:text-[#05699e] font-medium transition-colors"
+                        className="text-sm text-gray-600 hover:text-[var(--kl-primary)] font-medium transition-colors"
                     >
                         Clear All
                     </button>
@@ -381,7 +381,7 @@ function AdminUsers() {
                             placeholder="Search by name, email, or phone..."
                             value={filters.search}
                             onChange={(e) => handleFilterChange('search', e.target.value)}
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                         />
                     </div>
 
@@ -391,7 +391,7 @@ function AdminUsers() {
                         <select
                             value={filters.role}
                             onChange={(e) => handleFilterChange('role', e.target.value)}
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                         >
                             <option value="">All Roles</option>
                             <option value="user">User</option>
@@ -405,7 +405,7 @@ function AdminUsers() {
                         <select
                             value={filters.status}
                             onChange={(e) => handleFilterChange('status', e.target.value)}
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                         >
                             <option value="">All Status</option>
                             <option value="active">Active</option>
@@ -420,7 +420,7 @@ function AdminUsers() {
                             type="date"
                             value={filters.joinDateFrom}
                             onChange={(e) => handleFilterChange('joinDateFrom', e.target.value)}
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                         />
                     </div>
 
@@ -430,7 +430,7 @@ function AdminUsers() {
                             type="date"
                             value={filters.joinDateTo}
                             onChange={(e) => handleFilterChange('joinDateTo', e.target.value)}
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                         />
                     </div>
                 </div>
@@ -506,7 +506,7 @@ function AdminUsers() {
                                                 </button>
                                                 <button
                                                     onClick={() => handleEditUser(user)}
-                                                    className="p-2 text-[#05699e] hover:bg-[#05699e]/10 rounded-lg transition-colors duration-200"
+                                                    className="p-2 text-[var(--kl-primary)] hover:bg-[var(--kl-primary)]/10 rounded-lg transition-colors duration-200"
                                                     title="Edit User"
                                                 >
                                                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -602,7 +602,7 @@ function AdminUsers() {
                                                 onClick={() => setCurrentPage(page)}
                                                 className={`px-4 py-2 rounded-lg font-medium transition-colors duration-200 ${
                                                     currentPage === page
-                                                        ? 'bg-[#05699e] text-white'
+                                                        ? 'bg-[var(--kl-primary)] text-white'
                                                         : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
                                                 }`}
                                             >
@@ -654,7 +654,7 @@ function AdminUsers() {
                                     value={userForm.name}
                                     onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
                                     required
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div>
@@ -664,7 +664,7 @@ function AdminUsers() {
                                     value={userForm.email}
                                     onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
                                     required
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div>
@@ -675,7 +675,7 @@ function AdminUsers() {
                                     onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
                                     required
                                     minLength={6}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                                 <p className="mt-1 text-xs text-gray-500">Minimum 6 characters</p>
                             </div>
@@ -684,7 +684,7 @@ function AdminUsers() {
                                 <select
                                     value={userForm.role}
                                     onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 >
                                     <option value="user">User</option>
                                     <option value="admin">Admin</option>
@@ -696,7 +696,7 @@ function AdminUsers() {
                                     type="tel"
                                     value={userForm.phone}
                                     onChange={(e) => setUserForm({ ...userForm, phone: e.target.value })}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div>
@@ -705,7 +705,7 @@ function AdminUsers() {
                                     value={userForm.address}
                                     onChange={(e) => setUserForm({ ...userForm, address: e.target.value })}
                                     rows={3}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent resize-none"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent resize-none"
                                 />
                             </div>
                             <div className="flex gap-3 pt-4">
@@ -718,7 +718,7 @@ function AdminUsers() {
                                 </button>
                                 <button
                                     type="submit"
-                                    className="flex-1 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors"
+                                    className="flex-1 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors"
                                 >
                                     Add User
                                 </button>
@@ -751,7 +751,7 @@ function AdminUsers() {
                                     value={userForm.name}
                                     onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
                                     required
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div>
@@ -761,7 +761,7 @@ function AdminUsers() {
                                     value={userForm.email}
                                     onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
                                     required
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div>
@@ -769,7 +769,7 @@ function AdminUsers() {
                                 <select
                                     value={userForm.role}
                                     onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 >
                                     <option value="user">User</option>
                                     <option value="admin">Admin</option>
@@ -781,7 +781,7 @@ function AdminUsers() {
                                     type="tel"
                                     value={userForm.phone}
                                     onChange={(e) => setUserForm({ ...userForm, phone: e.target.value })}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div>
@@ -790,7 +790,7 @@ function AdminUsers() {
                                     value={userForm.address}
                                     onChange={(e) => setUserForm({ ...userForm, address: e.target.value })}
                                     rows={3}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent resize-none"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent resize-none"
                                 />
                             </div>
                             <div className="flex gap-3 pt-4">
@@ -803,7 +803,7 @@ function AdminUsers() {
                                 </button>
                                 <button
                                     type="submit"
-                                    className="flex-1 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors"
+                                    className="flex-1 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors"
                                 >
                                     Update User
                                 </button>
@@ -829,7 +829,7 @@ function AdminUsers() {
                             </button>
                         </div>
                         <form onSubmit={submitChangePassword} className="p-6 space-y-4">
-                            <div className="bg-[#05699e]/10 border border-[#05699e]/30 rounded-lg p-3 mb-4">
+                            <div className="bg-[var(--kl-primary)]/10 border border-[var(--kl-primary)]/30 rounded-lg p-3 mb-4">
                                 <p className="text-sm text-gray-800">
                                     <span className="font-semibold">User:</span> {selectedUser?.name}
                                 </p>
@@ -842,7 +842,7 @@ function AdminUsers() {
                                     onChange={(e) => setPasswordForm({ ...passwordForm, newPassword: e.target.value })}
                                     required
                                     minLength={6}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                                 <p className="mt-1 text-xs text-gray-500">Minimum 6 characters</p>
                             </div>
@@ -854,7 +854,7 @@ function AdminUsers() {
                                     onChange={(e) => setPasswordForm({ ...passwordForm, confirmPassword: e.target.value })}
                                     required
                                     minLength={6}
-                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#05699e] focus:border-transparent"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[var(--kl-primary)] focus:border-transparent"
                                 />
                             </div>
                             <div className="flex gap-3 pt-4">
@@ -867,7 +867,7 @@ function AdminUsers() {
                                 </button>
                                 <button
                                     type="submit"
-                                    className="flex-1 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors"
+                                    className="flex-1 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors"
                                 >
                                     Change Password
                                 </button>

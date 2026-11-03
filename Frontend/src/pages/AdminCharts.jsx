@@ -240,6 +240,32 @@ function AdminCharts() {
     );
   }
 
+  // M1 (SPEC-5 5.6). `stats` starts null and is only set on a successful fetch,
+  // so a failed request or an empty database rendered the charts against
+  // nothing. Loading was handled; "there is nothing to show" was not.
+  //
+  // NARROWED FROM THE 5.1 AUDIT, WHICH WAS WRONG ABOUT THE OTHER HALF.
+  // DonationDetails was listed here too and already has a not-found state. The
+  // audit counted greps for `length === 0` and called the count a property -
+  // the same metric-for-property mistake this project keeps recording.
+  if (!stats) {
+    return (
+      <div className="min-h-screen bg-gray-50 py-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="mb-8">
+            <h1 className="text-3xl font-bold text-gray-900">Donation Analytics</h1>
+          </div>
+          <div className="bg-white rounded-lg shadow p-12 text-center">
+            <p className="text-gray-600">No donation statistics to show yet.</p>
+            <p className="text-gray-500 text-sm mt-2">
+              Charts appear once donations have been recorded.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 py-8">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -319,7 +345,7 @@ function AdminCharts() {
             <div className="flex items-end">
               <button
                 onClick={handleApplyFilter}
-                className="w-full px-4 py-2 bg-[#05699e] text-white font-medium rounded-lg hover:bg-[#044d73] transition-colors duration-200"
+                className="w-full px-4 py-2 bg-[var(--kl-primary)] text-white font-medium rounded-lg hover:bg-[var(--kl-primary-dark)] transition-colors duration-200"
               >
                 Apply Filter
               </button>

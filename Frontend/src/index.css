@@ -2,6 +2,47 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * =============================================================================
+ * The theme, as CSS custom properties (SPEC-5 package 5.4)
+ * =============================================================================
+ * THESE ARE THE EXISTING COLOURS, UNCHANGED. SPEC-5 section 5.1 makes the
+ * current palette the target rather than a starting point, so they were read
+ * out of the frontend - 205 occurrences of #05699e and 40 of #044d73 - and are
+ * reproduced here exactly. A fresh installation renders identically to the site
+ * as it was before this package.
+ *
+ * Every `bg-[#05699e]` became `bg-[var(--kl-primary)]`. The VALUE did not move;
+ * only the place it is written down.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY CUSTOM PROPERTIES AND NOT A TAILWIND THEME KEY
+ * -----------------------------------------------------------------------------
+ * A `theme.extend.colors` entry is resolved at BUILD time. An NGO changing its
+ * colours in the admin page would need the frontend rebuilt and redeployed,
+ * which is not a thing an NGO does. Custom properties are read at RUNTIME, so
+ * `BrandingProvider` can set them from the branding response and the change is
+ * visible on the next page load.
+ *
+ * -----------------------------------------------------------------------------
+ * #044d75 IS MAPPED TO --kl-primary-dark, AND THAT IS A DELIBERATE CORRECTION
+ * -----------------------------------------------------------------------------
+ * Five occurrences of `#044d75` sit alongside forty of `#044d73` - one
+ * character apart, all of them hover states for the same button. It is a typo,
+ * producing a colour two points different that nobody could see and nobody
+ * chose.
+ *
+ * Collapsing it into one variable is a VISIBLE CHANGE of about 0.8% blue on
+ * five hover states, made on purpose rather than preserved by accident. The
+ * alternative - a `--kl-primary-dark-typo` variable - would carry the mistake
+ * into the theme an NGO configures.
+ */
+:root {
+  --kl-primary: #05699e;
+  --kl-primary-dark: #044d73;
+  --kl-primary-darkest: #033a57;
+}
+
 /*@import url('./styles/design-system.css');*/
 
 /* Toast animations */

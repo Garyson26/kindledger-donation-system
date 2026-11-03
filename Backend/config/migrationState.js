@@ -83,7 +83,29 @@ const ENTITIES = {
     // 3.6: services/categoryBridge.js is DELETED and out of this list. An
     // allowlist entry for a file that no longer exists is a standing
     // permission nobody is using and the next person assumes is needed.
-    mongooseAllowed: ['etl/', 'scripts/seedDatabase.js', 'test/'],
+    // `scripts/rebuildLegacyMongo.js` is allowlisted BY NAME (BQ). It WRITES
+    // MongoDB - it rebuilds the local legacy fixture from MySQL's own
+    // legacy_id values so AE1-a's oracle survives a `docker compose down`.
+    // That is a development fixture builder with a local-only guard; it can
+    // never touch a deployed store.
+    //
+    // NAMED, NOT a 'scripts/' PREFIX. A directory prefix is a standing
+    // permission for anything added there later, and this gate exists
+    // precisely to make a new MongoDB writer announce itself - as it did
+    // for this file, on the run that added it.
+    // BR1: `etl/` WAS A PREFIX AND IS NOW FIVE NAMES. A directory prefix is a
+    // standing permission for whatever lands there next - the same argument
+    // that named `scripts/rebuildLegacyMongo.js` explicitly, and the same one
+    // behind the branch and path filters. The ETL is finite and phases 4b/4c
+    // will add to it, which is exactly when a new MongoDB reader should have
+    // to announce itself rather than inherit permission from its folder.
+    //
+    // `test/` STAYS A PREFIX, with the property stated rather than assumed:
+    // test files are never deployed, so they are not this gate's subject, and
+    // naming nineteen suites would mean editing this list for every suite
+    // added - friction that gets a gate relaxed rather than maintained.
+    mongooseAllowed: ['etl/cli.js', 'etl/migrate.js', 'etl/preflight.js', 'etl/nullMintedLegacyIds.js', 'etl/null-minted-cli.js', 'scripts/seedDatabase.js',
+      'scripts/rebuildLegacyMongo.js', 'test/'],
   },
 
   user: {
@@ -101,7 +123,29 @@ const ENTITIES = {
       'development seeder behind NODE_ENV!=production AND ALLOW_SEED=true, so ' +
       'it cannot write a deployed store.',
     // 3.6: services/userBridge.js is DELETED and out of this list.
-    mongooseAllowed: ['etl/', 'scripts/seedDatabase.js', 'test/'],
+    // `scripts/rebuildLegacyMongo.js` is allowlisted BY NAME (BQ). It WRITES
+    // MongoDB - it rebuilds the local legacy fixture from MySQL's own
+    // legacy_id values so AE1-a's oracle survives a `docker compose down`.
+    // That is a development fixture builder with a local-only guard; it can
+    // never touch a deployed store.
+    //
+    // NAMED, NOT a 'scripts/' PREFIX. A directory prefix is a standing
+    // permission for anything added there later, and this gate exists
+    // precisely to make a new MongoDB writer announce itself - as it did
+    // for this file, on the run that added it.
+    // BR1: `etl/` WAS A PREFIX AND IS NOW FIVE NAMES. A directory prefix is a
+    // standing permission for whatever lands there next - the same argument
+    // that named `scripts/rebuildLegacyMongo.js` explicitly, and the same one
+    // behind the branch and path filters. The ETL is finite and phases 4b/4c
+    // will add to it, which is exactly when a new MongoDB reader should have
+    // to announce itself rather than inherit permission from its folder.
+    //
+    // `test/` STAYS A PREFIX, with the property stated rather than assumed:
+    // test files are never deployed, so they are not this gate's subject, and
+    // naming nineteen suites would mean editing this list for every suite
+    // added - friction that gets a gate relaxed rather than maintained.
+    mongooseAllowed: ['etl/cli.js', 'etl/migrate.js', 'etl/preflight.js', 'etl/nullMintedLegacyIds.js', 'etl/null-minted-cli.js', 'scripts/seedDatabase.js',
+      'scripts/rebuildLegacyMongo.js', 'test/'],
   },
 
   donation: {
@@ -119,7 +163,29 @@ const ENTITIES = {
       'scripts/seedDatabase.js still writes MongoDB donations, but it is a ' +
       'development seeder behind NODE_ENV!=production AND ALLOW_SEED=true, so ' +
       'it cannot write a deployed store.',
-    mongooseAllowed: ['etl/', 'scripts/seedDatabase.js', 'test/'],
+    // `scripts/rebuildLegacyMongo.js` is allowlisted BY NAME (BQ). It WRITES
+    // MongoDB - it rebuilds the local legacy fixture from MySQL's own
+    // legacy_id values so AE1-a's oracle survives a `docker compose down`.
+    // That is a development fixture builder with a local-only guard; it can
+    // never touch a deployed store.
+    //
+    // NAMED, NOT a 'scripts/' PREFIX. A directory prefix is a standing
+    // permission for anything added there later, and this gate exists
+    // precisely to make a new MongoDB writer announce itself - as it did
+    // for this file, on the run that added it.
+    // BR1: `etl/` WAS A PREFIX AND IS NOW FIVE NAMES. A directory prefix is a
+    // standing permission for whatever lands there next - the same argument
+    // that named `scripts/rebuildLegacyMongo.js` explicitly, and the same one
+    // behind the branch and path filters. The ETL is finite and phases 4b/4c
+    // will add to it, which is exactly when a new MongoDB reader should have
+    // to announce itself rather than inherit permission from its folder.
+    //
+    // `test/` STAYS A PREFIX, with the property stated rather than assumed:
+    // test files are never deployed, so they are not this gate's subject, and
+    // naming nineteen suites would mean editing this list for every suite
+    // added - friction that gets a gate relaxed rather than maintained.
+    mongooseAllowed: ['etl/cli.js', 'etl/migrate.js', 'etl/preflight.js', 'etl/nullMintedLegacyIds.js', 'etl/null-minted-cli.js', 'scripts/seedDatabase.js',
+      'scripts/rebuildLegacyMongo.js', 'test/'],
   },
 
   pendingSignup: {
@@ -134,7 +200,18 @@ const ENTITIES = {
       'Migrated in package 3.2. routes/auth.js is the only writer and the ' +
       'only reader besides the scheduler, both MySQL. The ETL deliberately ' +
       'does NOT migrate these rows (SPEC-1A section 5.2) - they live 24 hours.',
-    mongooseAllowed: ['etl/', 'test/'],
+    // BR1: `etl/` WAS A PREFIX AND IS NOW FIVE NAMES. A directory prefix is a
+    // standing permission for whatever lands there next - the same argument
+    // that named `scripts/rebuildLegacyMongo.js` explicitly, and the same one
+    // behind the branch and path filters. The ETL is finite and phases 4b/4c
+    // will add to it, which is exactly when a new MongoDB reader should have
+    // to announce itself rather than inherit permission from its folder.
+    //
+    // `test/` STAYS A PREFIX, with the property stated rather than assumed:
+    // test files are never deployed, so they are not this gate's subject, and
+    // naming nineteen suites would mean editing this list for every suite
+    // added - friction that gets a gate relaxed rather than maintained.
+    mongooseAllowed: ['etl/cli.js', 'etl/migrate.js', 'etl/preflight.js', 'etl/nullMintedLegacyIds.js', 'etl/null-minted-cli.js', 'test/'],
   },
 
   brandingSettings: {

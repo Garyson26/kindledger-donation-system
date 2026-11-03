@@ -132,6 +132,27 @@ a checkable condition rather than by a coupling to DEF-01:
 
 **Recorded as a Phase 6 gate.**
 
+### WHAT A GREEN `test:no-secrets` DOES AND DOES NOT MEAN (BQ1)
+
+> **A passing `no-committed-secrets` run is NOT evidence that this repository
+> contains no secrets, and must not be cited as such at this gate.**
+
+It measures *"no tracked file assigns a non-placeholder value to a
+CREDENTIAL-SHAPED NAME"*. A real secret committed as `FOO=8f3a...` is invisible
+to it, and **no refinement of the name pattern can fix that** - the information
+simply is not in the name.
+
+It is a proxy, kept because the failure it catches is the one that actually
+happens: somebody writes `JWT_SECRET=` followed by something that works. The
+caveat is written HERE, in the gate, and not only in the test file, because
+**the gate is where a green result gets read and a conclusion drawn from it.**
+A limitation recorded only next to the code is a limitation the person doing
+the release never sees.
+
+**This gate therefore requires a human read of the tracked file list before
+publication.** That is weaker than a check and is the strongest thing available,
+and per AY1 it does not on its own carry a closure claim.
+
 **THE AUDIT IS COVERED BY THE SAME GATE, added in AR1.** It is tracked for the
 same reason - a per-package gate cannot be enforced on an untracked file - and
 it carries the same exposure in a more concentrated form: it is an index of
@@ -4742,6 +4763,412 @@ database. An override that silently broke the client would show there.
 > **An advisory names a vulnerable PACKAGE and a vulnerable RANGE. "Upgrade the
 > thing that depends on it" is not the same fix, and here it would have changed
 > a major version and closed nothing.**
+
+
+---
+
+## BN1 - A GUARD ON A REAL DEPENDENCY IS VOID WHEN A STUB ANSWERS FOR IT
+
+> **The guard was correct, and it never ran.**
+
+`assertSourceMatchesMySQL()` consults the real MongoDB before `null-minted`
+writes anything. BB1's tests passed a STUBBED `Category` whose `find` returned a
+fixed list - so inside those tests the stub WAS the database, the guard's
+subject was never consulted, and every row the suite did not create looked
+absent and was nulled.
+
+**Second time a control was bypassed rather than wrong.** PAY-02's import check
+was correct and measured the wrong property; this guard is correct and was not
+in the path. Both are AV2/BH2: *the property verified was not the property that
+mattered.*
+
+### Added to the standing rules
+
+> **Any test that stubs a datastore a guard consults must either resolve against
+> the real store, or assert that the guard was reached.**
+
+`sourceWith()` now resolves foreign ids against the real collection and invents
+answers only for its own fixtures. The two `countDocuments: 0` stubs go further
+and **throw from `find()`** - if the emptiness guard ever stops refusing first,
+that says so loudly instead of silently reporting every row as minted.
+
+### THE ONE PLACE THE RULE IS BROKEN ON PURPOSE
+
+Test 7 needs a source that resolves NOTHING, which a truthful stub cannot
+produce once the database holds real migrated rows. Those two needs are in
+genuine tension, and the resolution is to separate them rather than weaken the
+truthful one:
+
+- the lying stub lives in that test alone;
+- its safety argument is **specific** - that run must REFUSE BEFORE WRITING, and
+  that is the property under test;
+- and the test asserts the foreign rows survived, so a lying stub cannot destroy
+  one without the test reporting it.
+
+### The audit BN1 asked for
+
+| Suite | Verdict |
+|---|---|
+| `null-minted.test.js` | **the only suite that fabricates a datastore.** All four stubs accounted for above |
+| `etl.test.js` | passes the REAL Mongoose models (`{ User, Category, Donation, PendingSignup }`). No bypass |
+| `categories-characterisation.test.js` | same - real models handed to the real ETL |
+| `data-layer.test.js` | inspects `require.cache` to assert Mongoose is not loaded. A read, not a stub |
+| every other suite | no fakes. There is no mocking library in this project at all |
+
+**One instance, already fixed.** Reported as a "nothing" answer for the rest,
+because an audit that lists only hits cannot be told from one that stopped early.
+
+---
+
+## A LOCAL DATABASE DOCUMENTED AS EPHEMERAL WAS USED AS A SOURCE OF TRUTH
+
+`docker-compose.legacy-mongo.yml` says of the `mongo` service:
+
+> "No volume, deliberately. State that survives a restart would start looking
+> like a development database people rely on."
+
+**It started looking like one anyway.** Package 3.6 treated `kindledger_legacy`
+as AE1-a's oracle, and `null-minted.test.js`'s guard consults it before deciding
+what to destroy. A `docker compose down` then removed the container and every
+document in it, exactly as the comment promised.
+
+The consequence is the finding AE1-a is *about*, demonstrated on the development
+stack: **the restored legacy_id values pointed at nothing, so minted and genuine
+became locally indistinguishable.** The only reason the restored ids survived
+the next test run is that the guard refused.
+
+> **A comment saying a thing is ephemeral does not stop people depending on it.
+> A cheap way to rebuild it does.**
+
+`scripts/rebuildLegacyMongo.js` reconstructs the collection from MySQL's own
+legacy_id values - the ids are what the oracle needs, and every consumer asks
+only whether a document with that id EXISTS. Idempotent, never updates an
+existing document, refuses a non-local target, and writes a deliberately
+unusable password hash so the fixture can never authenticate anyone.
+
+It restores the oracle and AE3 part 2. It does not restore the original
+documents, and nothing needs them.
+
+---
+
+## BN3 - THE QUEUED FIX WAS ITSELF AN INHERITED CLAIM
+
+U-6's instruction was "bump Prisma". It assumed **a bump fixes an advisory**,
+without checking the vulnerable range - and the range covers all of v7, so the
+bump would have changed a major version of the data layer and closed nothing
+while looking like remediation.
+
+Correct-looking, repeated, load-bearing: the signature holds. The generator is
+not the age of the claim or who wrote it - it is a confident sentence written
+near a decision, and this one was in the work order itself.
+
+> **An advisory names a vulnerable PACKAGE and a vulnerable RANGE. "Upgrade the
+> thing that depends on it" is a different claim and needs its own check.**
+
+---
+
+## BN4 - WHAT A NEGATIVE RESULT IS WORTH
+
+BH1 checked five channels across six endpoints and found **only timing**
+partial. Thirty of thirty-five cells clean.
+
+That is evidence, and the same conclusion reached by inspection would not have
+been - **inspection had already marked SEC-08 closed while /login measured 60x.**
+The value is not in the cells that were clean; it is that the rule was applied
+to all of them by something other than judgement about where to look.
+
+The same holds for BJ1's compose audit: 35 of 36 variables correct, and the one
+that was not was the payment secret.
+
+
+---
+
+## BO2 - THE STRONGEST AZ3 EVIDENCE YET: THE WARNING PREDICTED THE OUTCOME
+
+`docker-compose.legacy-mongo.yml` says of the `mongo` service:
+
+> "No volume, deliberately. State that survives a restart would start looking
+> like a development database people rely on."
+
+Package 3.6 then made that database **AE1-a's oracle** - the thing distinguishing
+a minted legacy_id from a genuine one - and `null-minted.test.js`'s guard
+consults it before deciding what to destroy. A `docker compose down` destroyed
+it, and the restored ids pointed at nothing.
+
+### Why this is the strongest instance
+
+| | |
+|---|---|
+| AZ3 | correct reasoning failed to travel **three functions** |
+| BA3 | failed to travel **three lines**, same author, same session |
+| BG4 | **zero distance** - the author knew the class and wrote a claim it contradicts |
+| **BO2** | the warning was **correct, specific, written at the site, and read by the author who then built a dependency on the very thing it warned about** |
+
+The comment did not merely fail to prevent the outcome. **It described the
+outcome in advance**, in the sentence the author read while wiring the
+dependency. There is no version of that comment that would have worked.
+
+> **THE COUNTERMEASURE IS NOT BETTER COMMENTS.** It is making the thing
+> reproducible, so that depending on it is cheap to recover from rather than
+> forbidden. `scripts/rebuildLegacyMongo.js` rebuilds the oracle from MySQL's
+> own legacy_id values in one command.
+>
+> **Reproducible beats precious.** A resource that must not be lost is a
+> resource whose loss is a crisis; a resource that can be rebuilt is neither.
+
+---
+
+## BO3 - A PROXY APPLIED SYSTEMATICALLY IS WORSE THAN JUDGEMENT
+
+> **A systematic negative result is evidence only when the rule measures THE
+> PROPERTY. When it measures a proxy for the property, applying it everywhere
+> does not make it true - it makes it look rigorous.**
+
+Paired with BN4, which stands as stated: BH1's thirty-of-thirty-five clean cells
+are evidence *because* the rule measured the channels directly.
+
+The 5.1 UI audit counted `catch` blocks and called it error handling. The count
+was accurate; the conclusion was false; two of seven items were wrong.
+
+### The audit BO3 asked for: every systematic check in this project
+
+| Check | Measures | Verdict |
+|---|---|---|
+| **AT4's import scan** (`migration-state.test.js`) | "no file outside the allowlist IMPORTS a migrated model" | **PROXY** - importing is not writing. **Already paired**: the boot-registration gate below exists *because* this proxy failed as PAY-02, and its comment says so. The gap is also empirically EMPTY: nothing writes MongoDB without importing `models/X` - the only raw `mongoose.connection` uses in the tree are `.close()` in the ETL and scripts |
+| **The boot-registration gate** | `mongoose.modelNames()` on the booted process, as an EXACT SET | **PROPERTY.** Asks the running system. Catches both directions - a model dropped (PAY-02) and one reintroduced |
+| **`bridge-exit-check.js`** | the fallback log lines the bridges emit | **PROPERTY** - the line is emitted exactly when a fallback occurs, so it observes the event rather than a correlate. **One dependency worth naming**: it measures the LOG, so deleting the `console.warn` would report clean. Moot now that the bridges are deleted, and it applies to anything that replaces them |
+| **`no-committed-secrets.test.js`** | "no non-placeholder value under a CREDENTIAL-SHAPED NAME" | **PROXY**, and now says so in the file. A real secret stored as `FOO=8f3a...` is invisible, and no refinement of the name pattern fixes that - the information is not in the name. Kept because the failure it catches is the one that happens |
+| **`preflight-findings.test.js`** | the invariant at construction time | **PROPERTY.** It throws when the bad thing is built, not when somebody looks |
+| **`password-timing.test.js`** | bursts one address until refused | **PROPERTY.** "A limiter is in the chain" and "the endpoint is limited" are different claims, and it tests the second |
+| **`signup-timing.test.js`** | the quantity itself, in milliseconds | **PROPERTY** |
+| **`destructive-jobs.test.js`** | specific error codes, plus a positive control that the purge DOES run with both gates open | **PROPERTY** |
+| **`null-minted.test.js`** | the rows afterwards | **PROPERTY** |
+| **`schema.test.js`, `server-guard.test.js`** | database behaviour and version parsing | **PROPERTY** |
+| **The 5.1 UI audit** | grep counts | **PROXY, and it failed.** Corrected in `docs/ui-audit.md` rather than deleted |
+
+**Three proxies out of eleven.** One is paired and its gap verified empty; one
+now declares its own limits in the file it lives in; one failed and is corrected.
+No unpaired, undeclared proxy remains.
+
+---
+
+## BO4 - "DO WE HANDLE BUG-11's SHAPE?" ANSWERED CORRECTLY ABOUT THE WRONG SUBSET
+
+Seventeen frontend reads of a server message. Sixteen correct, one - the SUCCESS
+path of `ChangePassword` - still reading `data.msg`, which BUG-11 removed.
+
+**It survived because `utils/api.js` normalises FAILURES** to
+`data.error || data.message`. Every error path was therefore already right, so a
+reader asking "do we handle the new shape?" would look at the error handling,
+find it correct, and answer yes. **The one site that did not was on the success
+path, which reads the body directly.**
+
+### The same shape as the timing channel
+
+| | The question | The honest answer | Why it was missed |
+|---|---|---|---|
+| **SEC-08** | "is the oracle closed?" | closed in the BODY, open on the CLOCK at 60x | the body was checked because the body was the finding |
+| **BUG-11** | "do we handle the new shape?" | handled on every FAILURE path, missed on one SUCCESS path | failures were checked because failures were the finding |
+
+> **A question answered correctly about the subset the original finding named
+> will keep being answered correctly while the remainder drifts.** The
+> countermeasure is BG4's channels clause generalised: name the subset the
+> answer covers - "closed in the body", "handled on the error paths" - and the
+> uncovered part becomes visible instead of implied.
+
+
+---
+
+## BQ1 - `bridge-exit-check.js` IS RETIRED, BECAUSE IT IS NOW VACUOUS BY CONSTRUCTION
+
+It measured the **log lines** the bridges emitted on a fallback. That was a fair
+observation while the bridges existed - the line was written exactly when the
+event occurred.
+
+**Package 3.6 deleted the bridges.** Nothing emits those markers any more, so the
+check can never fire. It would report a clean sweep for ever, on a subject that
+no longer exists - **exactly the shape BH3 was commissioned to find, and this
+check is where BH3 found one.**
+
+BQ1 offered "retire it or make it measure the count directly". The count cannot
+be measured: `fallbackCount()` went with `legacyBridge.js`. So it is retired.
+
+### What is kept, and what is not
+
+- **Retired:** the AE3 apparatus - marker scanning, the exclusion list, the
+  `readyToDelete` framing. AE3 was an EXIT CONDITION for a deletion that has
+  happened. An exit condition outlives its usefulness the moment you are through
+  the exit.
+- **Kept as `npm run test:all`:** the plain "run every suite and say which
+  failed" runner, with the scan guard that BH3 added. That part was useful
+  independently of bridges and is the only single command that runs the lot.
+- **Kept in the map:** the finding. The check's own defect - a clean report over
+  zero suites - is recorded under BH3 and does not depend on the file surviving.
+
+> **A gate built for a migration is a gate with an end date. Leaving it in place
+> afterwards does not make it a safety net; it makes it a green tick with no
+> subject.**
+
+---
+
+## BQ2 - A CLOSURE CHECK SCOPED BY THE FINDING'S DESCRIPTION INHERITS ITS BLIND SPOTS
+
+Two findings, one shape:
+
+| Finding | Described as | So verification checked | What drifted |
+|---|---|---|---|
+| **SEC-08** | "the responses differ for a known and an unknown address" - a MESSAGE difference | the body, and later the status | **the clock.** /login was measurable at 60x while SEC-08 read CLOSED |
+| **BUG-11** | "the error shape is inconsistent" - an ERROR-shape problem | every error path, all sixteen of them | **the success path.** `ChangePassword` still read `data.msg` |
+
+In both cases the verification was correct, thorough, and scoped by the
+sentence that named the finding. **The finding's own wording decided what got
+looked at**, and the wording was a description of where it had been NOTICED, not
+a statement of where the property had to hold.
+
+> **VERIFY THE PROPERTY, NOT THE FINDING'S FRAMING OF IT.**
+>
+> "Responses are indistinguishable" is the property; "the message is the same"
+> is the framing. "Callers read the response shape correctly" is the property;
+> "error handling uses the new shape" is the framing.
+
+The practical form is BG4's channels clause generalised, and it is cheap: when
+closing a finding, **write down the subset the closure covers** - "closed in the
+body", "handled on the error paths". The uncovered remainder then has to be
+looked at to be dismissed, instead of being invisible because nobody phrased it.
+
+
+---
+
+## BT1 - "RE-ENCODE TO BE SAFE" SHIPS AN SVG PARSER. BE2's SECOND INSTANCE.
+
+> **The obvious implementation of "re-encode every upload so nothing malicious
+> survives" exposes an SVG parser to unauthenticated input, while appearing to
+> close the SVG hole.**
+
+Two correct intentions:
+
+- **Reject SVG**, because it is XML that carries script and would be served from
+  our own origin.
+- **Re-encode everything**, because that is what neutralises a polyglot.
+
+Composed, they produce the opposite of both. `sharp` lists `svg` among its INPUT
+formats, so "decode it and see whether it is an image" RASTERISES the SVG and
+accepts it - and the decode runs librsvg against attacker-controlled XML before
+any check has looked at it. The implementation looks like it works, and the SVG
+test passes because the file was accepted as a PNG.
+
+This is BE2's composition class - two independently correct controls producing a
+vulnerability by interaction - and the second instance after SEC-18 x SEC-08.
+The difference is that this one was caught before shipping, by reading the
+library's format list rather than its documentation's intent.
+
+**The fix is order: identify the container from MAGIC BYTES before the decoder
+is given the buffer.** And the test asserts its own premise - it first proves
+sharp really does rasterise the SVG, so the refusal cannot be mistaken for the
+decoder failing.
+
+### The general form, for Phase 6's self-hosting documentation
+
+> **An image library's INPUT FORMAT LIST is an attack surface list. A decoder
+> that accepts a format you have banned will accept it on your behalf.**
+
+The same sentence covers every parser handed untrusted bytes: the formats it
+supports are the parsers you are running, whether or not you meant to.
+
+### The same shape, one layer up: multer's storage default
+
+A disk-backed `multer` writes the raw upload to a temporary file **before any of
+our checks run** - unvalidated attacker bytes landing on the same volume the
+site serves from. `memoryStorage` with a byte limit is cheaper and keeps the
+bytes out of the filesystem until they have been proved to be an image.
+
+Convenient defaults are chosen for convenience. This one is not wrong; it is
+wrong HERE, and the difference is only visible if you ask what the default
+actually does with the bytes.
+
+---
+
+## BT2 - THREE THINGS TO KEEP AS PRACTICE
+
+1. **`storeLogo` takes no filename and no content type.** Not validating an
+   input - REMOVING it. There is no parameter for `../`, a null byte or a lying
+   `Content-Type` to arrive through, so none of them has to be anticipated.
+   Prefer this form wherever it is available; a field that does not exist cannot
+   be got wrong.
+
+2. **Every test asserts its own premise.** The bomb test asserts the bomb is
+   SMALL, or it would prove only that the byte limit works. The polyglot test
+   asserts the file is a valid PNG. The SVG test asserts sharp accepts SVG.
+   BH3's rule, applied without being asked, and each one is a test that would
+   otherwise pass for the wrong reason.
+
+3. **Store, repoint, delete.** Any failure leaves a working site - an orphaned
+   file, or an old logo still serving. Deleting first would leave a row pointing
+   at nothing. The order is the safety property, not the tidiness.
+
+---
+
+## BT3 - TWO NEW DEPENDENCIES, FOR PHASE 6's REVIEW
+
+| Package | Why | For the review |
+|---|---|---|
+| `sharp` | decode and re-encode uploaded logos | **Apache-2.0**, compatible. **Carries NATIVE BINARIES** - prebuilt for common platforms, and a self-hoster on an unusual architecture (32-bit ARM, musl, BSD) may need a build toolchain. That belongs in the self-hosting notes, not discovered at install time |
+| `multer` | multipart parsing for the one upload endpoint | **MIT**, compatible |
+
+`npm audit` after they landed: **0 vulnerabilities** in the backend.
+
+### The frontend's two advisories, and why the headline is misleading
+
+`npm audit` in `Frontend/` reports **2 vulnerabilities (1 moderate, 1 high)** -
+`esbuild` and the `vite` that depends on it.
+
+**`npm audit --omit=dev` reports 0.** Both are build tooling, and the esbuild
+advisory is specifically about the DEVELOPMENT SERVER accepting cross-origin
+requests. Nothing reaches a deployed site, and nothing reaches a self-hoster,
+who receives built assets.
+
+That is U-6's lesson pointing the other way. There, the declaration said
+dev-only and the tree said production. Here the headline says HIGH and the
+production tree says nothing. **Neither the declaration nor the headline is the
+answer; the tree is.**
+
+Recorded rather than fixed: the remedy is `vite@8`, a major bump of the build
+tool, which is its own package and not one to fold into a router upgrade.
+
+---
+
+## SPEC-5 PACKAGE 5.5 - react-router v7, AND X1's ENUMERATION RE-RUN
+
+`react-router-dom` 6.22.3 -> 7.18.4. The build is clean and no source change
+was needed: this app uses `<BrowserRouter>`, `<Routes>`, `<Link>` and
+`useNavigate`, all of which v7 keeps.
+
+### X1's enumeration, re-run as its deferral required
+
+X1 deferred the open-redirect advisory as unreachable, **conditionally** - the
+recorded trigger being a post-login `returnTo` or `next` parameter.
+
+| | Found | Dynamic |
+|---|---|---|
+| `<Link to=...>` targets | 34 | **0** |
+| `navigate(...)` calls | 32 | **0** |
+| `useSearchParams` | 2 files | values read for DISPLAY only |
+
+Two candidates came back from the pattern and both are safe on inspection:
+
+- `App.jsx`: `navigate(role === "admin" ? "/admin/dashboard" : "/")` - a ternary
+  between two literals.
+- `AdminUsers.jsx`: ``navigate(`/admin/users/${user._id}/donations`)`` - a fixed
+  prefix with a server-generated id interpolated **not at the start of the
+  string**, which is X1's own recorded safe shape.
+
+`PaymentSuccess` and `PaymentFailure` read `txnid`, `amount`, `status` and
+`error` from the query string and render them. **Every `navigate()` in both
+files takes a string literal.**
+
+**No `returnTo`, `next`, `redirectTo` or `redirect_uri` parameter exists
+anywhere in the frontend.** X1's trigger has not fired, and the deferral still
+holds after the upgrade - which is the thing the re-run was for.
 
 
 ## Counts

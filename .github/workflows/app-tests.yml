@@ -262,9 +262,9 @@ jobs:
       # one suite that exists to drive it. On its first run it reported 34, of
       # which 32 were a test fixture creating its auth user in MongoDB - the
       # bridge was not carrying traffic, the suite was manufacturing it.
-      - name: Bridge exit check - zero MongoDB fallbacks (AE3 part 1)
+      - name: Run every suite (was AE3 part 1, retired with the bridges)
         working-directory: Backend
-        run: npm run test:bridge-exit
+        run: npm run test:all
 
       # BB4/BC1. A BLOCKING pre-flight finding that the load does NOT refuse
       # cannot be added silently. Writing this check found TWO existing errors:
@@ -300,6 +300,21 @@ jobs:
       # BJ4's no-committed-credentials check moved to its own job, no-secrets,
       # at the top of this file (CH5). It needs no services, and here it sat
       # behind a MySQL container that never starts (CI-01).
+
+      # SPEC-5 5.2. The branding singleton had zero callers from Phase 1a until
+      # now (AS4), so these tests establish the shape rather than defend it -
+      # including that the PUBLIC projection never carries updated_by.
+      - name: Branding API and logo serving (SPEC-5 5.2, 5.3)
+        working-directory: Backend
+        run: npm run test:branding
+
+      # SPEC-5 5.3. New attack surface: no SVG whatever the declared type,
+      # re-encode from decoded pixels, generated filenames, size limits before
+      # full decode, and containment asserted at the file FINAL LOCATION rather
+      # than at the name.
+      - name: Logo upload constraints (SPEC-5 5.3)
+        working-directory: Backend
+        run: npm run test:logo
 
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)

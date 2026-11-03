@@ -4,7 +4,12 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/images/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>For Ocean Foundation</title>
+    <!-- SPEC-5 5.4. The OTHER place a component-level replace would miss:
+         this file is outside React entirely. It is the title a visitor
+         sees before any JavaScript runs, so it stays a real string
+         rather than a placeholder - BrandingProvider replaces it with
+         the configured name once the app mounts. -->
+    <title>Donations</title>
   </head>
   <body>
     <div id="root"></div>

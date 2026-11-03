@@ -221,9 +221,9 @@ function DonationForm() {
 
         {/* Guest/Login Info Banner */}
         {!isAuthenticated && (
-          <div className="mb-6 bg-[#05699e]/10 rounded-lg border border-[#05699e]/30 p-6">
+          <div className="mb-6 bg-[var(--kl-primary)]/10 rounded-lg border border-[var(--kl-primary)]/30 p-6">
             <div className="flex items-start gap-4">
-              <svg className="w-5 h-5 flex-shrink-0 mt-1 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5 flex-shrink-0 mt-1 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div className="flex-1">
@@ -234,7 +234,7 @@ function DonationForm() {
                 <div className="flex gap-3 flex-wrap">
                   <button
                     onClick={() => navigate("/login", { state: { from: "/donate", category: selectedCategory } })}
-                    className="px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+                    className="px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
                   >
                     Login
                   </button>
@@ -471,7 +471,7 @@ function DonationForm() {
                 )}
                 <div className="flex justify-between items-center">
                   <span className="text-gray-900 font-bold text-lg">Total Donation Amount:</span>
-                  <span className="text-3xl font-bold text-[#05699e]">
+                  <span className="text-3xl font-bold text-[var(--kl-primary)]">
                     ₹{(selectedCategory.donationAmount * form.quantity + parseFloat(additionalAmount || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>

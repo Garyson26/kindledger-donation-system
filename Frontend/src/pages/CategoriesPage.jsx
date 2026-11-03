@@ -73,7 +73,7 @@ const CategoriesPage = ({ userRole }) => {
               <div className="flex flex-col sm:flex-row gap-3">
                 <button
                   onClick={() => navigate("/admin/categories-list")}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-white hover:bg-gray-50 text-[#05699e] font-medium rounded-lg transition-colors duration-200 shadow-sm hover:shadow-md border border-[#05699e] whitespace-nowrap"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-white hover:bg-gray-50 text-[var(--kl-primary)] font-medium rounded-lg transition-colors duration-200 shadow-sm hover:shadow-md border border-[var(--kl-primary)] whitespace-nowrap"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
@@ -82,7 +82,7 @@ const CategoriesPage = ({ userRole }) => {
                 </button>
                 <button
                   onClick={() => navigate("/admin/add-category")}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200 shadow-sm hover:shadow-md whitespace-nowrap"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200 shadow-sm hover:shadow-md whitespace-nowrap"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -102,7 +102,7 @@ const CategoriesPage = ({ userRole }) => {
               className="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 overflow-hidden border border-gray-200"
             >
               {/* Card Header with Icon */}
-              <div className="bg-[#05699e] p-6 text-white">
+              <div className="bg-[var(--kl-primary)] p-6 text-white">
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-xl font-semibold">{cat.name}</h3>
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -130,7 +130,7 @@ const CategoriesPage = ({ userRole }) => {
                 {cat.descriptions && cat.descriptions.length > 0 && cat.descriptions.some(d => d.trim()) && (
                   <div className="mb-4">
                     <h4 className="text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
-                      <svg className="w-4 h-4 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                       Details
@@ -151,7 +151,7 @@ const CategoriesPage = ({ userRole }) => {
                 {/* Donate Button */}
                 <button
                   onClick={() => handleDonate(cat)}
-                  className="w-full px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200 inline-flex items-center justify-center gap-2"
+                  className="w-full px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200 inline-flex items-center justify-center gap-2"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />

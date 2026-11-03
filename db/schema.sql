@@ -431,8 +431,15 @@ CREATE TABLE IF NOT EXISTS branding_settings (
 -- file leaves an existing row untouched.
 -- The For Ocean Foundation migration overwrites these values at cutover.
 -- -----------------------------------------------------------------------------
-INSERT INTO branding_settings (id, organisation_name, default_currency)
-VALUES (1, 'Your Organisation', 'INR')
+-- SPEC-5 5.4: THE COLOURS ARE THE EXISTING PALETTE, READ OUT OF THE FRONTEND.
+-- #05699e appears 205 times in the current UI and #044d73 forty times. Seeding
+-- them here is what makes "a fresh installation renders identically to the
+-- current site" true (SPEC-5 section 10) rather than aspirational: the same
+-- values are also the CSS custom-property defaults in Frontend/src/index.css,
+-- so an unconfigured install and a configured-to-default one look the same.
+INSERT INTO branding_settings
+  (id, organisation_name, default_currency, primary_colour, secondary_colour)
+VALUES (1, 'Your Organisation', 'INR', '#05699E', '#044D73')
 ON DUPLICATE KEY UPDATE id = id;
 
 

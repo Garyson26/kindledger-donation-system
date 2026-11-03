@@ -1,9 +1,11 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React, { useEffect, useState } from "react";
 import { donationsAPI } from "../utils/api";
 import ConfirmModal from "../components/ConfirmModal";
 import { generateDonationReceipt } from "../utils/pdfGenerator";
 
 function AdminDonations() {
+  const { organisationName } = useBranding();
   const [donations, setDonations] = useState([]);
   const [loadingId, setLoadingId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -210,7 +212,7 @@ function AdminDonations() {
               <div className="flex flex-row md:flex-col gap-2 w-full md:w-auto md:min-w-[130px]">
                 {/* Receipt Download Button */}
                 <button
-                  onClick={() => generateDonationReceipt(d)}
+                  onClick={() => generateDonationReceipt(d, organisationName)}
                   title="Download receipt PDF"
                   className="px-4 py-2 text-sm font-bold text-white bg-cyan-600 hover:bg-cyan-700 rounded-md shadow-sm transition-all duration-200 whitespace-nowrap"
                 >

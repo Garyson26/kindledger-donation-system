@@ -460,11 +460,31 @@ test('BB1: a POPULATED WRONG database is REFUSED - the case emptiness misses', a
   const genuine = await genuineCategory('wrongdb');
   const minted = await mintedCategory('wrongdb');
 
+  // A STUB THAT ANSWERS FOR NOTHING AT ALL - the only place in this file where
+  // that is safe, and the safety argument is specific rather than general:
+  //
+  //   THIS RUN MUST REFUSE BEFORE IT WRITES. That is the property under test.
+  //   If it ever wrote, the assertions below fail - so a lying stub cannot
+  //   destroy a row here without the test saying so.
+  //
+  // `sourceWith()` deliberately resolves foreign rows TRUTHFULLY (it exists
+  // because a lying stub nulled real data twice), which means it can no longer
+  // produce the wrong-database case at all once the database holds real
+  // migrated rows. Those two needs are in genuine tension and the resolution is
+  // to separate them, not to weaken the truthful one.
+  const nothingResolves = {
+    ...models,
+    Category: {
+      countDocuments: async () => 5000,
+      find: () => ({ lean: async () => [] }),
+    },
+  };
+
   await assert.rejects(
     () =>
       nullMintedLegacyIds({
         prisma: getPrisma(),
-        models: sourceWith(5000, []),
+        models: nothingResolves,
         dryRun: false,
         entities: ['category'],
       }),
@@ -486,6 +506,19 @@ test('BB1: a POPULATED WRONG database is REFUSED - the case emptiness misses', a
     minted.legacyId,
     'even the genuinely minted row is untouched - a refusal writes nothing at all'
   );
+
+  // AND THE ROWS THIS SUITE DID NOT CREATE, which is what makes the lying stub
+  // above acceptable. If the refusal ever stops coming first, this is the
+  // assertion that reports real data being destroyed rather than a stub being
+  // convenient.
+  for (const c of await categories.list()) {
+    if (String(c.name || '').startsWith(CAT_PREFIX)) continue;
+    if (!c.legacyId) continue;
+    assert.ok(
+      c.legacyId,
+      `a foreign row (${c.name}) lost its legacy_id to a stub that answers for nothing`
+    );
+  }
 });
 
 test('BB1: sharing even ONE identifier is accepted - it is not a threshold', async () => {

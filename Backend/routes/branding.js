@@ -1,0 +1,346 @@
+/**
+ * =============================================================================
+ * Branding - the public read, and the admin write (SPEC-5 package 5.2)
+ * =============================================================================
+ *   GET /api/branding          no auth. The donor app needs this before login
+ *   PUT /api/admin/branding    adminAuth. Mounted from routes/admin.js
+ *
+ * -----------------------------------------------------------------------------
+ * VALIDATION REFUSES BEFORE THE DATABASE DOES, AND THAT IS THE POINT
+ * -----------------------------------------------------------------------------
+ * `branding_settings` already constrains the colours with
+ * `CHECK (REGEXP_LIKE(primary_colour, '^#[0-9A-Fa-f]{6}$'))`. If the API just
+ * forwarded the value, a bad colour would surface as a Prisma error and a 500 -
+ * **the SEC-14 shape**, where a caller's malformed input becomes a server fault
+ * and the log fills with stack traces for something that is simply a typo.
+ *
+ * So the API validates the same rule and answers 400 with the field named. The
+ * CHECK stays as the backstop: it is what makes the rule true of the DATA, and
+ * this is what makes the response true of the REQUEST. Neither replaces the
+ * other, and the duplication is deliberate rather than an oversight.
+ * =============================================================================
+ */
+
+'use strict';
+
+const express = require('express');
+const fs = require('node:fs');
+const multer = require('multer');
+const branding = require('../repositories/branding');
+const logoStorage = require('../services/logoStorage');
+const { refuse, failed } = require('../utils/respond');
+
+const router = express.Router();
+
+/**
+ * THE FIRST SIZE BOUND, and it is before anything holds the whole request.
+ *
+ * memoryStorage on purpose: a disk-backed multer writes the raw upload to a
+ * temporary file BEFORE any of our checks run, which means unvalidated
+ * attacker bytes land on the same volume the site serves from. Two megabytes
+ * in memory is cheaper than that, and the limit is what keeps it cheap.
+ *
+ * `files: 1` because a request carrying ten files is not a logo upload.
+ */
+const uploadLogo = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: logoStorage.MAX_BYTES, files: 1, fields: 4 },
+}).single('logo');
+
+/** The same expression as `ck_branding_settings_primary_colour`. */
+const HEX_COLOUR = /^#[0-9A-Fa-f]{6}$/;
+
+/**
+ * Length bounds, from the schema. Written as numbers next to the field names
+ * because "per the schema" in a comment is a claim nobody re-checks - and
+ * `test/branding.test.js` asserts these match the column widths.
+ */
+const MAX = {
+  organisationName: 160,
+  logoPath: 512,
+  logoMime: 64,
+  faviconPath: 512,
+  supportEmail: 255,
+  websiteUrl: 512,
+  footerText: 500,
+};
+
+/** Deliberately permissive: an address is validated by sending mail to it. */
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Returns an array of problems - EVERY problem, not the first.
+ *
+ * A form with four bad fields should not need four round trips to discover
+ * that. Reporting one at a time is how a settings page becomes tedious enough
+ * that somebody stops using it.
+ */
+function validate(body) {
+  const problems = [];
+
+  if (Object.prototype.hasOwnProperty.call(body, 'organisationName')) {
+    const v = String(body.organisationName || '').trim();
+    if (!v) problems.push('organisationName must not be empty');
+    else if (v.length > MAX.organisationName) {
+      problems.push(`organisationName must be at most ${MAX.organisationName} characters`);
+    }
+  }
+
+  for (const field of ['primaryColour', 'secondaryColour']) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    const v = body[field];
+    if (v === null || v === '') continue; // clearing a colour is legitimate
+    if (!HEX_COLOUR.test(String(v))) {
+      problems.push(`${field} must be a hex colour like #1A2B3C`);
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'supportEmail')) {
+    const v = body.supportEmail;
+    if (v !== null && v !== '' && !EMAIL.test(String(v))) {
+      problems.push('supportEmail must be an email address');
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'websiteUrl')) {
+    const v = body.websiteUrl;
+    if (v !== null && v !== '') {
+      let parsed = null;
+      try {
+        parsed = new URL(String(v));
+      } catch {
+        parsed = null;
+      }
+      // http and https ONLY. `javascript:` and `data:` are the reason this is
+      // an allowlist: the value is rendered as a link on every public page, so
+      // a scheme check here is the difference between a website link and
+      // stored XSS that an admin pasted in themselves.
+      if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
+        problems.push('websiteUrl must be an http or https URL');
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'defaultCurrency')) {
+    const v = String(body.defaultCurrency || '').trim();
+    if (!/^[A-Za-z]{3}$/.test(v)) problems.push('defaultCurrency must be a 3-letter code');
+  }
+
+  for (const [field, max] of Object.entries(MAX)) {
+    if (field === 'organisationName') continue;
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    const v = body[field];
+    if (v !== null && String(v).length > max) {
+      problems.push(`${field} must be at most ${max} characters`);
+    }
+  }
+
+  return problems;
+}
+
+/** Normalise what validation accepted: trim, upper-case the currency, '' -> null. */
+function normalise(body) {
+  const out = {};
+  for (const field of branding.WRITABLE) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    let v = body[field];
+    if (typeof v === 'string') v = v.trim();
+    if (v === '') v = null;
+    if (field === 'defaultCurrency' && v) v = String(v).toUpperCase();
+    if (field === 'organisationName' && v === null) continue; // NOT NULL in the schema
+    out[field] = v;
+  }
+  return out;
+}
+
+// =============================================================================
+
+router.get('/', async (req, res) => {
+  try {
+    const view = await branding.getPublic();
+    if (!view) {
+      // A fresh installation seeds this row (Phase 1a 5.7), so this is the
+      // "should be unreachable" case. It answers 200 with defaults rather than
+      // 404: the donor app cannot render without branding, and an unseeded
+      // installation is an operator problem, not a reason to break the site.
+      return res.json({
+        organisationName: 'KindLedger',
+        logoPath: null,
+        logoMime: null,
+        faviconPath: null,
+        primaryColour: null,
+        secondaryColour: null,
+        supportEmail: null,
+        websiteUrl: null,
+        footerText: null,
+        defaultCurrency: 'INR',
+      });
+    }
+    return res.json(view);
+  } catch (err) {
+    return failed(res, 'Could not load branding', err, { tag: 'branding' });
+  }
+});
+
+/**
+ * =============================================================================
+ * GET /api/branding/logo - serve the stored logo
+ * =============================================================================
+ * PUBLIC, because the donor site renders it before anyone logs in.
+ *
+ * -----------------------------------------------------------------------------
+ * THE PATH COMES FROM THE DATABASE AND IS STILL NOT TRUSTED (BS2)
+ * -----------------------------------------------------------------------------
+ * There is no path parameter here - the row says which file to serve, so a
+ * caller cannot ask for one. That alone is most of the protection, and it is
+ * NOT all of it: a stored path joined to a directory is a traversal sink
+ * whatever the upload did, because the row could have been written by an older
+ * version, a migration, or a bug that has since been fixed.
+ *
+ * So it goes through `resolveWithin()` exactly as the write does.
+ *
+ * -----------------------------------------------------------------------------
+ * THE CONTENT-TYPE IS DERIVED FROM WHAT WAS DECODED
+ * -----------------------------------------------------------------------------
+ * `logo_mime` is written by `storeLogo()` from the format sharp actually
+ * decoded and re-encoded - never from the upload's declared type and never from
+ * its extension. Serving a type taken from the request would hand the attacker
+ * the one header that decides how a browser treats the bytes.
+ *
+ * `nosniff` stops the browser second-guessing it. Without that header a
+ * response typed `image/png` whose body looks like HTML can still be rendered
+ * as HTML by content sniffing - which is the whole class this and the re-encode
+ * are defending against, from two directions.
+ */
+router.get('/logo', async (req, res) => {
+  try {
+    const row = await branding.getPublic();
+    if (!row || !row.logoPath) return refuse(res, 404, 'No logo has been uploaded');
+
+    let absolute;
+    try {
+      absolute = logoStorage.resolveWithin(row.logoPath);
+    } catch (err) {
+      // A STORED PATH THAT ESCAPES IS A 500, NOT A 404. It means the row is
+      // wrong, which is an operator problem worth seeing in the logs rather
+      // than a missing file worth shrugging at.
+      return failed(res, 'The stored logo path is not inside the uploads directory', err, {
+        tag: 'branding',
+      });
+    }
+
+    if (!fs.existsSync(absolute)) return refuse(res, 404, 'No logo has been uploaded');
+
+    res.setHeader('Content-Type', row.logoMime || 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // A logo changes rarely and the filename changes when it does, so this is
+    // safe to cache - but not for long enough that a rebrand looks broken.
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return fs.createReadStream(absolute).pipe(res);
+  } catch (err) {
+    return failed(res, 'Could not serve the logo', err, { tag: 'branding' });
+  }
+});
+
+/**
+ * POST /api/admin/branding/logo - mounted by routes/admin.js behind adminAuth.
+ *
+ * The order is deliberate: store the new file FIRST, then point the row at it,
+ * then delete the old one. A failure at any step leaves a working site -
+ * an orphaned new file, or an old logo still serving. Deleting first would
+ * leave a row pointing at nothing if the store then failed.
+ */
+async function uploadBrandingLogo(req, res) {
+  uploadLogo(req, res, async (multerErr) => {
+    try {
+      if (multerErr) {
+        // multer's own limit fires before the body is fully read.
+        if (multerErr.code === 'LIMIT_FILE_SIZE') {
+          return refuse(res, 413, `The image must be at most ${logoStorage.MAX_BYTES / 1024 / 1024} MB`);
+        }
+        return refuse(res, 400, 'That upload could not be read');
+      }
+
+      if (!req.file || !req.file.buffer) return refuse(res, 400, 'No image was uploaded');
+
+      let stored;
+      try {
+        stored = await logoStorage.storeLogo(req.file.buffer);
+      } catch (err) {
+        // Every refusal from the storage layer is a 400 naming the reason. A
+        // rejected upload is the caller's problem, not a server fault - the
+        // SEC-14 shape again, and this endpoint is the one an admin will hit
+        // with a file their designer sent.
+        const known = [
+          'ERR_NO_FILE',
+          'ERR_TOO_LARGE',
+          'ERR_UNSUPPORTED_FORMAT',
+          'ERR_UNDECODABLE',
+          'ERR_FORMAT_MISMATCH',
+        ];
+        if (known.includes(err.code)) {
+          return refuse(res, err.code === 'ERR_TOO_LARGE' ? 413 : 400, err.message);
+        }
+        throw err;
+      }
+
+      const previous = await branding.getPublic();
+      const result = await branding.update(
+        { logoPath: stored.relativePath, logoMime: stored.mime },
+        req.user ? req.user.uuid : null
+      );
+
+      // The old file, by the path the DATABASE held - never anything from req.
+      let removed = { deleted: false, reason: 'nothing stored' };
+      if (previous && previous.logoPath && previous.logoPath !== stored.relativePath) {
+        removed = await logoStorage.deleteLogo(previous.logoPath);
+      }
+
+      return res.json({
+        message: 'Logo updated',
+        logo: {
+          path: stored.relativePath,
+          mime: stored.mime,
+          width: stored.width,
+          height: stored.height,
+          bytes: stored.bytes,
+        },
+        previousRemoved: removed.deleted,
+        branding: result.row,
+      });
+    } catch (err) {
+      return failed(res, 'Could not store the logo', err, { tag: 'branding' });
+    }
+  });
+}
+
+/** Mounted by routes/admin.js behind adminAuth. */
+async function updateBranding(req, res) {
+  try {
+    const problems = validate(req.body || {});
+    if (problems.length > 0) {
+      return refuse(res, 400, problems.join('; '));
+    }
+
+    const data = normalise(req.body || {});
+    if (Object.keys(data).length === 0) {
+      return refuse(res, 400, 'No branding fields were supplied');
+    }
+
+    // `req.user.uuid` is set by adminAuth via repositories/users.resolveForAuth.
+    const result = await branding.update(data, req.user ? req.user.uuid : null);
+
+    return res.json({
+      message:
+        result.changed.length === 0
+          ? 'No changes - every field already had that value'
+          : `Updated: ${result.changed.join(', ')}`,
+      changed: result.changed,
+      branding: result.row,
+    });
+  } catch (err) {
+    return failed(res, 'Could not update branding', err, { tag: 'branding' });
+  }
+}
+
+module.exports = { router, updateBranding, uploadBrandingLogo, validate, normalise, HEX_COLOUR, MAX };

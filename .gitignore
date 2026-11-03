@@ -29,6 +29,12 @@ for_ocean_security_review.md
 
 # Architectural decision records ARE tracked: they explain why the schema and
 # topology look the way they do, and a future contributor needs them.
+# SPEC-5 package 5.1's UI audit. TRACKED: it is the deliverable Gary reviews
+# before package 5.6 implements anything from it, and a list nobody can read is
+# not a list to pick from. It records UI defects and one data-model decision -
+# no exploit detail, no credentials, nothing the security review is excluded for.
+!docs/ui-audit.md
+
 !docs/decisions.md
 
 # The remediation map IS tracked, because SPEC-3 section 5 requires every

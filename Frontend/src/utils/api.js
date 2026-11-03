@@ -243,6 +243,20 @@ export const adminAPI = {
       method: "DELETE",
       auth: true,
     }),
+
+  // SPEC-5 5.2. The ADMIN view, which carries updatedBy/updatedAt; the public
+  // `GET /api/branding` deliberately does not, and is fetched without auth.
+  getBranding: () =>
+    apiRequest("/admin/branding", {
+      auth: true,
+    }),
+
+  updateBranding: (settings) =>
+    apiRequest("/admin/branding", {
+      method: "PUT",
+      body: settings,
+      auth: true,
+    }),
 };
 
 // Users API calls
@@ -274,3 +288,8 @@ export const paymentAPI = {
 
 export default apiRequest;
 
+// SPEC-5 5.4. PUBLIC and unauthenticated - the donor app needs branding before
+// login, and before it knows whether anyone will log in at all.
+export const brandingAPI = {
+  get: () => apiRequest("/branding"),
+};

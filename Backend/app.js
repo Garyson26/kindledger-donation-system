@@ -12,6 +12,7 @@ const authRoutes = require("./routes/auth");
 const categoryRoutes = require("./routes/categories");
 const donationRoutes = require("./routes/donations");
 const adminRoutes = require("./routes/admin");
+const { router: brandingRoutes } = require("./routes/branding");
 const userRoutes = require("./routes/users");
 const paymentRoutes = require("./routes/payment");
 
@@ -88,6 +89,12 @@ const openCors = cors();
 app.use("/api/health", healthRoutes);
 
 app.use("/api/auth", restrictiveCors, authRoutes);
+// SPEC-5 5.2. PUBLIC and unauthenticated by necessity - the donor app needs
+// branding before anyone logs in, and before it knows whether anyone will.
+// restrictiveCors still applies: unauthenticated is not the same as unscoped,
+// and this is read-only. The response projection in repositories/branding.js is
+// what keeps `updated_by` and `updated_at` out of it.
+app.use("/api/branding", restrictiveCors, brandingRoutes);
 app.use("/api/categories", restrictiveCors, categoryRoutes);
 app.use("/api/donations", restrictiveCors, donationRoutes);
 app.use("/api/admin", restrictiveCors, adminRoutes);

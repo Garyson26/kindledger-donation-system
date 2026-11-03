@@ -1,7 +1,9 @@
+import { useBranding } from "../branding/BrandingProvider";
 import React from 'react';
 import '../styles/PrivacyPolicy.css';
 
 const PrivacyPolicy = () => {
+  const { organisationName } = useBranding();
   return (
     <div className="privacy-policy-container">
       <div className="privacy-policy-content">
@@ -14,7 +16,7 @@ const PrivacyPolicy = () => {
         <section>
           <h2>1. Introduction</h2>
           <p>
-            Welcome to the For Ocean Foundation Donation. We are committed to protecting your privacy and ensuring you have a positive experience on our platform. This Privacy Policy explains how we collect, use, disclose, and safeguard your information when you use our website and services.
+            Welcome to the {organisationName} Donation. We are committed to protecting your privacy and ensuring you have a positive experience on our platform. This Privacy Policy explains how we collect, use, disclose, and safeguard your information when you use our website and services.
           </p>
         </section>
 

@@ -159,15 +159,15 @@ function CategoriesList({ categories, onEdit, onDelete, onReorder }) {
                       {cat.descriptions && cat.descriptions.length > 0 && cat.descriptions.some(d => d.trim()) && (
                         <div className="mt-4 pt-4 border-t border-gray-200">
                           <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-3 flex items-center gap-1">
-                            <svg className="w-4 h-4 text-[#05699e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <svg className="w-4 h-4 text-[var(--kl-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                             </svg>
                             Additional Details
                           </p>
                           <ul className="space-y-2">
                             {cat.descriptions.filter(d => d.trim()).map((desc, idx) => (
-                              <li key={idx} className="text-sm text-gray-700 flex items-start gap-3 bg-[#05699e]/10 rounded-lg p-3 border border-[#05699e]/20">
-                                <span className="inline-flex items-center justify-center w-6 h-6 text-xs font-bold text-white bg-[#05699e] rounded-full flex-shrink-0 mt-0.5">
+                              <li key={idx} className="text-sm text-gray-700 flex items-start gap-3 bg-[var(--kl-primary)]/10 rounded-lg p-3 border border-[var(--kl-primary)]/20">
+                                <span className="inline-flex items-center justify-center w-6 h-6 text-xs font-bold text-white bg-[var(--kl-primary)] rounded-full flex-shrink-0 mt-0.5">
                                   {idx + 1}
                                 </span>
                                 <span className="flex-1">{desc}</span>
@@ -184,7 +184,7 @@ function CategoriesList({ categories, onEdit, onDelete, onReorder }) {
                             e.stopPropagation();
                             onEdit(cat);
                           }}
-                          className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#05699e] hover:bg-[#044d73] text-white font-medium rounded-lg transition-colors duration-200"
+                          className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 bg-[var(--kl-primary)] hover:bg-[var(--kl-primary-dark)] text-white font-medium rounded-lg transition-colors duration-200"
                         >
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
