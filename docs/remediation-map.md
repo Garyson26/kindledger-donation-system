@@ -3,6 +3,21 @@
 **Package 3.0 (SPEC-3 section 3).** Every known finding in one place: where it
 lives, which phase closes it, by what mechanism, and how that is verified.
 
+> **`[location redacted while open]` (CH6, 3 Nov 2026).** This repository is
+> public. For every finding still open **in what production runs**, the file
+> and line it was found at have been removed. 42 references, all in production's
+> code or in the tests that point at it. Production serves `58bdadf`, so a
+> finding fixed only on an unmerged branch is still open there, at that line,
+> and counts as open here. **Closed findings keep full detail**, as do
+> findings that only ever existed on the migration branches.
+>
+> **What the redaction does not do:** history keeps every earlier version of
+> this file, so it slows a reader of the current file down and no more. **When
+> a finding's fix is deployed**, restore its location from history
+> (`git log -p -- docs/remediation-map.md`) in the same commit that records
+> the closure. A finding still marked "open" here is always one somebody can
+> go and look for.
+
 This replaces the Phase 1b document that was deferred, and it is the artefact
 every later package checks itself against. A package is not complete until the
 findings assigned to its file are closed with evidence or explicitly deferred
@@ -92,7 +107,7 @@ before deciding*. Both leave the database untouched, and "the database is
 untouched" is what an outcome-only assertion checks.
 
 **This rule is generalised from SEC-14, which is the worked example.**
-`payment-callbacks.test.js:355` posts a malformed hash and asserts the donation
+[location redacted while open] posts a malformed hash and asserts the donation
 stays `Pending`. It passes. The donation does stay `Pending` - because
 `verifyHash()` throws a `RangeError` before it can decide anything, the route's
 catch block turns that into a 500, and nothing is written. The test was correct
@@ -111,7 +126,7 @@ fail-closed the moment someone adds a `catch` that returns 200.
 This is the same family as ADR-048's wrong-reason test, inverted: there the
 assertion was vacuous; here it was real but tested the wrong property.
 
-**Retroactive application is deliberately deferred.** `payment-callbacks.test.js:355`
+**Retroactive application is deliberately deferred.** [location redacted while open]
 should assert a 4xx and the absence of a thrown error rather than only the
 donation state. That change belongs with **`payment.js`'s migration**, alongside the SEC-14
 fix, not now - editing a regression suite before the code it guards is changed
@@ -369,7 +384,7 @@ to live.
 
 ### SEC-14 is NOT closed. A passing test was concealing it.
 
-`verifyHash()` in `routes/payment.js:46-53` guards with a **character**-length
+`verifyHash()` in [location redacted while open] guards with a **character**-length
 comparison and then decodes as hex:
 
 ```js
@@ -387,7 +402,7 @@ received chars 128 -> bytes 0
 THROWS: RangeError: Input buffers must have the same byte length
 ```
 
-`test/payment-callbacks.test.js:355` sends exactly this (`'z'.repeat(128)`) and
+[location redacted while open] sends exactly this (`'z'.repeat(128)`) and
 passes, because it asserts the *outcome* - the donation stays `Pending` - and
 the outcome is right. The request 500s, the throw is caught by the route's
 handler, nothing is written. It fails closed.
@@ -434,7 +449,7 @@ here - it is simply older than the fix. Marked closed below.**
 
 **SEC-04 is deliberately absent from this table.** Half of it is closed -
 `app.set('trust proxy', 1)` is at `app.js:50` and proven through Nginx. The
-limiter store is not wired; `routes/auth.js:19-25` still constructs a default
+limiter store is not wired; [location redacted while open] still constructs a default
 in-memory limiter. Per ADR-042 the finding stays open until **`auth.js` migrates**
 and swaps the import. Reporting it closed on the strength of the store existing is
 precisely the error ADR-042 was written to prevent.
@@ -534,14 +549,14 @@ without them, "the category endpoints still work" would have been an opinion.
 analysis, which enumerates callers rather than reasoning about purpose.
 **Trigger: `dataCleanupService` is retired, which happens with `donations.js`.**
 
-`POST /api/admin/cleanup/trigger` (`admin.js:281`) calls
+`POST /api/admin/cleanup/trigger` ([location redacted while open]) calls
 `triggerManualCleanup()`, which deletes donations older than ten years, and
 users older than ten years who have no donations.
 
 **What is NOT wrong, checked rather than assumed:**
 
 - **It is not reachable by a non-admin.** `router.use(adminAuth)` at
-  `admin.js:17` guards every route in the file, including this one. A non-admin
+  [location redacted while open] guards every route in the file, including this one. A non-admin
   gets 403, an unauthenticated caller 401. This was the specific question asked,
   and the answer is no.
 - **The blast radius today is zero rows.** Both deletes are bounded by a
@@ -678,7 +693,7 @@ question is open.
 
 matches the first user in the collection, passes `bcrypt.compare` against **that
 user's** hash, and proceeds to generate and store a login OTP
-(`auth.js:238-256`). The attacker is **past the credential check**, holding a
+([location redacted while open]). The attacker is **past the credential check**, holding a
 pending OTP for an account whose address they never knew.
 
 ### Why the original classification understated it
@@ -726,7 +741,7 @@ deploy 3.2, and until then to leave Atlas down.
 ## SEC-08 is CLOSED on /login, and is easy to reintroduce (AI4)
 
 Both an unknown address and a wrong password return `400 {"error":"Invalid
-credentials"}`, byte for byte (`auth.js:235-239`). I assumed otherwise and the
+credentials"}`, byte for byte ([location redacted while open]). I assumed otherwise and the
 test showed it.
 
 **The reintroduction risk is the useful half.** The natural repository
@@ -2423,7 +2438,7 @@ semantics. They should know they are its first caller.
 - **CATEGORY: not entangled.** One call, `categoryBridge.countCategories()` at
   `admin.js:31`, already resolving to MySQL. Nothing to do.
 - **DONATION: entangled, but NOT equally** - two `countDocuments` in
-  `GET /admin/stats` (`admin.js:27,32`). Read-only, no control, no false
+  `GET /admin/stats` ([location redacted while open]). Read-only, no control, no false
   success. **Reported rather than taken**, per AR3. Recommendation and its cost
   are in the audit document; the short version is that they sit in the same
   handler as the user count, so leaving them produces one handler reading two
@@ -2604,14 +2619,14 @@ moved down, and that is recorded as prominently as the one that moved up.
 **Was:** "Unauthenticated donor PII via `GET /payment/status/:txnid`" - Medium,
 filed as information disclosure.
 
-**Outcome, read from the code:** `payment.js:612` has no authentication of any
+**Outcome, read from the code:** [location redacted while open] has no authentication of any
 kind. It returns the WHOLE donation record, populated - donor name, email,
 phone, amount, and the payment details including `mihpayid` and `bank_ref_num`.
 The only thing standing between an anonymous request and a donor's personal data
 is knowing `txnid`.
 
 **And the application publishes `txnid` into the URL bar itself.** Every callback
-redirects to `FRONTEND_SUCCESS_URL?txnid=...` (`payment.js:247,304,391,471`). A
+redirects to `FRONTEND_SUCCESS_URL?txnid=...` ([location redacted while open]). A
 value in a query string is in the browser history, in the `Referer` header sent
 to every third party the success page loads, and in any analytics or error
 reporter on that page. **The credential protecting donor PII is transmitted the
@@ -2627,14 +2642,14 @@ disclosure" placed it.
 
 ### MOVED DOWN: SEC-18 is Low, and its real finding is a different one
 
-**Was:** "bcrypt cost 10 (`admin.js:128,220`)" - Medium.
+**Was:** "bcrypt cost 10 ([location redacted while open])" - Medium.
 
 **Outcome:** cost 10 versus 12 is a four-fold change in offline cracking cost,
 and it only matters at all GIVEN a database compromise. It is hardening, not a
 control that can be defeated. **Low.**
 
-**But reading it produced a better finding than the severity.** `admin.js:140`
-and `:232` call `bcrypt.hash(password, 10)` DIRECTLY - they do not go through
+**But reading it produced a better finding than the severity.** [location redacted while open]
+and [location redacted while open] call `bcrypt.hash(password, 10)` DIRECTLY - they do not go through
 `repositories/users`, which is where `BCRYPT_COST = 12` lives and where
 `create()` and `setPassword()` apply it. So:
 
@@ -2657,7 +2672,7 @@ than the number that led to it.
 auto-verifies" - Low.
 
 **Outcome, checked by enumerating every read of the flag:** `isVerified` is read
-in **exactly one place in the entire codebase** - `auth.js:312`, the line that
+in **exactly one place in the entire codebase** - [location redacted while open], the line that
 sets it to true. No route and no middleware gates anything on it.
 
 **So the flag is not a control.** An "unverified" account has precisely the
@@ -2791,7 +2806,7 @@ smallest correct alternative is to move `payment.js`'s donation WRITE path into
 The trigger was recorded as "once `donations.js` has migrated", reasoning that
 `Donation.category` stays an ObjectId ref *until donations migrate*. The concept
 was right and the file was wrong: **the ref is written by `payment.js:141`, not
-by `donations.js`.** `donations.js:47`'s write is BUG-01 and has never once
+by `donations.js`.** [location redacted while open]'s write is BUG-01 and has never once
 succeeded, so removing the minter at 3.3 would have broken the live donation
 write path on the first category created afterwards.
 
@@ -3507,7 +3522,7 @@ that needing materially different resolution logic rather than different
 parameters is the signal to stop.
 
 **`dataCleanupService` was live-reachable and had been treated as dead.**
-`admin.js:13` imports three of its functions, which DELETE donations and users.
+[location redacted while open] imports three of its functions, which DELETE donations and users.
 BUG-04 stops the cron firing, which is what made it look inert, but an admin can
 still invoke it. Retiring it removes a reader of `Donation`, `User` AND
 `PendingSignup` in one change, and takes `PendingSignup` to a single reader so
@@ -3581,12 +3596,12 @@ The original table is kept below as the record of what the package was given.
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| SEC-16 | Low | `PUT /donations/:id` writes any `status` string (`donations.js:249,293` - `findByIdAndUpdate`, no `runValidators`) | Repository accepts only enum members; MySQL ENUM rejects the rest | Test writes a junk status and expects rejection | **R** |
+| SEC-16 | Low | `PUT /donations/:id` writes any `status` string ([location redacted while open] - `findByIdAndUpdate`, no `runValidators`) | Repository accepts only enum members; MySQL ENUM rejects the rest | Test writes a junk status and expects rejection | **R** |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
-| BUG-01 | - | `POST /api/donations` can never succeed - builds a document without the required `donorEmail`/`amount` (`donations.js:22-33`) | Decide: supply the fields or delete the endpoint | Characterisation test records the current 400 **as current behaviour**, then the change is visible | **R** |
-| BUG-02 | - | `PATCH /:id/status` accepts only lowercase `approved`/`rejected` (`donations.js:289`) while callbacks write `Approved`. **MECHANISM NOW VERIFIED BY BEHAVIOUR (AM3)** - see below | Canonical enum casing through the repository | Test asserts both casings resolve correctly; see ADR-018 for the ETL side | **R**, mechanism confirmed **X** |
-| BUG-06 | - | `optionalAuth` 401s a guest holding a stale token (`donations.js:7-17`) | Catch the auth failure and fall through to guest | Test: expired token + guest donation succeeds | **R** |
-| BUG-08 | - | Unbounded pagination (`donations.js:112,218`) | As 3.1 | As 3.1 | **R** |
+| BUG-01 | - | `POST /api/donations` can never succeed - builds a document without the required `donorEmail`/`amount` ([location redacted while open]) | Decide: supply the fields or delete the endpoint | Characterisation test records the current 400 **as current behaviour**, then the change is visible | **R** |
+| BUG-02 | - | `PATCH /:id/status` accepts only lowercase `approved`/`rejected` ([location redacted while open]) while callbacks write `Approved`. **MECHANISM NOW VERIFIED BY BEHAVIOUR (AM3)** - see below | Canonical enum casing through the repository | Test asserts both casings resolve correctly; see ADR-018 for the ETL side | **R**, mechanism confirmed **X** |
+| BUG-06 | - | `optionalAuth` 401s a guest holding a stale token ([location redacted while open]) | Catch the auth failure and fall through to guest | Test: expired token + guest donation succeeds | **R** |
+| BUG-08 | - | Unbounded pagination ([location redacted while open]) | As 3.1 | As 3.1 | **R** |
 | ADR-041 | - | `distinct()` must keep data semantics, not enum semantics | `donations.listStatusesInUse()` | Already tested in `test:data-layer`; route test asserts the endpoint's shape | **R** |
 | ADR-003 | - | Deleting a user preserves their donations - **behaviour change** | FK `ON DELETE SET NULL`; `donor.isGuest` distinguishes | Test: delete a donor, donation survives and stays attributable | **R** |
 
@@ -3602,25 +3617,25 @@ The original table is kept below as the record of what the package was given.
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
 | SEC-08 | Medium | User enumeration (admin-side endpoints) | Generic responses | Test asserts identical responses for known and unknown | **R** |
-| SEC-18 | **Low** (AJ3: was Medium) | bcrypt cost 10 (`admin.js:140,232`). **The real finding is that these call `bcrypt.hash` DIRECTLY instead of `repositories/users`** - two hashing implementations, one governed by policy | Route both through `users.create` / `users.setPassword` | Test asserts the cost AND that an admin password reset revokes sessions | **R**, re-derived **X** |
+| SEC-18 | **Low** (AJ3: was Medium) | bcrypt cost 10 ([location redacted while open]). **The real finding is that these call `bcrypt.hash` DIRECTLY instead of `repositories/users`** - two hashing implementations, one governed by policy | Route both through `users.create` / `users.setPassword` | Test asserts the cost AND that an admin password reset revokes sessions | **R**, re-derived **X** |
 | **ADMIN-01** | **High** | **EVERY admin user-management operation writes MongoDB, which authentication no longer reads.** See the dedicated section above - this is not a bcrypt finding and not a `tokenVersion` finding, it is a store split | Migrate `admin.js`'s user operations, or move them into the package that owns the entity | Test: each admin operation, then assert the effect through `/api/auth/login` | **X** (AJ3) |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
-| SEC-21 | **Medium** (AJ3: was Low, and RESTATED) | **`isVerified` gates nothing.** It is read in exactly one place in the codebase - `auth.js:312`, the line that sets it true. SEC-05's shape. Not High only because self-service signup enforces verification structurally via `PendingSignup` | Decide whether the flag is a control. If it is, gate on it; if it is not, remove it rather than leave a field the admin UI can toggle to no effect | Test: an unverified account is refused, or the field is gone | **R**, re-derived **X** |
-| BUG-03 | - | **Dashboard "approved" counter is NOT "always 0" - it counts the LOWERCASE SUBSET** (`countDocuments({status:"approved"})`, `admin.js:32`). Measured in the AR1 audit: it returned **1 when the true figure was 2**. It reads 0 only where no admin ever used `PATCH /:id/status`; anywhere else it reads a plausible fraction. **A tile showing 0 is visibly broken; a tile showing 1 of 2 is believed** | Canonical casing; follows BUG-02, and closed as a side effect of migrating the two `/stats` counts | Test: donations approved through BOTH writers, expect the tile to count both | **R**, corrected by **X** (AR1) |
-| BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` (`Backend/vercel.json:15-20`) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
-| BUG-08 | - | Unbounded pagination (`admin.js:80`) | As 3.1 | As 3.1 | **R** |
+| SEC-21 | **Medium** (AJ3: was Low, and RESTATED) | **`isVerified` gates nothing.** It is read in exactly one place in the codebase - [location redacted while open], the line that sets it true. SEC-05's shape. Not High only because self-service signup enforces verification structurally via `PendingSignup` | Decide whether the flag is a control. If it is, gate on it; if it is not, remove it rather than leave a field the admin UI can toggle to no effect | Test: an unverified account is refused, or the field is gone | **R**, re-derived **X** |
+| BUG-03 | - | **Dashboard "approved" counter is NOT "always 0" - it counts the LOWERCASE SUBSET** (`countDocuments({status:"approved"})`, [location redacted while open]). Measured in the AR1 audit: it returned **1 when the true figure was 2**. It reads 0 only where no admin ever used `PATCH /:id/status`; anywhere else it reads a plausible fraction. **A tile showing 0 is visibly broken; a tile showing 1 of 2 is believed** | Canonical casing; follows BUG-02, and closed as a side effect of migrating the two `/stats` counts | Test: donations approved through BOTH writers, expect the tile to count both | **R**, corrected by **X** (AR1) |
+| BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` ([location redacted while open]) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
+| BUG-08 | - | Unbounded pagination ([location redacted while open]) | As 3.1 | As 3.1 | **R** |
 
 ### `routes/auth.js` + `routes/users.js` + `middleware/`  *(trigger: users data migrated; currently 3.2)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| **SEC-04** | **High** | **Rate limiting non-functional** - `routes/auth.js:19-25` builds a default in-memory limiter | Wire `config/rateLimiters.js`. **This is what closes the finding** (ADR-042) | `test:auth` unchanged; assert the Redis store is in use | **R** |
-| **SEC-05** | **High** | `isActive` never enforced and tokens cannot be revoked - confirmed: the flag exists on the model and `admin.js:196` toggles it, but **no route or middleware reads it**, and `tokenVersion` does not exist in `routes/`, `middleware/` or `models/` | Check `isActive` at both login steps and in both middlewares; `tokenVersion` on the token, incremented by `setPassword`/`setActive` | Test: disable an account, existing token rejected, login refused | **R** |
+| **SEC-04** | **High** | **Rate limiting non-functional** - [location redacted while open] builds a default in-memory limiter | Wire `config/rateLimiters.js`. **This is what closes the finding** (ADR-042) | `test:auth` unchanged; assert the Redis store is in use | **R** |
+| **SEC-05** | **High** | `isActive` never enforced and tokens cannot be revoked - confirmed: the flag exists on the model and [location redacted while open] toggles it, but **no route or middleware reads it**, and `tokenVersion` does not exist in `routes/`, `middleware/` or `models/` | Check `isActive` at both login steps and in both middlewares; `tokenVersion` on the token, incremented by `setPassword`/`setActive` | Test: disable an account, existing token rejected, login refused | **R** |
 | **SEC-03** | **High** | NoSQL operator injection - **12+ `findOne({ email })` call sites, no `String()` coercion anywhere in `routes/` or `middleware/`** | Parameterised SQL removes the class; repositories coerce and lowercase | Test posts `{"email":{"$ne":null}}` and expects no match | **R** |
 | SEC-08 | Medium | User enumeration on five endpoints | Generic responses | Test asserts identical responses | **R** |
 | SEC-10 | Medium | Password policy absent in two places, inconsistent elsewhere | One shared validator across all five paths | Test each path with a weak password | **R** |
-| SEC-13 | Medium | OTPs and reset codes stored in plaintext - confirmed at `auth.js:385` (`user.resetPasswordCode = verificationCode`) | Repositories store sha256 (`users.setResetCode`) | Test: read the row, assert no plaintext code | **R** |
-| SEC-18 | Medium | bcrypt cost 10 (`auth.js:57,506,533`) | `BCRYPT_COST = 12` | As 3.3 | **R** |
+| SEC-13 | Medium | OTPs and reset codes stored in plaintext - confirmed at [location redacted while open] (`user.resetPasswordCode = verificationCode`) | Repositories store sha256 (`users.setResetCode`) | Test: read the row, assert no plaintext code | **R** |
+| SEC-18 | Medium | bcrypt cost 10 ([location redacted while open]) | `BCRYPT_COST = 12` | As 3.3 | **R** |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
 | ADR-034 | - | A correct code at `/verify` must NOT clear the attempt counter | `users.verifyResetCode` deliberately does not reset | Already asserted in `test:auth` and `test:data-layer`; must stay true | **R** |
 | ADR-033 | - | Duplicate index declarations in the Mongoose models | Moot once the models go (3.6); must not be reintroduced in the Prisma schema | Drift gate; boot logs free of the Mongoose duplicate-index warning | **X** |
@@ -3630,12 +3645,12 @@ The original table is kept below as the record of what the package was given.
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| **SEC-14** | Medium | **Still live.** Malformed hash throws `RangeError` - char-length guard, byte-length decode (`payment.js:51-52`) | Validate `/^[0-9a-f]{128}$/i` before decoding | Extend `payment-callbacks.test.js:355` to assert the response status, not only the donation state | **R**, re-opened by **X** |
-| SEC-06 | **High** (AJ3: was Medium) | Unauthenticated donor PII via `GET /payment/status/:txnid`, and the `txnid` protecting it is published into the URL bar by the app's own redirects - confirmed: no auth middleware at `payment.js:601` | Authenticate; random transaction ids | Test: unauthenticated request returns no PII | **R** |
-| SEC-07 | Medium | Donation attribution forgery - `userId` is destructured from `req.body` at `payment.js:99` and written at `:134` | Take the user from the token, never the body | Test: post a forged `userId`, assert it is ignored | **R** |
+| **SEC-14** | Medium | **Still live.** Malformed hash throws `RangeError` - char-length guard, byte-length decode ([location redacted while open]) | Validate `/^[0-9a-f]{128}$/i` before decoding | Extend [location redacted while open] to assert the response status, not only the donation state | **R**, re-opened by **X** |
+| SEC-06 | **High** (AJ3: was Medium) | Unauthenticated donor PII via `GET /payment/status/:txnid`, and the `txnid` protecting it is published into the URL bar by the app's own redirects - confirmed: no auth middleware at [location redacted while open] | Authenticate; random transaction ids | Test: unauthenticated request returns no PII | **R** |
+| SEC-07 | Medium | Donation attribution forgery - `userId` is destructured from `req.body` at [location redacted while open] and written at [location redacted while open] | Take the user from the token, never the body | Test: post a forged `userId`, assert it is ignored | **R** |
 | SEC-11 | Medium | Unauthenticated write endpoints allow storage/email flooding | `paymentInitiateLimiter` (built in Phase 2, unwired); stale-`Pending` sweep | Test the limiter fires; scheduler test for the sweep | **R** |
-| **PAY-01** | Low | **`quantity` is unbounded while `extraAmount` is clamped, on consecutive lines** (`payment.js:136-137`). `quantity="99999999999999999999"` prices a donation at 1.5e23, unauthenticated. After 3.4 it becomes an unauthenticated 500 instead | One `Math.min`, with the ceiling a named constant beside `extraAmount`'s so the pair cannot drift again | Test both bounds together | **X** (AJ3) |
-| SEC-19 | Low | `details: error.message` at `payment.js:443,475` | Generic message | Characterisation test | **R** |
+| **PAY-01** | Low | **`quantity` is unbounded while `extraAmount` is clamped, on consecutive lines** ([location redacted while open]). `quantity="99999999999999999999"` prices a donation at 1.5e23, unauthenticated. After 3.4 it becomes an unauthenticated 500 instead | One `Math.min`, with the ceiling a named constant beside `extraAmount`'s so the pair cannot drift again | Test both bounds together | **X** (AJ3) |
+| SEC-19 | Low | `details: error.message` at [location redacted while open] | Generic message | Characterisation test | **R** |
 | ADR-012 / ADR-026 | - | SEC-01 idempotency is a non-atomic read-then-write. **ADR-026 supersedes ADR-012's conclusion**: the `mihpayid` UNIQUE index is integrity, NOT the replay defence | Wrap the callback in `withTransaction` (SPEC-3 §4.3) | Concurrent-callback test | **R** |
 | ADR-024 §3 / ADR-026 / ADR-027 | - | No security decision may rest on an unsigned field; unsigned text must be escaped per sink | Keep the `verifyHash` banner; escape at each sink, not at ingest | Test asserts `unmappedstatus` cannot drive the decision | **R** |
 | SPEC-3 §4.6 | - | Alternate-case parser fallbacks (`.AMOUNT`, `.STATUS`, `udf_4`, `udf[4]`) | Delete them; keep the banner comment | Tests unchanged - they are unreachable today | **R** |
@@ -3693,9 +3708,9 @@ packages rather than rehearsed once against a snapshot.
 
 | ID | Sev | Finding | Prov |
 |---|---|---|---|
-| SEC-15 | Medium | JWT in `localStorage` (confirmed at `LoginPage.jsx:51,81`, `SignupPage.jsx:75`) | **R** |
+| SEC-15 | Medium | JWT in `localStorage` (confirmed at [location redacted while open], [location redacted while open]) | **R** |
 | SEC-17 | Low | `Frontend/.env` is tracked (confirmed by `git ls-files`) | **R** |
-| SEC-20 | Low | `/tailwind-test` and `/button-showcase` routed in production (`App.jsx:162-163`) | **R** |
+| SEC-20 | Low | `/tailwind-test` and `/button-showcase` routed in production ([location redacted while open]) | **R** |
 | BUG-07 | - | Dead and mismatched frontend API methods | **R** |
 | ADR-035 | - | `react-router-dom@7` major; the advisories themselves are unreachable | **X** (`npm audit` + reachability check) |
 | ADR-037 | - | `vite` exposure restated accurately - not build-time only | **X** |
