@@ -5608,6 +5608,41 @@ already say 4c is cleanup after 4b. Nothing else stated the order. The same
 pass caught runbook §7a. It still said "the stack refuses to start" without
 `PAYU_BASE_URL`, which is the compose-only claim CB2 corrected. Fixed.
 
+## CI-01 (HIGH, for what it hides) - NO MYSQL JOB HAS EVER STARTED IN CI
+
+Found when the stack was pushed on 3 Nov and every branch went red.
+
+The workflows pass `--character-set-server=utf8mb4`,
+`--collation-server=utf8mb4_0900_ai_ci` and `--default-time-zone=+00:00` in a
+service container's `options:`. GitHub hands `options:` to `docker create`,
+and these are **mysqld** arguments, so Docker rejects them: `unknown flag:
+--character-set-server`, exit 125, at "Initialize containers". The flags
+arrived with Phase 1a (`4142de7`, PR #11). **The Schema workflow has failed on
+`main` at that step on every run since then.** The same block is in
+`app-tests.yml` twice (the data-layer job from AA1, and the job that grew a
+MySQL service in package 3.1).
+
+**What it means:** every "N/N green" in this map and in the commit history is
+a local or in-container run. That evidence is real, but **CI has never
+independently confirmed any MySQL suite.** The commits said "CI status
+UNCONFIRMED" at the time, and this is the answer. Only the MongoDB-only job
+(PayU callbacks and reset controls) has ever passed in CI, on A and B.
+
+**Probable fix, not made:** drop the three flags. MySQL 8.4 already defaults
+to `utf8mb4` and `utf8mb4_0900_ai_ci`, the container clock is UTC, and no
+suite reads the server charset, collation or time zone (grep). It touches
+`schema.yml` (on `main`) and two blocks in `app-tests.yml` (added in B and in
+C), so where it lands is Gary's call: at A, re-merged up the stack, or as its
+own PR after post-F.
+
+**Found beside it, and fixed in post-F:** the ENV-02 step "The stack REFUSES
+to start without PAYU_BASE_URL" ran `docker compose config` with nothing set.
+Compose reports only the first missing required variable, and that was
+`DATABASE_URL`, so the step tested the wrong guard and failed. It passed
+locally because the checkout had a `.env`. The step now supplies the other
+five required variables. Checked both ways against a clean copy of the
+compose file: it refuses naming `PAYU_BASE_URL`, and accepts once that is set.
+
 ## BRAND-01 (LOW) - THE BRANDING PUT CAN WRITE THE STORAGE FIELDS
 
 Found by an automated review while preparing PR F. **Confirmed by reading the
