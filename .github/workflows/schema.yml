@@ -69,9 +69,10 @@ jobs:
           --health-timeout=5s
           --health-retries=12
           --health-start-period=40s
-          --character-set-server=utf8mb4
-          --collation-server=utf8mb4_0900_ai_ci
-          --default-time-zone=+00:00
+        # NO mysqld arguments here (CI-01). GitHub passes `options:` to
+        # `docker create`, so --character-set-server and friends were read as
+        # Docker flags, rejected, and this job never started. The same three
+        # settings are applied by the "Configure MySQL" step below instead.
 
     env:
       DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
@@ -106,6 +107,25 @@ jobs:
             sudo apt-get install -y --no-install-recommends mysql-client
           fi
           mysql --version
+
+      - name: Configure MySQL as docker-compose.yml does (CI-01)
+        # The three server settings docker-compose.yml passes to mysqld, which
+        # a service container cannot take. SET PERSIST applies them to every
+        # new connection. They are then read back, with the database's own
+        # defaults, and the step fails unless all five match. The database was
+        # created at container start under MySQL 8.4's defaults, which are the
+        # same values; the read-back checks that rather than trusting it.
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -pci-root-password -e "
+            SET PERSIST character_set_server = 'utf8mb4';
+            SET PERSIST collation_server = 'utf8mb4_0900_ai_ci';
+            SET PERSIST time_zone = '+00:00';"
+          got=$(mysql -h 127.0.0.1 -P 3306 -u root -pci-root-password -N -B -e "
+            SELECT CONCAT_WS(' ', @@GLOBAL.character_set_server, @@GLOBAL.collation_server,
+                   @@GLOBAL.time_zone, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME)
+            FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'kindledger'")
+          echo "server and database: $got"
+          test "$got" = "utf8mb4 utf8mb4_0900_ai_ci +00:00 utf8mb4 utf8mb4_0900_ai_ci"
 
       - name: Apply db/schema.sql
         # The normative artefact is applied directly, exactly as the MySQL
