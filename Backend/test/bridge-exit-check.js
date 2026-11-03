@@ -168,7 +168,16 @@ for (const file of suites) {
       (excluded ? '   (excluded - drives the fallback by design)' : '')
   );
 
-  if (res.status !== 0) failed += 1;
+  if (res.status !== 0) {
+    failed += 1;
+    // A FAIL with no reason sends the reader off to re-run the suite by hand.
+    // Show the failing assertions, or the tail of the output if there are none.
+    const lines = output.split('\n');
+    const notOk = lines.filter((l) => /^\s*not ok |^\s*(error|expected|actual|code):|AssertionError/.test(l));
+    const shown = (notOk.length ? notOk : lines.filter(Boolean).slice(-25)).slice(0, 40);
+    // eslint-disable-next-line no-console
+    console.log(shown.map((l) => '      | ' + l).join('\n'));
+  }
   if (!excluded && hits.length > 0) offenders.push({ file, hits });
 }
 
