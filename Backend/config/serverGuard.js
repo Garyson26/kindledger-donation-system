@@ -13,6 +13,8 @@
  *   supported      -> next()
  *   unsupported    -> 503, and the reason logged once. CACHED: a server does
  *                     not stop being MariaDB 10.11 between requests.
+ *   supported, with WARNINGS -> next(), and the warnings logged (DB1: a
+ *                     non-strict GLOBAL sql_mode, accepted by Gary).
  *   unreachable    -> next(). NOT cached and NOT a refusal: the route fails on
  *                     its own as it always has (ADR-039 - a dead database must
  *                     not kill the process), and the next request asks again.
@@ -30,7 +32,7 @@
 
 'use strict';
 
-const { getPrisma } = require('./prisma');
+const { getPrisma, buildPoolConfig } = require('./prisma');
 const { inspectServer, REQUIREMENT } = require('../db/require-mysql-version');
 
 const defaultQuery = (sql) => getPrisma().$queryRawUnsafe(sql);
@@ -45,7 +47,7 @@ let inFlight = null;
 function getServerVerdict() {
   if (settled) return Promise.resolve(settled);
   if (!inFlight) {
-    inFlight = inspectServer(query)
+    inFlight = inspectServer(query, { host: (buildPoolConfig() || {}).host })
       .then((verdict) => {
         settled = verdict;
         if (!verdict.supported) {
@@ -56,6 +58,9 @@ function getServerVerdict() {
         } else {
           console.log(`[serverGuard] ${verdict.server} supported`);
         }
+        // The accepted risk (DB1), said on every cold start so it is in the
+        // logs rather than in somebody's memory.
+        for (const w of verdict.warnings || []) console.warn(`[serverGuard] WARNING: ${w}`);
         return verdict;
       })
       .catch(() => ({ supported: false, unreachable: true }))

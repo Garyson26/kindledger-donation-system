@@ -25,6 +25,8 @@
 'use strict';
 
 const { PrismaClient } = require('@prisma/client');
+const { PrismaMariaDb } = require('@prisma/adapter-mariadb');
+const { isPrivateHost } = require('../db/require-mysql-version');
 
 // -----------------------------------------------------------------------------
 // Pooling
@@ -35,42 +37,82 @@ const { PrismaClient } = require('@prisma/client');
 // the number of API replicas, leaving headroom for the ETL, migrations and a
 // human at a mysql prompt. The compose default assumes ONE replica: scaling the
 // api service without lowering this is how a connection-limit outage happens.
-//
-// Prisma takes the pool size from the connection string, so it is appended
-// rather than passed as an option.
 const DEFAULT_CONNECTION_LIMIT = 10;
 
 // -----------------------------------------------------------------------------
-// Idle lifetime (CX1) - LONG, not short, on a host that caps connections PER HOUR
+// Every connection is made strict BY THE APPLICATION (DB1)
 // -----------------------------------------------------------------------------
-// Hostinger's shared MySQL counts every new connection against an hourly
-// allowance. A pooled connection that Prisma retires after a quiet spell is
-// re-opened by the next request, and that re-open is billed. Measured against
-// mariadb:11.8 with connection_limit=1: an idle lifetime of 3 s turned one
-// connection into two across a 5 s pause; 3600 s kept it at one. Request count
-// did not matter at all - 200 queries, sequential or 50 at a time, used one.
+// sql_mode and time_zone are session variables. The compose stack sets both on
+// the server; shared hosting lets the customer set neither, and Hostinger's
+// GLOBAL sql_mode is not strict. Prisma's own engine has no way to run SQL when
+// it opens a connection - no URL parameter does it (four tried, CX1) - so the
+// pool is the MariaDB driver's, through Prisma's adapter, and its `initSql`
+// runs on EVERY connection it opens: the first, one replacing a connection the
+// server closed at wait_timeout, and one replacing a KILLed one. All three
+// measured against a mariadb:11.8 whose GLOBAL sql_mode was '': each session
+// was strict, and an out-of-set ENUM written by hand was refused (1265) instead
+// of being stored as '' - BUG-02 by configuration, closed for every write that
+// goes through this file.
 //
-// So the setting that saves connections is the LONGEST the server tolerates:
-// just under its wait_timeout, after which the server closes the socket itself
-// and a reconnect is unavoidable. A short idle timeout is the right answer to a
-// cap on SIMULTANEOUS connections and the wrong one here (CY1-4).
+// The mode is MySQL 8.4's own default, so both servers now behave the same,
+// including the zero-date difference CY1-2 had accepted. time_zone is UTC
+// because docker-compose.yml sets it server-wide and a shared host cannot.
 //
-// No default: the right number is the host's wait_timeout, which is a fact
-// about one installation (BV2). Unset means Prisma's own default.
-function appendParam(url, name, value) {
-  if (value === undefined || value === '') return url;
-  // Do not override a value already written into the URL.
-  if (new RegExp(`[?&]${name}=`).test(url)) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}${name}=${value}`;
-}
+// NOT COVERED: anything that does not connect through this file - phpMyAdmin, a
+// hand-run mysql session, any future script with its own client. The server
+// guard warns about that at start (DB3).
+const SESSION_SQL_MODE =
+  'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+const SESSION_INIT_SQL = `SET SESSION sql_mode = '${SESSION_SQL_MODE}', time_zone = '+00:00'`;
 
-function buildDatabaseUrl() {
-  const raw = process.env.DATABASE_URL;
+/**
+ * The driver pool's configuration, read from DATABASE_URL.
+ *
+ * The URL keeps Prisma's spelling, because `prisma migrate deploy` still reads
+ * it directly: `connection_limit`, `pool_timeout`, `connect_timeout` and
+ * `sslaccept` are translated here into the driver's names.
+ *
+ * NO IDLE-LIFETIME SETTING, AND THAT IS THE CONNECTION BUDGET (CY1-4). The pool
+ * keeps its connections until the SERVER closes them, then replaces them before
+ * handing them out (measured: no failed query across a wait_timeout). That is
+ * the longest a connection can live, which is what an hourly connection cap
+ * wants. A shorter client-side lifetime would only add billed reconnects.
+ *
+ * TLS: `sslaccept=strict` verifies the certificate, `accept_invalid_certs`
+ * encrypts without verifying, and NO PARAMETER MEANS PLAINTEXT (measured). The
+ * server guard refuses plaintext to any non-private host (DB4).
+ */
+function buildPoolConfig(raw = process.env.DATABASE_URL) {
   if (!raw) return undefined;
+  const url = new URL(raw);
+  const q = url.searchParams;
+  const seconds = (name) => (q.get(name) ? Number(q.get(name)) * 1000 : undefined);
+  const sslaccept = q.get('sslaccept');
+  const ssl =
+    sslaccept === 'strict' ? { rejectUnauthorized: true }
+      : sslaccept === 'accept_invalid_certs' ? { rejectUnauthorized: false }
+        : undefined;
 
-  let url = appendParam(raw, 'connection_limit', process.env.PRISMA_CONNECTION_LIMIT || String(DEFAULT_CONNECTION_LIMIT));
-  url = appendParam(url, 'max_idle_connection_lifetime', process.env.PRISMA_MAX_IDLE_CONNECTION_LIFETIME);
-  return url;
+  const config = {
+    host: url.hostname,
+    port: Number(url.port || 3306),
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    database: decodeURIComponent(url.pathname.replace(/^\//, '')),
+    // An explicit connection_limit in the URL wins, as it always has.
+    connectionLimit: Number(q.get('connection_limit') || process.env.PRISMA_CONNECTION_LIMIT || DEFAULT_CONNECTION_LIMIT),
+    acquireTimeout: seconds('pool_timeout'),
+    connectTimeout: seconds('connect_timeout'),
+    ssl,
+    // MySQL 8's caching_sha2_password needs the server's RSA key when the
+    // connection is not encrypted. Fetching it is only safe where nobody can
+    // sit in the middle - a private network - and anywhere else TLS is
+    // required anyway, so it is never needed there.
+    allowPublicKeyRetrieval: !ssl && isPrivateHost(url.hostname),
+    initSql: SESSION_INIT_SQL,
+  };
+  for (const k of Object.keys(config)) if (config[k] === undefined) delete config[k];
+  return config;
 }
 
 // -----------------------------------------------------------------------------
@@ -86,9 +128,11 @@ function buildDatabaseUrl() {
 const GLOBAL_KEY = '__kindledger_prisma_client__';
 
 function createClient() {
-  const url = buildDatabaseUrl();
+  const pool = buildPoolConfig();
   return new PrismaClient({
-    ...(url ? { datasources: { db: { url } } } : {}),
+    // Without DATABASE_URL there is no adapter, and the first query fails as it
+    // always has: the health endpoint answers 503, the process stays up.
+    ...(pool ? { adapter: new PrismaMariaDb(pool) } : {}),
     // `warn` and `error` only. Prisma's `query` log at info level would put
     // every statement - including bound parameters - into the application log,
     // which is how SEC-09 happened the first time.
@@ -204,6 +248,7 @@ module.exports = {
   withTransaction,
   registerShutdownHandlers,
   disconnect,
-  buildDatabaseUrl,
+  buildPoolConfig,
+  SESSION_SQL_MODE,
   DEFAULT_CONNECTION_LIMIT,
 };

@@ -75,7 +75,7 @@ router.get('/', async (req, res) => {
         latencyMs: db.latencyMs,
         ...(db.ok ? {} : { error: db.error }),
         ...(server && !server.unreachable
-          ? { server: server.server, supported: server.supported, problems: server.problems }
+          ? { server: server.server, supported: server.supported, problems: server.problems, warnings: server.warnings }
           : {}),
       },
       redis: {

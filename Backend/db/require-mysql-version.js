@@ -27,7 +27,10 @@
  *                                                         operator, not
  *                                                         REGEXP_LIKE(), which
  *                                                         MariaDB lacks)
- *   strict sql_mode              server      server      @@SESSION + @@GLOBAL
+ *   strict sql_mode, SESSION     the app     the app     @@SESSION (config/prisma
+ *                                                         sets it on connect: DB1)
+ *   strict sql_mode, GLOBAL      server      server      WARNING only (DB1)
+ *   TLS to a non-private host    the URL     the URL     Ssl_cipher (DB4)
  *
  *   MySQL < 8.0.16 - CHECK constraint syntax PARSES AND IS THEN SILENTLY
  *   IGNORED. The schema would apply without a single error and without any of
@@ -74,7 +77,7 @@ const MARIADB_MIN = { major: 11, minor: 4, patch: 5 };
 const MARIADB_MIN_STR = `${MARIADB_MIN.major}.${MARIADB_MIN.minor}.${MARIADB_MIN.patch}`;
 
 const REQUIREMENT =
-  `KindLedger requires MySQL ${MIN_STR}+ or MariaDB ${MARIADB_MIN_STR}+, with a strict sql_mode.`;
+  `KindLedger requires MySQL ${MIN_STR}+ or MariaDB ${MARIADB_MIN_STR}+, a strict sql_mode on its own connections, and TLS to any non-private host.`;
 
 /** Parses the leading x.y.z out of a MySQL version string. */
 function parseVersion(s) {
@@ -180,6 +183,25 @@ function looksLikeConnectionFailure(message) {
   );
 }
 
+/**
+ * Is this host on a network where plaintext and RSA key retrieval are tolerable?
+ * Loopback, RFC 1918, IPv6 loopback and unique-local, and SINGLE-LABEL names
+ * (`db`, `mysql`: a compose or CI service). Anything with a dot is treated as
+ * public, even if it happens to resolve privately - fail closed, because the
+ * cost of a wrong "private" is a database password on the open internet.
+ */
+function isPrivateHost(host) {
+  const h = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h === 'localhost' || h === '::1' || /^f[cd][0-9a-f]{2}:/.test(h)) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  return !h.includes('.') && !h.includes(':');
+}
+
 // -----------------------------------------------------------------------------
 // Inspection - SELECTs only, so the application can run it on every cold start
 // -----------------------------------------------------------------------------
@@ -219,17 +241,21 @@ function evaluateCollationProbe(row) {
 }
 
 /**
- * Inspect the server through `query(sql) => Promise<rows>`. Two round trips on
- * one connection. Throws only if the server cannot be queried at all; every
- * other outcome is a verdict.
+ * Inspect the server through `query(sql) => Promise<rows>`, on the connection
+ * the APPLICATION uses - so SESSION means the app's own session. Three round
+ * trips. Throws only if the server cannot be queried at all; every other
+ * outcome is a verdict.
  *
- * @returns {Promise<{supported: boolean, server: string, problems: string[]}>}
+ * `host` is the DATABASE_URL host; without it the TLS rule is not applied.
+ *
+ * @returns {Promise<{supported: boolean, server: string, problems: string[], warnings: string[]}>}
  */
-async function inspectServer(query) {
+async function inspectServer(query, { host } = {}) {
   const meta = (await query(METADATA_SQL))[0];
   const verdict = classifyServer(meta.version, meta.comment);
   const server = `${verdict.flavour === 'mariadb' ? 'MariaDB' : 'MySQL'} ${verdict.version}`;
   const problems = [];
+  const warnings = [];
 
   if (verdict.kind === 'unparseable') {
     problems.push(`unrecognised version string "${verdict.version}"; cannot confirm CHECK support, so refusing rather than guessing`);
@@ -241,8 +267,33 @@ async function inspectServer(query) {
     );
   }
 
-  for (const [scope, mode] of [['SESSION', meta.session_mode], ['GLOBAL', meta.global_mode]]) {
-    if (!hasStrictMode(mode)) problems.push(`${scope} sql_mode is not strict ("${mode || ''}")`);
+  // SESSION is the application's own connection, made strict by config/prisma
+  // on connect. If it is not strict, that mechanism failed, and every write the
+  // application makes is exposed: refuse.
+  if (!hasStrictMode(meta.session_mode)) {
+    problems.push(`SESSION sql_mode is not strict ("${meta.session_mode || ''}")`);
+  }
+  // GLOBAL is everyone else's. ACCEPTED RISK (DB1, Gary, 3 Nov 2026): on shared
+  // hosting nobody but the provider can change it, so it is a warning that
+  // names what is unenforced, not a refusal.
+  if (!hasStrictMode(meta.global_mode)) {
+    warnings.push(
+      `GLOBAL sql_mode is not strict ("${meta.global_mode || ''}"). The application's own connections are strict; ` +
+        'anything else is NOT - phpMyAdmin, a hand-run SQL session, any script with its own client. There, an ' +
+        "out-of-set ENUM is stored as '' (a donation in no report), long text is cut and numbers are clipped."
+    );
+  }
+
+  // DB4. have_ssl=YES and require_secure_transport=0 on Hostinger: TLS works and
+  // nothing on the server enforces it. So the application does.
+  if (host !== undefined && !isPrivateHost(host)) {
+    const cipher = ((await query("SHOW SESSION STATUS LIKE 'Ssl_cipher'"))[0] || {}).Value;
+    if (!cipher) {
+      problems.push(
+        `the connection to ${host} is NOT ENCRYPTED. Add ?sslaccept=strict to DATABASE_URL ` +
+          '(or accept_invalid_certs if the certificate cannot be verified). Without it the password and every donor row cross the network readable'
+      );
+    }
   }
 
   if (Number(meta.collations) !== 2) {
@@ -253,7 +304,7 @@ async function inspectServer(query) {
     }
   }
 
-  return { supported: problems.length === 0, server, problems };
+  return { supported: problems.length === 0, server, problems, warnings };
 }
 
 module.exports = {
@@ -263,6 +314,7 @@ module.exports = {
   hasStrictMode,
   looksLikeConnectionFailure,
   inspectServer,
+  isPrivateHost,
   evaluateCollationProbe,
   COLLATION_EXPECTATIONS,
   MIN_STR,
@@ -302,12 +354,15 @@ function fail(detail, remedy) {
  * the CHECK probe's throwaway table, which it drops.
  */
 async function main() {
-  const { PrismaClient } = require('@prisma/client');
-  const prisma = new PrismaClient();
+  // The APPLICATION's client, not a bare PrismaClient: SESSION sql_mode is only
+  // meaningful on the connection the application writes through (DB1).
+  const { getPrisma, buildPoolConfig } = require('../config/prisma');
+  const prisma = getPrisma();
+  const host = (buildPoolConfig() || {}).host;
 
   let result;
   try {
-    result = await inspectServer((sql) => prisma.$queryRawUnsafe(sql));
+    result = await inspectServer((sql) => prisma.$queryRawUnsafe(sql), { host });
   } catch (err) {
     await prisma.$disconnect().catch(() => {});
     if (looksLikeConnectionFailure(err.message)) {
@@ -345,11 +400,9 @@ async function main() {
       '  - 0900 collations: the email uniqueness rule depends on',
       '    utf8mb4_0900_as_ci being case-insensitive and accent-SENSITIVE. Any',
       '    other behaviour merges distinct donor accounts or permits duplicates.',
-      '  - strict sql_mode: without it an out-of-set ENUM is stored as the empty',
-      '    string, too-long text is silently cut and numbers are clipped.',
-      '    Fix it on the server (my.cnf / provider console):',
-      '        sql_mode = STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION',
-      '    On shared hosting only the provider can change it.',
+      '  - strict sql_mode on the SESSION: config/prisma.js sets it on every',
+      '    connection. If it did not take, every write is exposed.',
+      '  - TLS: a non-private host without ?sslaccept= is reached in plaintext.',
       '',
       'Use MySQL 8.4 LTS (the bundled docker-compose.yml) or MariaDB 11.4.5+.',
     ]);
@@ -387,7 +440,8 @@ async function main() {
     await prisma.$disconnect().catch(() => {});
   }
 
-  console.log(`  Database server OK: ${result.server} (CHECK constraints enforced, strict sql_mode, 0900 collations behave)`);
+  for (const w of result.warnings) console.warn(`  WARNING: ${w}`);
+  console.log(`  Database server OK: ${result.server} (CHECK constraints enforced, strict session, 0900 collations behave)`);
 }
 
 // Only connect and exit when run as a script. Required as a module (by

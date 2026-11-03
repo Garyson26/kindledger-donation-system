@@ -190,10 +190,60 @@ test('inspectServer: MySQL 8.4 with its default sql_mode is supported', async ()
   assert.equal(r.supported, true);
 });
 
-test('inspectServer: a non-strict GLOBAL sql_mode refuses even when the session is strict', async () => {
+test('inspectServer: a non-strict GLOBAL is a WARNING when the session is strict (DB1, accepted risk)', async () => {
+  // CHANGED IN DB1. This was a refusal. config/prisma.js now makes every
+  // application connection strict on connect, and Gary accepted the server's
+  // GLOBAL default as a risk on 3 Nov 2026 - so it is named, not refused.
   const r = await inspectServer(fakeServer({ global: 'NO_ENGINE_SUBSTITUTION' }).query);
+  assert.equal(r.supported, true);
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /GLOBAL sql_mode is not strict/);
+  assert.match(r.warnings[0], /phpMyAdmin/, 'the warning must say what is NOT covered');
+});
+
+test('inspectServer: a non-strict SESSION still refuses - the application would write unprotected', async () => {
+  const r = await inspectServer(fakeServer({ session: '', global: '' }).query);
   assert.equal(r.supported, false);
-  assert.match(r.problems.join('\n'), /GLOBAL sql_mode is not strict/);
+  assert.match(r.problems.join('\n'), /SESSION sql_mode is not strict/);
+});
+
+// =============================================================================
+// DB4 - TLS to a non-private host. have_ssl=YES, require_secure_transport=0 on
+// Hostinger: TLS works and the server does not insist, so the application does.
+// =============================================================================
+function withCipher(cipher) {
+  const base = fakeServer();
+  return async (sql) => (sql.startsWith('SHOW SESSION STATUS') ? [{ Variable_name: 'Ssl_cipher', Value: cipher }] : base.query(sql));
+}
+
+test('inspectServer: a PLAINTEXT connection to a public host refuses', async () => {
+  const r = await inspectServer(withCipher(''), { host: 'srv1517.hstgr.io' });
+  assert.equal(r.supported, false);
+  assert.match(r.problems.join('\n'), /NOT ENCRYPTED/);
+});
+
+test('inspectServer: an encrypted connection to a public host passes', async () => {
+  const r = await inspectServer(withCipher('TLS_AES_256_GCM_SHA384'), { host: 'srv1517.hstgr.io' });
+  assert.equal(r.supported, true);
+});
+
+test('inspectServer: plaintext to a private host is allowed (compose, CI)', async () => {
+  for (const host of ['127.0.0.1', 'localhost', 'db', '10.0.0.4']) {
+    assert.equal((await inspectServer(withCipher(''), { host })).supported, true, host);
+  }
+});
+
+const { isPrivateHost } = require('../db/require-mysql-version');
+
+test('isPrivateHost: loopback, RFC 1918, IPv6 local and single-label names only', () => {
+  for (const h of ['localhost', '127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.1', '192.168.1.9', '::1', '[::1]', 'fd12:3456::1', 'db', 'mysql']) {
+    assert.equal(isPrivateHost(h), true, h);
+  }
+  // A dotted name is public even when it resolves to loopback: fail closed.
+  for (const h of ['srv1517.hstgr.io', '8.8.8.8', '172.32.0.1', '172.15.0.1', 'localtest.me', '', undefined]) {
+    assert.equal(isPrivateHost(h), false, String(h));
+  }
 });
 
 test('inspectServer: missing 0900 collations refuse, and the behaviour probe is not run', async () => {
@@ -275,9 +325,9 @@ test('gate: a supported server passes through', async (t) => {
 });
 
 // =============================================================================
-// CX1 - connection budget: the URL parameters the pool is built from
+// DB1 - the pool every application connection comes from
 // =============================================================================
-const { buildDatabaseUrl } = require('../config/prisma');
+const { buildPoolConfig, SESSION_SQL_MODE } = require('../config/prisma');
 
 function withEnv(vars, fn) {
   const saved = {};
@@ -296,33 +346,76 @@ function withEnv(vars, fn) {
   }
 }
 
-test('buildDatabaseUrl appends connection_limit and, when set, max_idle_connection_lifetime', () => {
-  const url = withEnv(
-    {
-      DATABASE_URL: 'mysql://u:p@h:3306/d?sslaccept=strict',
-      PRISMA_CONNECTION_LIMIT: '1',
-      PRISMA_MAX_IDLE_CONNECTION_LIFETIME: '50',
-    },
-    buildDatabaseUrl
-  );
-  assert.equal(url, 'mysql://u:p@h:3306/d?sslaccept=strict&connection_limit=1&max_idle_connection_lifetime=50');
+test('buildPoolConfig: every connection runs initSql that makes it strict and UTC', () => {
+  const c = buildPoolConfig('mysql://u:p@db:3306/kl');
+  assert.match(c.initSql, /SET SESSION sql_mode = '/);
+  assert.ok(SESSION_SQL_MODE.split(',').includes('STRICT_TRANS_TABLES'));
+  assert.ok(SESSION_SQL_MODE.split(',').includes('NO_ZERO_DATE'), 'closes the zero-date difference too');
+  assert.match(c.initSql, /time_zone = '\+00:00'/);
 });
 
-test('buildDatabaseUrl leaves the idle lifetime to Prisma when unset, and never overrides the URL', () => {
-  const unset = { PRISMA_CONNECTION_LIMIT: undefined, PRISMA_MAX_IDLE_CONNECTION_LIFETIME: undefined };
-  assert.equal(
-    withEnv({ DATABASE_URL: 'mysql://u:p@h/d', ...unset }, buildDatabaseUrl),
-    'mysql://u:p@h/d?connection_limit=10'
+test('buildPoolConfig: translates the Prisma URL parameters, and decodes credentials', () => {
+  const c = withEnv({ PRISMA_CONNECTION_LIMIT: '1' }, () =>
+    buildPoolConfig('mysql://u%40x:p%23w@srv1517.hstgr.io:3307/u1_kl?sslaccept=strict&pool_timeout=10&connect_timeout=5')
   );
-  assert.equal(
-    withEnv(
-      {
-        DATABASE_URL: 'mysql://u:p@h/d?connection_limit=3&max_idle_connection_lifetime=9',
-        PRISMA_CONNECTION_LIMIT: '1',
-        PRISMA_MAX_IDLE_CONNECTION_LIFETIME: '50',
-      },
-      buildDatabaseUrl
-    ),
-    'mysql://u:p@h/d?connection_limit=3&max_idle_connection_lifetime=9'
-  );
+  assert.equal(c.host, 'srv1517.hstgr.io');
+  assert.equal(c.port, 3307);
+  assert.equal(c.user, 'u@x');
+  assert.equal(c.password, 'p#w');
+  assert.equal(c.database, 'u1_kl');
+  assert.equal(c.connectionLimit, 1);
+  assert.deepEqual(c.ssl, { rejectUnauthorized: true });
+  assert.equal(c.acquireTimeout, 10000);
+  assert.equal(c.connectTimeout, 5000);
+  assert.equal(c.allowPublicKeyRetrieval, false, 'never fetch the RSA key from a public host');
+});
+
+test('buildPoolConfig: accept_invalid_certs encrypts without verifying; no parameter is NO TLS', () => {
+  assert.deepEqual(buildPoolConfig('mysql://u:p@h.example/d?sslaccept=accept_invalid_certs').ssl, { rejectUnauthorized: false });
+  assert.equal(buildPoolConfig('mysql://u:p@h.example/d').ssl, undefined);
+});
+
+test('buildPoolConfig: an explicit connection_limit in the URL wins; the default is 10', () => {
+  const unset = { PRISMA_CONNECTION_LIMIT: undefined };
+  assert.equal(withEnv(unset, () => buildPoolConfig('mysql://u:p@db/d')).connectionLimit, 10);
+  assert.equal(withEnv({ PRISMA_CONNECTION_LIMIT: '1' }, () => buildPoolConfig('mysql://u:p@db/d?connection_limit=3')).connectionLimit, 3);
+  assert.equal(withEnv({ PRISMA_CONNECTION_LIMIT: '1' }, () => buildPoolConfig('mysql://u:p@db/d')).allowPublicKeyRetrieval, true);
+});
+
+test('the adapter is the same version as the client - they are released together and must move together', () => {
+  // Renovate can bump @prisma/client on its own. A client and adapter from
+  // different releases is an unsupported pair, so the drift fails here.
+  // Read from disk: the adapter's `exports` map does not expose package.json.
+  const path = require('node:path');
+  const fs = require('node:fs');
+  const versionOf = (pkg) =>
+    JSON.parse(fs.readFileSync(path.join(path.dirname(require.resolve(pkg)), '..', 'package.json'), 'utf8')).version;
+  assert.equal(versionOf('@prisma/adapter-mariadb'), require('@prisma/client/package.json').version);
+});
+
+// =============================================================================
+// DB3 - the strict-session guarantee covers exactly the writers that use
+// config/prisma.js. This pins that set: a new script that builds its own
+// PrismaClient would write through a NON-strict session on Hostinger, and
+// nothing else would notice.
+// =============================================================================
+test('DB3: no source file outside config/prisma.js builds its own PrismaClient (except the read-only drift gate)', () => {
+  const path = require('node:path');
+  const fs = require('node:fs');
+  const root = path.join(__dirname, '..');
+  const READ_ONLY = new Set([path.join('db', 'check-drift.js')]);
+  const found = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'test', '.prisma'].includes(e.name)) continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js') && /new PrismaClient\s*\(/.test(fs.readFileSync(p, 'utf8'))) {
+        found.push(path.relative(root, p));
+      }
+    }
+  };
+  walk(root);
+  const unexpected = found.filter((f) => f !== path.join('config', 'prisma.js') && !READ_ONLY.has(f));
+  assert.deepEqual(unexpected, [], `these build their own client and bypass the strict session: ${unexpected.join(', ')}`);
 });
