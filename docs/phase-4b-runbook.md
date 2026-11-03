@@ -173,7 +173,7 @@ old frontend or backend.
 
 **One consequence, recorded:** the plan was to disconnect *after* PR 1, so the
 hotfix's merge could try a production deploy. Disconnecting first closes that
-path. **Merging #16 deploys nothing.** SEC-03 is closed in production only by
+path. **Merging #24 deploys nothing.** SEC-03 is closed in production only by
 pausing the old backend (§3.4, or sooner) or by a manual deploy of the hotfix.
 It is unreachable today only because production's MongoDB login fails
 (remediation map, CI1). That is an availability failure, not a fix.

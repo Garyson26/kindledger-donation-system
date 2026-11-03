@@ -5624,7 +5624,7 @@ already say 4c is cleanup after 4b. Nothing else stated the order. The same
 pass caught runbook §7a. It still said "the stack refuses to start" without
 `PAYU_BASE_URL`, which is the compose-only claim CB2 corrected. Fixed.
 
-## CI-01 (HIGH, for what it hides) - NO MYSQL JOB HAS EVER STARTED IN CI
+## CI-01 (HIGH, for what it hid) - NO MYSQL JOB HAD EVER STARTED IN CI. FIXED (CM1)
 
 Found when the stack was pushed on 3 Nov and every branch went red.
 
@@ -5638,18 +5638,32 @@ arrived with Phase 1a (`4142de7`, PR #11). **The Schema workflow has failed on
 `app-tests.yml` twice (the data-layer job from AA1, and the job that grew a
 MySQL service in package 3.1).
 
-**What it means:** every "N/N green" in this map and in the commit history is
+**What it meant:** until the fix, every "N/N green" in this map and in the commit history was
 a local or in-container run. That evidence is real, but **CI has never
 independently confirmed any MySQL suite.** The commits said "CI status
 UNCONFIRMED" at the time, and this is the answer. Only the MongoDB-only job
 (PayU callbacks and reset controls) has ever passed in CI, on A and B.
 
-**Probable fix, not made:** drop the three flags. MySQL 8.4 already defaults
-to `utf8mb4` and `utf8mb4_0900_ai_ci`, the container clock is UTC, and no
-suite reads the server charset, collation or time zone (grep). It touches
-`schema.yml` (on `main`) and two blocks in `app-tests.yml` (added in B and in
-C), so where it lands is Gary's call: at A, re-merged up the stack, or as its
-own PR after post-F.
+**FIXED (CM1), at the earliest point each block exists.** The service
+`options:` keep only the health check. A "Configure MySQL as docker-compose.yml
+does" step applies the three settings with `SET PERSIST` once the server is
+up, reads them back with the database's defaults, and fails unless all five
+match compose. The `schema.yml` fix is in PR 1 (#24), so every PR inherits it.
+The two `app-tests.yml` blocks are fixed in the PRs that add them: B (#28) for
+the data-layer job, C (#29) for the PayU job. A merge cannot rewrite lines a
+branch adds itself. The secrets check moved to its own job with no services in
+E (#31), where the test first exists.
+
+**Proved in CI, not asserted.** Pass counts from the job logs:
+
+| Where | Suite | CI result |
+|---|---|---|
+| PR 1 (#24) | server-guard, schema, drift gate (twice) | 14/14, 30/30, clean |
+| B (#28) | data-layer (with the Redis store assertion) | 26/26 |
+| B (#28) | payment-callbacks, auth-reset, trust-proxy | 17/17, 6/6, 4/4 |
+
+Every count above reports 0 skipped and 0 todo. The PR descriptions carry
+the counts for every branch.
 
 **Found beside it, and fixed in post-F:** the ENV-02 step "The stack REFUSES
 to start without PAYU_BASE_URL" ran `docker compose config` with nothing set.
@@ -5668,9 +5682,9 @@ checklist §0 and §1 carry the consequences.
 ### a. `for_ocean_security_review.md` is on `main`'s front page, not just in history
 
 Added at `bacd6d9` (24 May, "CloudPeak update"), removed in package 3.0
-(`6cfec20`). That removal reaches `main` only when PR C (#20) merges. **Until
-then the file sits at the root of `origin/main` and of 17 other public
-branches**, including the heads of #16, #17, #13, #18 and #19. ADR-030 called it
+(`6cfec20`), and from `main` itself by PR 1 (#24, CH1). **Until #24 merges
+the file sits at the root of `origin/main` and of 17 other public
+branches**, including the heads of the first five PRs as first opened. ADR-030 called it
 "never public", which assumed a private repository and no longer holds. It
 remains in history whatever happens to `main`.
 
@@ -5681,13 +5695,13 @@ deployed:
 
 | Its ID | Now | In production (`58bdadf`) | Fixed where |
 |---|---|---|---|
-| BE-HIGH-03 | SEC-04: rate limiting non-functional | **Open.** In-memory default limiter, per instance on serverless | D (#21), package 3.2 |
-| BE-HIGH-06 | SEC-08: account enumeration on four endpoints | **Open** | D (#21) and E (#22) |
-| BE-MED-09 | SEC-16 / BUG-02: admin status writes unvalidated | **Open** | D (#21) |
+| BE-HIGH-03 | SEC-04: rate limiting non-functional | **Open.** In-memory default limiter, per instance on serverless | D (#30), package 3.2 |
+| BE-HIGH-06 | SEC-08: account enumeration on four endpoints | **Open** | D (#30) and E (#31) |
+| BE-MED-09 | SEC-16 / BUG-02: admin status writes unvalidated | **Open** | D (#30) |
 | BE-HIGH-07 | SEC-15: JWT in `localStorage` | **Open, everywhere.** Not fixed on the stack either | Not scheduled |
 | BE-MED-07 | Seeder sets `Password@123` for 1000 users | **Open in the legacy seeder** (see c) | Seeder deleted in 4c |
-| BE-MED-11 | SEC-12: no lockfiles to audit | **Open** | B (#19) |
-| LOW-02 | SEC-17: `Frontend/.env` tracked | **Open.** Post-F empties it; still tracked | Post-F (#15), partially |
+| BE-MED-11 | SEC-12: no lockfiles to audit | **Open** | B (#28) |
+| LOW-02 | SEC-17: `Frontend/.env` tracked | **Open.** Post-F empties it; still tracked | Post-F (#33), partially |
 | LOW-03 to LOW-05 | Duplicate files, dead PDF generators, `console.log` sprawl | Open (hygiene) | Not scheduled |
 
 **Mitigating, and recorded, not leaned on:** production's backend answers
@@ -5764,7 +5778,7 @@ That is why the first reading looked like a contradiction of the map.
 - **Production is still down, and SEC-03 is still unreachable**, now because of
   the credential rejection again. That is an availability failure, not a fix.
   **If anyone restores production's MongoDB credentials, the SEC-03 bypass goes
-  live with it.** Git is disconnected (CI2), so merging #16 will not deploy the
+  live with it.** Git is disconnected (CI2), so merging #24 will not deploy the
   fix.
 - **4b depends on a free-tier cluster that pauses itself and has no backups.**
   Runbook §1.8 (keep it awake, export early), the RUNNING check before §3, and
@@ -5785,7 +5799,7 @@ Recorded consequence: the hotfix's merge will not deploy either (runbook
 **2. `main` publishes a GPL v3 `LICENSE` today.** It sits beside ISC in
 `Backend/package.json` (ADR-029). ADR-061's reassurance, that the GPL commit
 `4f3b7ec` was made while private so no public grant exists, does not survive a
-public repository. Apache-2.0 arrives in E (#22). **What the published GPL text
+public repository. Apache-2.0 arrives in E (#31). **What the published GPL text
 means for the versions under it is a licensing question for Gary.** Recorded,
 not answered.
 
@@ -5832,7 +5846,7 @@ way.** It needs either:
   the browser only ever talks to one origin.
 
 **That decision is being made now, for a different reason:** the CSP hostname
-that keeps post-F (#15) a draft (CB2-1). **Choose the new hostnames with 4e in
+that keeps post-F (#33) a draft (CB2-1). **Choose the new hostnames with 4e in
 mind, or 4e starts by undoing them.**
 
 **Why not inside 4b:** rotating `JWT_SECRET` at the cutover already signs

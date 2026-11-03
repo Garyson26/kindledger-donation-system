@@ -3340,7 +3340,7 @@ revoked. This is a first choice, not a relicensing.
 **The paragraph above assumed the repository stayed private until Apache-2.0
 landed. It did not.** The repository is public (CG1), and **`main` publishes
 the GPL v3 text in `LICENSE` today.** Apache-2.0 reaches `main` only when PR E
-(#22) merges. **Anyone who clones `main` before then receives a tree whose
+(#31) merges. **Anyone who clones `main` before then receives a tree whose
 `LICENSE` file is GPL v3.**
 
 **This is not a legal opinion.** It records what the repository shows, so Gary
@@ -3356,7 +3356,7 @@ can take advice if he wants to.
 | `README.md` | *"Undecided — do not rely on the current state of the repository."* It then says that LICENSE contains GPL v3 and that the inconsistency is known |
 
 **What the Apache-2.0 switch does, as a matter of what the repository will
-contain:** from the merge of #22, `main`'s tree carries Apache-2.0 in
+contain:** from the merge of #31, `main`'s tree carries Apache-2.0 in
 `LICENSE`, `NOTICE`, both `package.json` files and the README. **It changes
 what later clones receive. It cannot change what an earlier clone received,
 or the file that came with it.**

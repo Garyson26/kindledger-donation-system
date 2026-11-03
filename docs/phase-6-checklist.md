@@ -25,7 +25,7 @@ What that changes:
 | | Before | Now |
 |---|---|---|
 | **Open findings in the docs** | Redact or close before publishing | **Already published.** `docs/remediation-map.md` lists open findings with file and line, readable by anyone. **Decision for Gary: redact file:line for everything still open, or accept the exposure.** Redacting now limits what the NEXT reader sees. It cannot recall what earlier readers saw, and history keeps the unredacted text either way |
-| **Secrets** | A Phase 6 gate (`test:no-secrets` plus a human read of the tracked list) | **A per-commit check.** Every push is public the moment it lands, so a commit `test:no-secrets` would fail must never be pushed. Fixing it afterwards still leaves it public (see §1). **Today that check is NOT running in CI:** it is a step inside the "PayU callbacks and reset controls" job, which has a MySQL service and so never starts (CI-01). **It needs no services. Move it to its own job with none**, so it runs on every push whatever the database jobs do. Until then, run it locally before every push |
+| **Secrets** | A Phase 6 gate (`test:no-secrets` plus a human read of the tracked list) | **A per-commit check.** Every push is public the moment it lands, so a commit `test:no-secrets` would fail must never be pushed. Fixing it afterwards still leaves it public (see §1). **It runs in CI on every push, in its own job with no services** (`no-secrets` in `app-tests.yml`, from PR E onwards, where the test first exists). It used to be a step inside a job that could not start (CI-01), so before that it had never run. Nothing else's failure can stop it starting. Still run it locally before pushing anything that touches configuration |
 | **History** | Scrubbed before publication | **Not scrubbed, and not going to be** (§1) |
 | **Exploit-level material** | Removed before publication | `for_ocean_security_review.md` is **at the root of `main` today** and in public history. See §1.1 |
 
@@ -40,7 +40,7 @@ September, so it has changed visibility at least twice.
 > ### THERE WILL BE NO HISTORY SCRUB. ROTATION IS THE REMEDIATION.
 >
 > **Decided by Gary, 3 Nov 2026.** Rewriting history would break all ten
-> stacked pull requests (#13 and #15 to #23) and every existing clone. And it
+> stacked pull requests (#24 to #33) and every existing clone. And it
 > would not undo the exposure: it changes what a future clone receives, not
 > what forks, caches and crawlers already hold.
 >
@@ -54,8 +54,8 @@ September, so it has changed visibility at least twice.
 | **The JWT fallback secret** (30 characters) | `Backend/config/jwt.js` from `e11a09e` (17 Jan) to `bacd6d9` (24 May). Both are ancestors of `main` | **Permanently public.** Production does **not** use it, **confirmed by behaviour, not inferred**: production's `app.js` loads `routes/auth.js`, and so `config/jwt.js` with its 32-character guard, **before** it connects to MongoDB. Its runtime logs reach the MongoDB connection, so the guard passed and the value is at least 32 characters. Vercel also records the old backend's `JWT_SECRET` as created with the project on 22 Jan and never edited. The value was not read | **Rotate anyway:** the new backend gets a freshly generated `JWT_SECRET` (env doc §6). A value that has never been anywhere cannot match anything in history |
 | A 43-character test fallback | `Backend/test/branding.test.js` (from `3db866a`, 22 Sep) | Public, and **long enough to pass the guard**. It is a test fixture, and production's value predates it by eight months | Never use a value found in this repository as a real secret. Generating fresh (env doc §6) covers it |
 | **`Password@123`** | `Backend/scripts/seedDatabase.js` (the legacy MongoDB seeder) at `main` **and at every stack tip**, plus its README and history | **No application code uses it.** The seeder a current installation runs (`npm run db:seed`, MySQL) generates a random password every run. The legacy seeder refuses to run unless `NODE_ENV` is not production **and** `ALLOW_SEED=true`. 4c deletes it. **The live risk is in data, not code:** if that seeder was ever run against production MongoDB, the ETL copies those hashes into MySQL unchanged | 4b runbook §2.2 checks every production hash against it **before** the ETL |
-| **`for_ocean_security_review.md`** | **At the root of `main` and of 17 other public branches today.** Added at `bacd6d9` (24 May), removed in package 3.0 (`6cfec20`), which reaches `main` only when PR C (#20) merges | **Not just history: it is on the repository's front page.** ADR-030's "never public" assumed a private repository and no longer holds. Open findings it describes are listed in the remediation map under CG1 | Leaves `main`'s tree when #20 merges, or sooner if it is deleted in an earlier PR. **It stays in history permanently**, so the remediation is closing the findings, not hiding the document |
-| **`Frontend/.env`** | Tracked | Held only the public backend hostname. Post-F (#15) empties the value; the file stays tracked | Nothing to rotate |
+| **`for_ocean_security_review.md`** | **At the root of `main` and of 17 other public branches today.** Added at `bacd6d9` (24 May), removed from `main` by PR 1 (#24), the first to merge (CH1), and from the migration stack by package 3.0 (`6cfec20`) | **Not just history: it is on the repository's front page.** ADR-030's "never public" assumed a private repository and no longer holds. Open findings it describes are listed in the remediation map under CG1 | Leaves `main`'s tree when #24 merges. **It stays in history permanently**, so the remediation is closing the findings, not hiding the document |
+| **`Frontend/.env`** | Tracked | Held only the public backend hostname. Post-F (#33) empties the value; the file stays tracked | Nothing to rotate |
 | **`origin/setup-12`, `origin/setup-13`** | Remote branches, unrelated history | **A different project ("Sentinel"), 12 of 13 commits by Viraj**, carrying `SECRET_KEY=${SECRET_KEY:-change-me-in-production}`. **Public now along with everything else.** If that value was ever used for real in Sentinel, it is Viraj's to rotate | Tell Viraj. Deleting the branches is **still Gary's and Viraj's decision**. It would stop future clones carrying them, not undo the exposure |
 
 ### 1.2 What used to be reassurance, and no longer is
@@ -64,7 +64,7 @@ This section used to say the GPL commit `4f3b7ec` was made **while the
 repository was private, so no public GPL grant exists** (ADR-061). **That no
 longer holds.** `main` publishes `LICENSE` with the **GNU GPL v3 text** today,
 beside `"license": "ISC"` in `Backend/package.json`: ADR-029's contradiction,
-now public. Apache-2.0 arrives in PR E (#22). **Anyone cloning `main` today
+now public. Apache-2.0 arrives in PR E (#31). **Anyone cloning `main` today
 receives GPL v3 text.** What that does and does not mean, as questions for an
 adviser rather than answers, is in ADR-061's CH4 amendment.
 

@@ -436,7 +436,7 @@ one, because each costs something:**
 | Option | Closes the window | Cost |
 |---|---|---|
 | Pause the old **backend** project now | Yes, immediately | The site's API is down until the end of 4b |
-| Deploy the hotfix to the old project once, manually | Only if provisioning works. The last two attempts failed with "Resource provisioning failed" | May not work. ADR-028's authorship block may apply. **Now the only deploy route:** Git is disconnected (CI2), so merging #16 deploys nothing |
+| Deploy the hotfix to the old project once, manually | Only if provisioning works. The last two attempts failed with "Resource provisioning failed" | May not work. ADR-028's authorship block may apply. **Now the only deploy route:** Git is disconnected (CI2), so merging #24 deploys nothing |
 | Accept the window | No | The bypass stays live until the 4b freeze |
 
 The first deploy of the new project gets the same rule: **confirm `READY` and
