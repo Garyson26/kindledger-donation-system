@@ -2886,3 +2886,18 @@ A constraint that goes away because its context was deleted is easy to remember
 as a constraint that was dealt with. The next person to connect a Vercel project
 to this repository should find this, and not an absence.
 
+### Amendment (CD1): the old projects are kept, not deleted
+
+The decision above stands. Two of its premises do not:
+
+- **"The project it applied to is going away."** It is not. It is kept and
+  paused at the cutover (4b runbook §3.4, §6a.4). ADR-028 is still "not
+  currently reachable", but only on the new projects. **The old projects can
+  still hit it.**
+- **"Nothing deploys on merge."** The old projects are still Git-connected and
+  still try to deploy every push to `main`. They do not deploy because
+  provisioning fails, not because anything was configured to stop them. That
+  is an accident, not a control. **Until the old projects are disconnected
+  from Git (runbook §1.7), the risk this ADR dropped, `main` auto-deploying
+  MySQL code onto a MongoDB production, is held off only by that failure.**
+

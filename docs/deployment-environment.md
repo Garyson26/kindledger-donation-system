@@ -4,8 +4,14 @@
 
 Every row below was taken from the code (`process.env.*` and `import.meta.env.*`
 across `Backend/` and `Frontend/src`, test files excluded), and then checked
-against the variable NAMES on the two projects being deleted. Their values were
-not read.
+against the variable NAMES on the two old projects. Their values were not read.
+
+**The old projects are kept, not deleted (CD1).** They stay in the team, paused
+at the cutover (4b runbook §3.4 and §6a). So values marked COPY below are copied
+from the old backend project, not recovered from source systems. Every COPY
+value is stored there as a readable `encrypted` variable, not `sensitive`, so the
+dashboard can reveal it. **Start with §6: it says what to do with each of the
+36 names.**
 
 > **A new project starts with nothing, and the Vercel CLI cannot tell you what
 > is missing.** Most of these variables, if absent, do not stop the deploy. They
@@ -53,19 +59,24 @@ That is §7a of the 4b runbook and §5.3 of the Phase 6 checklist.
 | Required | **Yes** |
 | Format | `https://<new-backend-host>`, no trailing slash, no `/api` |
 | Source | The new backend project's production domain |
-| **If missing** | **FAILS SILENT, possibly dangerously.** Vite falls back to the TRACKED `Frontend/.env`, which still says `https://for-ocean-foudation-donation-system-one.vercel.app` |
+| **If missing** | **FAILS SILENT until the old backend is paused, then FAILS LOUD.** Vite falls back to the TRACKED `Frontend/.env`, which still says `https://for-ocean-foudation-donation-system-one.vercel.app` |
+| **If copied** | **Same as missing.** The old frontend's value names the old backend. Do not copy it (§6) |
 
-Once the old backend project is deleted, nothing serves that hostname, and
-**`*.vercel.app` names freed by a deleted project may be claimable by another
-Vercel account.** I have not verified Vercel's reuse policy. If the name can be
-claimed, a frontend built without `VITE_API_URL` would send donors' login
-passwords and OTPs to whoever claimed it. **The frontend's CSP explicitly allows
-that hostname too** (§3.1), so the browser would not block it.
+**The hostname-claiming risk is gone (CD1).** It depended on the old backend
+project being deleted and its `*.vercel.app` name released. The project is
+kept, so the name stays with it.
+
+**What is left is a misrouting, not a hijack.** While the old backend is still
+serving, a new frontend built with the old host works. Donors sign in,
+donations go through, and every request lands on the **old** backend: MongoDB,
+and the SEC-03 bypass. Nothing on screen shows it. Once the old backend is
+paused, the same build fails at the first request. **The frontend's CSP allows
+that hostname too** (§3.1), so the browser does not block it either.
 
 `VITE_API_URL` is read **at build time**. Changing it requires a redeploy.
 
-**This should not rely on the variable being remembered.** Remove the hostname
-from `Frontend/.env` and from the CSP before step 5 (see §3).
+**Still remove the hostname from `Frontend/.env` and from the CSP before step 5**
+(§3). It is the wrong value for every future build, and the fix costs one line.
 
 ### 1.3 `REDIS_URL` — without it, rate limiting quietly stops working
 
@@ -91,7 +102,8 @@ deploy, check the log says redis.** No user-visible symptom will tell you.
 **Use TLS** (`sslaccept=strict`). This connection crosses the public internet,
 which it never did in the compose stack.
 
-**Fresh.** New database, new credential.
+**Fresh.** New database, new credential. **It goes on the new backend only.
+The old backend must never be given it** (CD2c, 4b runbook §1.6).
 
 ### 1.5 `PRISMA_CONNECTION_LIMIT` — the default is wrong for serverless
 
@@ -133,8 +145,8 @@ A fresh value invalidates every existing session. That is intended.
 | If missing | FAILS CLOSED: no hash is built or verified, so no donation can start (ENV-01 fix) | FAILS CLOSED, same |
 
 **The salt is the only thing that makes a forged "payment succeeded" callback
-distinguishable from a real one.** Carry it over, unless PayU or AI1 says
-otherwise. I checked history: every salt-shaped value ever committed is the
+distinguishable from a real one.** Copy it from the old backend project, unless
+PayU or AI1 says otherwise. I checked history: every salt-shaped value ever committed is the
 `TEST…` fixture in a test file. **The key, salt and `PAYU_BASE_URL` must all
 come from the same PayU environment.**
 
@@ -144,37 +156,39 @@ come from the same PayU environment.**
 
 ### 2.1 Backend project
 
-| Variable | Req | If missing | Source | Format / example |
-|---|---|---|---|---|
-| `DATABASE_URL` | **Yes** | REFUSES | Provider (fresh) | §1.4 |
-| `REDIS_URL` | **Yes** | **FAILS SILENT** | Provider (fresh) | §1.3 |
-| `PRISMA_CONNECTION_LIMIT` | **Set it** | Fails loud under load | Derived | §1.5. Start at `1` |
-| `JWT_SECRET` | **Yes** | REFUSES | **Generated fresh** | §1.6 |
-| `ALLOWED_ORIGINS` | **Yes** | FAILS CLOSED: every browser request rejected by CORS | The new frontend domain(s) | `https://donate.example.org`. Comma-separated, exact scheme and host, **no trailing slash, no path**. Compared character for character |
-| `PAYU_BASE_URL` | **Yes** | Fails loud. **Wrong = FAILS SILENT** | Choice | `https://secure.payu.in` |
-| `PAYU_MERCHANT_KEY` | **Yes** | FAILS CLOSED | PayU dashboard | §1.7 |
-| `PAYU_MERCHANT_SALT` | **Yes** | FAILS CLOSED | PayU dashboard | §1.7 |
-| `SUCCESS_URL` | **Yes** | FAILS LOUD: PayU rejects the request | New backend domain | `https://<backend>/api/payment/success` |
-| `FAILURE_URL` | **Yes** | FAILS LOUD | New backend domain | `https://<backend>/api/payment/failure` |
-| `CANCEL_URL` | **Yes** | FAILS LOUD | New backend domain | `https://<backend>/api/payment/cancel` |
-| `NOTIFY_URL` | **Yes** | **FAILS SILENT**: the server-to-server confirmation never arrives, so a donor who closes the tab before the redirect leaves a donation stuck Pending | New backend domain | `https://<backend>/api/payment/webhook`. **Check whether a webhook URL is also set in the PayU dashboard, and update it there as well** |
-| `FRONTEND_SUCCESS_URL` | **Yes** | FAILS LOUD: the donor is redirected to `undefined?txnid=…` after paying. The donation IS recorded | New frontend domain | `https://<frontend>/payment-success` |
-| `FRONTEND_FAILURE_URL` | **Yes** | FAILS LOUD, same | New frontend domain | `https://<frontend>/payment-failure` |
-| `EMAIL_USER` | **Yes** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Mail provider | The sending address |
-| `EMAIL_PASSWORD` | **Yes** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Mail provider | For Gmail, an **App Password** (16 chars), not the account password |
-| `EMAIL_SERVICE` | Optional | Uses the SMTP settings below | Choice | `gmail`, or unset for generic SMTP |
-| `SMTP_HOST` | If not `gmail` | Defaults to `smtp.gmail.com` | Mail provider | `smtp-relay.brevo.com` |
-| `SMTP_PORT` | Optional | `587` | Mail provider | `587` (STARTTLS) or `465` |
-| `SMTP_SECURE` | Optional | `false` | Mail provider | `true` **only** with port 465 |
-| `HEALTH_DIAGNOSTIC_SECRET` | Optional | FAILS CLOSED: diagnostics unavailable, plain health still works | **Generated fresh** | 16+ chars, same generator as `JWT_SECRET` |
-| `ADMIN_CREATION_KEY` | **Leave unset** | FAILS CLOSED: public signup cannot mint admins | — | See §2.4 |
-| `RATE_LIMIT_PREFIX` | Optional | `kl:rl:` | Choice | Set it only if the Redis instance is shared with anything else |
+The **Action** column is defined in §6.
+
+| Variable | Action | Req | If missing | Source | Format / example |
+|---|---|---|---|---|---|
+| `DATABASE_URL` | **GENERATE FRESH** | **Yes** | REFUSES | Provider (fresh) | §1.4 |
+| `REDIS_URL` | **GENERATE FRESH** | **Yes** | **FAILS SILENT** | Provider (fresh) | §1.3 |
+| `PRISMA_CONNECTION_LIMIT` | NEW | **Set it** | Fails loud under load | Derived | §1.5. Start at `1` |
+| `JWT_SECRET` | **GENERATE FRESH** | **Yes** | REFUSES | **Generated fresh** | §1.6 |
+| `ALLOWED_ORIGINS` | **REWRITE** | **Yes** | FAILS CLOSED: every browser request rejected by CORS | The new frontend domain(s) | `https://donate.example.org`. Comma-separated, exact scheme and host, **no trailing slash, no path**. Compared character for character |
+| `PAYU_BASE_URL` | COPY, **then check** | **Yes** | Fails loud. **Wrong = FAILS SILENT** | Old backend | Must read `https://secure.payu.in`. If it reads `test.payu.in`, stop: the key and salt beside it are sandbox ones too (§1.7) |
+| `PAYU_MERCHANT_KEY` | COPY | **Yes** | FAILS CLOSED | Old backend | §1.7 |
+| `PAYU_MERCHANT_SALT` | COPY | **Yes** | FAILS CLOSED | Old backend | §1.7 |
+| `SUCCESS_URL` | **REWRITE** | **Yes** | FAILS LOUD: PayU rejects the request | New backend domain | `https://<backend>/api/payment/success` |
+| `FAILURE_URL` | **REWRITE** | **Yes** | FAILS LOUD | New backend domain | `https://<backend>/api/payment/failure` |
+| `CANCEL_URL` | **REWRITE** | **Yes** | FAILS LOUD | New backend domain | `https://<backend>/api/payment/cancel` |
+| `NOTIFY_URL` | **REWRITE** | **Yes** | **FAILS SILENT**: the server-to-server confirmation never arrives, so a donor who closes the tab before the redirect leaves a donation stuck Pending | New backend domain | `https://<backend>/api/payment/webhook`. **Check whether a webhook URL is also set in the PayU dashboard, and update it there as well** |
+| `FRONTEND_SUCCESS_URL` | **REWRITE** | **Yes** | FAILS LOUD: the donor is redirected to `undefined?txnid=…` after paying. The donation IS recorded | New frontend domain | `https://<frontend>/payment-success` |
+| `FRONTEND_FAILURE_URL` | **REWRITE** | **Yes** | FAILS LOUD, same | New frontend domain | `https://<frontend>/payment-failure` |
+| `EMAIL_USER` | COPY | **Yes** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Old backend | The sending address |
+| `EMAIL_PASSWORD` | COPY | **Yes** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Old backend | For Gmail, an **App Password** (16 chars), not the account password |
+| `EMAIL_SERVICE` | COPY | Optional | Uses the SMTP settings below | Old backend | `gmail`, or unset for generic SMTP |
+| `SMTP_HOST` | COPY | If not `gmail` | Defaults to `smtp.gmail.com` | Old backend | `smtp-relay.brevo.com` |
+| `SMTP_PORT` | COPY | Optional | `587` | Old backend | `587` (STARTTLS) or `465` |
+| `SMTP_SECURE` | COPY | Optional | `false` | Old backend | `true` **only** with port 465 |
+| `HEALTH_DIAGNOSTIC_SECRET` | **GENERATE FRESH** | Optional | FAILS CLOSED: diagnostics unavailable, plain health still works | **Generated fresh** | 16+ chars, same generator as `JWT_SECRET` |
+| `ADMIN_CREATION_KEY` | NEW: **leave unset** | **Leave unset** | FAILS CLOSED: public signup cannot mint admins | — | See §2.4 |
+| `RATE_LIMIT_PREFIX` | NEW: leave unset | Optional | `kl:rl:` | Choice | Set it only if the Redis instance is shared with anything else |
 
 ### 2.2 Frontend project
 
-| Variable | Req | If missing | Source | Format |
-|---|---|---|---|---|
-| `VITE_API_URL` | **Yes** | **FAILS SILENT, possibly dangerously** (§1.2) | New backend domain | `https://<backend>`. Read at BUILD time |
+| Variable | Action | Req | If missing | Source | Format |
+|---|---|---|---|---|---|
+| `VITE_API_URL` | **REWRITE** | **Yes** | **FAILS SILENT** while the old backend serves (§1.2) | New backend domain | `https://<backend>`. Read at BUILD time |
 
 That is the only variable the frontend reads. **Nothing else belongs on the
 frontend project** (§4).
@@ -212,7 +226,7 @@ use it once, and delete it.
 | # | What | Why it blocks | Change |
 |---|---|---|---|
 | **3.1** | **The frontend CSP hardcodes the old backend hostname.** `Frontend/vercel.json`: `connect-src 'self' https://for-ocean-foudation-donation-system-one.vercel.app …` | The browser refuses every API call to any other host. **The new frontend loads and nothing works.** `vercel.json` is static, so no variable can change it | Put the new backend host there. That needs the host known in advance: **either a custom domain chosen now, or a project name whose `*.vercel.app` name is confirmed free.** Gary's choice |
-| **3.2** | **`Frontend/.env` is tracked and names the old backend** | §1.2. It is also already in Phase 6's scrub scope "for the shape" | Remove the value, so a missing `VITE_API_URL` fails loud (`localhost:5000`) instead of falling back to a hostname somebody else may own |
+| **3.2** | **`Frontend/.env` is tracked and names the old backend** | §1.2. Wrong rather than dangerous since CD1: the fallback reaches the old backend, which is still ours. It is also already in Phase 6's scrub scope "for the shape" | Remove the value, so a missing `VITE_API_URL` fails loud (`localhost:5000`) instead of silently reaching the old backend |
 | **3.3** | **No `prisma generate` in the backend build.** No `postinstall`, no `vercel-build` | Vercel caches `node_modules`. Prisma documents that a cached client goes stale and throws at runtime on Vercel. The first deploy will work and a later schema change will not. **I have not reproduced this, because Vercel's cache cannot be simulated locally** | `"postinstall": "prisma generate"` in `Backend/package.json` |
 
 I propose one small PR after F carrying all three, once Gary has chosen the
@@ -220,17 +234,24 @@ hostnames. It cannot be written before that, because 3.1 needs the name.
 
 ---
 
-## 4. Do NOT carry these over
+## 4. DO NOT SET: do not copy these, and do not add them
 
-| On the old project | Why not |
-|---|---|
-| `MONGODB_URI` (backend) | Nothing on the request path reads it after Phase 3.6. Only the ETL does, and that runs locally in 4b |
-| `foroceanfoundation_MONGODB_URI` (backend) | Atlas Marketplace integration. Same reason |
-| **`MONGODB_URI` (FRONTEND project, production)** | **A database credential on the frontend project.** Vite only puts `VITE_*` variables into the bundle, so it was not shipped to browsers. It was available to the build and had no reason to be. **Do not connect the Atlas integration to the new frontend** |
-| `ADMIN_EMAIL` | Nothing reads it |
-| `PORT` | Unused on Vercel; the app does not listen there |
-| `NODE_ENV` | `Backend/vercel.json` sets `production` |
-| `UPLOADS_DIR`, `SCHEDULER_ENABLED`, `SCHEDULER_TIMEZONE`, `JOB_*`, `RETENTION_YEARS`, `ALLOW_SEED` | See §5. Leave all unset on Vercel |
+**No MongoDB credential goes on either new project (CD2c).** The Atlas
+credential lives only on the machine that runs 4b's ETL. And the reverse holds:
+**the old backend is never given `DATABASE_URL` or `REDIS_URL`.** The 4b runbook
+§1.6 checks both directions by name.
+
+| Name | Where it is now | Why not |
+|---|---|---|
+| `MONGODB_URI` | Old backend | Nothing on the request path reads it after Phase 3.6. Only the ETL does, and that runs locally in 4b |
+| `foroceanfoundation_MONGODB_URI` | Old backend | Atlas Marketplace integration (`store_1KY6ODUNmfpdgqg0`). Same reason. **Do not connect that integration to either new project.** Connecting it injects the credential without anyone typing it |
+| **`MONGODB_URI`** | **Old FRONTEND, production** | **A database credential on the frontend project**, also injected by the integration. Vite only puts `VITE_*` variables into the bundle, so it was not shipped to browsers. It was available to the build and had no reason to be |
+| `MONGO_URI` | Not set anywhere | Read only as an ETL fallback name. Same as `MONGODB_URI` |
+| `ADMIN_EMAIL` | Old backend | Nothing reads it |
+| `PORT` | Old backend | Unused on Vercel; the app does not listen there |
+| `NODE_ENV` | Not set | `Backend/vercel.json` sets `production` |
+| `VERCEL` | Not set | Vercel sets it itself. The code reads it to detect the platform |
+| `UPLOADS_DIR`, `SCHEDULER_ENABLED`, `SCHEDULER_TIMEZONE`, `JOB_RETENTION_PURGE`, `JOB_INACTIVE_ACCOUNT_PURGE`, `JOB_PENDING_SIGNUP_SWEEP`, `RETENTION_YEARS`, `ALLOW_SEED` | Not set | See §5. Leave all unset on Vercel |
 
 **Create every secret as type "Sensitive"** (write-only after creation). On the
 old backend, Vercel flagged `MONGODB_URI`, `JWT_SECRET`, `EMAIL_PASSWORD` and
@@ -258,33 +279,114 @@ refused at use) and retention purges do not run. Both are recorded, not hidden.
 
 ---
 
-## 6. Fresh vs carried over
+## 6. Setting them up by hand: what to do with each of the 36 names (CD3)
 
-| Generate fresh | Carry over | Re-derive (hosts change) |
+The code reads **36 names** on the backend (33 directly, plus the three `JOB_*`
+names read through `config/destructiveJobs.js`) and **1** on the frontend.
+**You type in 21 of them on the backend and 1 on the frontend.** The other 15
+stay unset.
+
+| Action | Means |
+|---|---|
+| **COPY** | Exists on the old backend. Copy the value across unchanged |
+| **GENERATE FRESH** | Make a new value. **Never copy, even where the old project has one** |
+| **REWRITE** | The name exists on the old project and **the value must change**, because it names an old host. See the warning below |
+| **NEW** | Not on the old project. Added since it was created |
+| **DO NOT SET** | Leave it off the project. §4 and §5 say why |
+
+> **REWRITE is not in the CD3 brief, and it is there on purpose.** Eight names
+> are on the old projects but cannot be copied. A copied `SUCCESS_URL` or
+> `NOTIFY_URL` sends PayU's confirmations to the **old** backend. While that
+> backend is up, it accepts them and records a paid donation **in MongoDB**, so
+> MySQL never sees it. This is FAILS SILENT, and it is CD2a's two-backend
+> problem arriving through configuration. A copied `VITE_API_URL` does the same
+> for every request (§1.2).
+
+### Backend: 36 names
+
+| # | Name | Action | On the old backend? |
+|---|---|---|---|
+| 1 | `JWT_SECRET` | **GENERATE FRESH** | Yes. Do not copy (AI1) |
+| 2 | `HEALTH_DIAGNOSTIC_SECRET` | **GENERATE FRESH** | No |
+| 3 | `DATABASE_URL` | **GENERATE FRESH** | No. **Never put it on the old backend** |
+| 4 | `REDIS_URL` | **GENERATE FRESH** | No |
+| 5 | `PAYU_MERCHANT_KEY` | COPY | Yes |
+| 6 | `PAYU_MERCHANT_SALT` | COPY | Yes |
+| 7 | `PAYU_BASE_URL` | COPY, **then check it reads `https://secure.payu.in`** | Yes |
+| 8 | `EMAIL_USER` | COPY | Yes |
+| 9 | `EMAIL_PASSWORD` | COPY | Yes |
+| 10 | `EMAIL_SERVICE` | COPY | Yes |
+| 11 | `SMTP_HOST` | COPY | Yes |
+| 12 | `SMTP_PORT` | COPY | Yes |
+| 13 | `SMTP_SECURE` | COPY | Yes |
+| 14 | `ALLOWED_ORIGINS` | **REWRITE**: new frontend domain | Yes |
+| 15 | `SUCCESS_URL` | **REWRITE**: new backend domain | Yes |
+| 16 | `FAILURE_URL` | **REWRITE**: new backend domain | Yes |
+| 17 | `CANCEL_URL` | **REWRITE**: new backend domain | Yes |
+| 18 | `NOTIFY_URL` | **REWRITE**: new backend domain. **And the PayU dashboard, if a webhook URL is set there** | Yes |
+| 19 | `FRONTEND_SUCCESS_URL` | **REWRITE**: new frontend domain | Yes |
+| 20 | `FRONTEND_FAILURE_URL` | **REWRITE**: new frontend domain | Yes |
+| 21 | `PRISMA_CONNECTION_LIMIT` | NEW: set to `1` (§1.5) | No |
+| 22 | `ADMIN_CREATION_KEY` | NEW: **leave unset** (§2.4) | No |
+| 23 | `RATE_LIMIT_PREFIX` | NEW: leave unset unless Redis is shared | No |
+| 24 | `MONGODB_URI` | **DO NOT SET** (CD2c) | Yes |
+| 25 | `MONGO_URI` | **DO NOT SET** (CD2c) | No |
+| 26 | `PORT` | DO NOT SET | Yes |
+| 27 | `NODE_ENV` | DO NOT SET: `vercel.json` sets it | No |
+| 28 | `VERCEL` | DO NOT SET: the platform sets it | No |
+| 29 | `UPLOADS_DIR` | DO NOT SET (§5) | No |
+| 30 | `SCHEDULER_ENABLED` | DO NOT SET (§5) | No |
+| 31 | `SCHEDULER_TIMEZONE` | DO NOT SET (§5) | No |
+| 32 | `RETENTION_YEARS` | DO NOT SET (§5) | No |
+| 33 | `ALLOW_SEED` | DO NOT SET | No |
+| 34 | `JOB_RETENTION_PURGE` | DO NOT SET (§5) | No |
+| 35 | `JOB_INACTIVE_ACCOUNT_PURGE` | DO NOT SET (§5) | No |
+| 36 | `JOB_PENDING_SIGNUP_SWEEP` | DO NOT SET (§5) | No |
+
+Two names on the old backend are not read by the code at all, so they are not
+among the 36: `foroceanfoundation_MONGODB_URI` and `ADMIN_EMAIL`. **Do not copy
+either** (§4).
+
+**Count check:** 4 generate fresh + 9 copy + 7 rewrite + 1 new that is set = **21
+typed in.** 2 new left unset + 13 do-not-set = **15 left off.**
+
+### Frontend: 1 name
+
+| Name | Action | On the old frontend? |
 |---|---|---|
-| `JWT_SECRET` (AI1) | `PAYU_MERCHANT_KEY` | `ALLOWED_ORIGINS` |
-| `DATABASE_URL` (new database) | `PAYU_MERCHANT_SALT` | `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL` |
-| `REDIS_URL` (new instance) | `EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_SERVICE`, `SMTP_*` | `FRONTEND_SUCCESS_URL`, `FRONTEND_FAILURE_URL` |
-| `HEALTH_DIAGNOSTIC_SECRET` | | `VITE_API_URL` |
-| The Atlas credential, for 4b's ETL only. **Not set on Vercel at all** | | PayU dashboard webhook URL, if one is set there |
+| `VITE_API_URL` | **REWRITE**: new backend domain | Yes. **Copying it points the new frontend at the old backend** (§1.2) |
+
+The old frontend also has `MONGODB_URI` (production, from the Atlas
+integration). **Do not copy it** (§4).
+
+**Create every secret as Sensitive** (§4). The old values are readable, and the
+new ones need not be.
 
 ---
 
-## 7. Before deleting the old projects
+## 7. The old projects stay (CD1)
 
-These are Gary's hands. None can be done from here.
+The old frontend and backend projects are **kept, not deleted.** What that
+changes:
 
-1. **Secure 4b's source before anything is deleted.** Both old projects carry
-   Atlas through a **Vercel Marketplace integration** (store
-   `store_1KY6ODUNmfpdgqg0`), and the backend also has a manually entered
-   `MONGODB_URI`. Establish **which cluster production actually reads**: the app
-   reads `MONGODB_URI`. Then confirm that **deleting the projects, or
-   uninstalling the integration, does not delete that cluster.** Phase 4b reads
-   it, and AE1-a's minted-id oracle exists only there: **once it is gone, it is
-   gone permanently.**
-2. **Hold every carried-over value somewhere other than Vercel** (§6), from its
-   real source where possible. Deleting a project deletes its variables.
-3. **The SEC-03 exposure window (§8).**
+- **The Atlas integration is not at risk.** Nothing is deleted, so nothing can
+  take the cluster with it. The "secure the source before deleting" step that
+  stood here is withdrawn. **If deleting the old projects is ever back on the
+  table, that step comes back with it.** AE1-a's minted-id oracle exists only
+  in that cluster.
+- **Values are copied from the old backend**, not recovered from source
+  systems (§6).
+- **The old `.vercel.app` hostname is not released**, so it cannot be claimed
+  (§1.2).
+
+What it adds. The 4b runbook carries each of these as a step, not a note:
+
+| | Risk | Runbook step |
+|---|---|---|
+| **CD2a** | **Two live backends.** If the old one is still serving when the new one goes live, donations split between MongoDB and MySQL. Anything the old one takes after the ETL is missing from MySQL | §3.4 pauses the old backend inside the freeze. §6a confirms it is still paused before donations reopen |
+| **CD2b** | **The old projects keep serving vulnerable code** (`58bdadf`, SEC-03) until somebody turns them off. Keeping them makes "off" a deliberate act | §3.4 (backend) and §6a.4 (frontend): pause, then **confirm by request**, not by the dashboard alone |
+| **CD2c** | **Credentials crossing over.** The old backend must never hold the MySQL credential, and the new one must never hold MongoDB's | §1.6, checked by name on both projects, and checked again at §6a.2 |
+| **CD2d** | **The old projects are still Git-connected.** A merge to `main` starts a production deploy on them. Today that fails with `Resource provisioning failed`, **and that failure is the only thing stopping it** | §1.7. See also ADR-062's CD1 amendment |
 
 ---
 
@@ -296,13 +398,15 @@ authentication bypass**, and it keeps serving it through 4b and 4c. **Merging th
 hotfix does not change production.** CA's rule applies: a merged PR is not a
 deployed fix.
 
-So the window is open from now until either the old backend stops serving or
-the new project serves `main`. The options that close it sooner are Gary's to
+So the window is open from now until the old backend stops serving. **Since CD1
+that has a fixed latest point: the 4b runbook pauses it at §3.4.** Standing up
+the new backend does not close the window by itself, because the old one keeps
+serving until it is paused. The options that close it sooner are Gary's to
 weigh. **I am not recommending one, because each costs something:**
 
 | Option | Closes the window | Cost |
 |---|---|---|
-| Pause or delete the old **backend** project now | Yes, immediately | The site's API is down until step 5 |
+| Pause the old **backend** project now | Yes, immediately | The site's API is down until step 5 |
 | Deploy the hotfix to the old project once, manually | Only if provisioning works. The last two attempts failed with "Resource provisioning failed" | May not work. ADR-028's authorship block may apply |
 | Accept the window | No | The bypass stays live through 4b and 4c |
 

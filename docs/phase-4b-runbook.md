@@ -127,6 +127,52 @@ report was never read.
 - `MONGODB_URI` must name **production**, and the ETL's Atlas guard must be
   deliberately lifted for this run. Confirm what it is set to by echoing it —
   this is the variable whose being wrong is the whole of §5.6's risk.
+  **This is the ETL machine's environment, not a Vercel project's.** §1.6 keeps
+  it off both new projects.
+
+### 1.6 Credential separation between the old and new backends (CD2c)
+
+The old backend project is kept (CD1), so for the first time there are two
+backend projects in the team, and either could be given the other's database.
+**Check names only. Do not reveal values.**
+
+1. **Old backend project: list the variable names.** None of `DATABASE_URL`,
+   `REDIS_URL` or `PRISMA_CONNECTION_LIMIT` may appear. **If any does, delete it
+   before going further.** The old backend runs `58bdadf`, which has the SEC-03
+   bypass. It must not hold a credential for the database the cutover is
+   moving donors into.
+2. **New backend project: list the variable names.** None of `MONGODB_URI`,
+   `MONGO_URI` or `foroceanfoundation_MONGODB_URI` may appear, and nothing else
+   containing `MONGO`. **If any does, delete it.**
+3. **New backend and new frontend: confirm the Atlas Marketplace integration
+   (store `store_1KY6ODUNmfpdgqg0`) is not connected.** Connecting it injects a
+   MongoDB variable that nobody typed, which is how the old frontend came to
+   hold one.
+4. **Record both name lists in the cutover log.** Write down the names, not
+   "checked".
+
+Step 2 is checked again at §6a.2, right before donations reopen, because
+variables can be added between now and then.
+
+### 1.7 The old projects are still connected to Git (CD2d)
+
+Both old projects deploy to production on every push to `main`. They did for
+PR #5 (`17b30a1`). **That deploy failed with `Resource provisioning failed`,
+and that failure is the only thing that has stopped every later merge from
+reaching the old projects.** If provisioning starts working:
+
+- a merge of the frontend fix (new backend host in the CSP) deploys to the
+  **old** frontend, whose CSP then blocks its own backend. Production breaks
+  loudly;
+- a merge of any MySQL-era backend code deploys to the **old** backend, which
+  has no `DATABASE_URL` (§1.6), so it refuses every request. Production breaks
+  loudly.
+
+**Action, before the frontend fix merges:** disconnect the Git repository from
+both old projects, or confirm in writing that Gary accepts relying on the
+provisioning failure. Disconnecting costs one option from SEC-03's list
+(deploying the hotfix to the old project through Git). A manual CLI deploy is
+still possible afterwards.
 
 ---
 
@@ -210,9 +256,31 @@ its own.
    Pending is not wrong — but a callback arriving after the cutover, for a
    donation that exists only in MongoDB, is money received and not recorded.
 
-4. **Confirm nothing is writing to MongoDB.** The API is the only writer, and it
-   has stopped serving donations — but confirm rather than assume, because §5.6
-   depends on the source being stable.
+4. **Pause the old backend project, and confirm it (CD2a, CD2b).** Pause, do
+   not delete: rollback (§6) un-pauses it.
+   1. **Before pausing,** request the hostname the old frontend actually calls
+      and record the status code and the first line of the body in the cutover
+      log. `Frontend/.env` records it as
+      `https://for-ocean-foudation-donation-system-one.vercel.app`. **Confirm
+      that against the old backend project's domains days before.** The
+      project's own listing does not show that name, so it may be an alias.
+   2. Pause the project.
+   3. **Request the same URL again.** The response must differ from step 1 and
+      must not be the application's. **Record it.** The dashboard saying
+      "paused" is not the confirmation. The request is.
+
+   **Why here, and not at go-live:** steps 2 and 3 needed the old backend up to
+   receive PayU's callbacks. After them it has no remaining job. Pausing it here
+   turns step 5 from an assumption into a fact, and keeps the old backend off
+   for as long as the new one could be taking donations.
+
+   **This also closes the SEC-03 window** (deployment-environment §8). Note the
+   time in the log.
+
+5. **Confirm nothing is writing to MongoDB.** With the old backend paused there
+   should be no writer at all. Confirm rather than assume, because §5.6
+   depends on the source being stable. Take the counts and the latest `_id`
+   now. §5.6 compares against them.
 
 ---
 
@@ -306,7 +374,7 @@ moved; this proves the application can read them.
 
 ### 5.6 The source is still the source
 
-Confirm production MongoDB is unchanged since §3.4: same counts, same latest
+Confirm production MongoDB is unchanged since §3.5: same counts, same latest
 `_id`. If it moved, something wrote to it during the freeze and §5.2's equality
 was measured against a moving target.
 
@@ -322,6 +390,48 @@ A log of ticks is indistinguishable from a log nobody filled in.
 
 **Any no-go: reopen donations on MongoDB and roll back.** That is a normal
 outcome, not a failure, and it is available only while §7 has not happened.
+
+**Rolling back, in this order (CD2a):**
+
+1. **Pause the new backend first**, if it has been deployed, and confirm by
+   request as in §3.4.
+2. **Then** un-pause the old backend, and confirm by request that it answers
+   as it did in §3.4 step 1.
+3. Reopen donations on the old frontend.
+
+**At no point are both backends un-paused.** The order above always passes
+through "both paused", never through "both serving".
+
+---
+
+## 6a. The switch: before donations reopen on the new projects
+
+**Only after a "go" at §6. Every step is recorded in the cutover log with what
+was observed.**
+
+1. **The old backend is still paused.** Repeat §3.4's request. It must still
+   give the paused response. Somebody may have un-paused it during the freeze,
+   for example to check something. **If it answers as the application, stop
+   here.** Pause it again, then go back to §5.6 to establish whether it took
+   any writes.
+2. **Credential separation, again.** Repeat §1.6 steps 1 and 2 on both backend
+   projects, by name. Any MongoDB name on the new backend, or MySQL name on the
+   old, is a stop.
+3. **The new frontend and new backend are live**, with `VITE_API_URL` and the
+   seven REWRITE variables naming the **new** hosts (deployment-environment
+   §6). Check `NOTIFY_URL` and `SUCCESS_URL` on the new backend by name and
+   host. A copied old value sends PayU's confirmations to the paused backend,
+   and the donation stays Pending in MySQL.
+4. **Pause the old frontend project, and confirm it.** As in §3.4: record the
+   response before pausing, pause, and request again. While it is up, donors
+   with a bookmark land on a site whose API is paused. Pausing it also takes
+   down the last copy of `58bdadf` (CD2b).
+5. **Only now, reopen donations**, on the new frontend.
+
+**After §7's boundary closes, the old projects stay paused for good.** Before
+the boundary, un-pausing the old backend is the rollback. After it, the same
+action opens a second place for donations to land. It is CD2a again, with no
+rollback left to undo it. The old projects stay as records, not as a fallback.
 
 ---
 

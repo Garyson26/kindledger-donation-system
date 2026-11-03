@@ -5527,6 +5527,44 @@ so.
 -G`) is the `TEST…` fixture in a test file. No evidence the production salt was
 ever in the repository, so carrying it over is not contradicted.
 
+## CD - THE OLD VERCEL PROJECTS STAY
+
+**CD1: the plan changed.** Gary is creating new frontend and backend projects
+and **keeping** the old ones, rather than deleting them. Applied in
+`docs/deployment-environment.md` §1.2, §6, §7 and §8, and in the 4b runbook.
+
+| Was | Now |
+|---|---|
+| Secure the Atlas source before deleting the projects (env doc §7.1) | **Withdrawn.** Nothing is deleted. It returns if deletion does |
+| Recover carried-over values from source systems | **Copy from the old backend.** All nine COPY values are stored there as readable `encrypted`, so they can be revealed |
+| CB2-2: the old `*.vercel.app` name may be claimable once released | **Gone.** The name is not released. **`Frontend/.env` still gets fixed**: it is wrong, and while the old backend serves, a fallback build silently reaches it, on MongoDB, with SEC-03 |
+| SEC-03 stays live until the new backend is up | **Unchanged in substance.** It is now tied to an explicit act: the window closes when the old backend is **paused** (runbook §3.4), not when the new one comes up |
+
+**CD2: risks the plan change creates, each a runbook step, not a note.**
+
+| # | Risk | Severity | Runbook step |
+|---|---|---|---|
+| CD2a | **Two live backends.** Donations split between MongoDB and MySQL, and anything the old one takes after the ETL never reaches MySQL | **High** | §3.4 pause inside the freeze. §6a.1 re-confirm before reopening. §6 rollback order never passes through "both serving" |
+| CD2b | **The old projects serve `58bdadf` until they are turned off** | **High** (SEC-03) | §3.4 (backend), §6a.4 (frontend). Confirmed by request, before and after |
+| CD2c | **Credentials crossing over.** MySQL credential on the old backend, MongoDB credential on the new | **High** | §1.6, by name, both projects, including the Atlas integration. Repeated at §6a.2 |
+| CD2d | **The old projects are still Git-connected.** Production deploys on every push to `main`. Only `Resource provisioning failed` is stopping them | **High once provisioning works.** The frontend fix's CSP change would break the old frontend, and MySQL-era backend code would break the old backend | §1.7: disconnect Git from both old projects **before the frontend fix merges**, or record that Gary accepts the risk. **Not in the CD brief; found while checking the projects** |
+| CD2e | **A copied host variable reproduces CD2a through configuration.** A copied `NOTIFY_URL`/`SUCCESS_URL` sends PayU's confirmations to the old backend. A copied `VITE_API_URL` sends everything | **High**, silent | Env doc §6: **REWRITE** action (8 names). Runbook §6a.3 |
+
+**A correction to CD2a's wording.** "Two backends pointed at the same Atlas
+cluster" happens literally only if CD2c is also broken. After 3.6 the new
+backend reads no MongoDB on the request path. The general form, which needs
+nothing else to go wrong, is two backends each taking donations into a
+different store. The steps above cover both.
+
+**CD3: copy-across column.** Env doc §6 gives each of the 36 backend names an
+action, and §2.1 and §2.2 carry the same column. Gary types in **21 on the
+backend and 1 on the frontend**. The other 15 stay unset. The brief's three
+actions became five. **REWRITE** is CD2e. **DO NOT SET** covers the
+13 names that must stay off Vercel.
+
+**Checked, not assumed:** the old projects' variable NAMES were re-read for
+this (21 on the backend, 2 on the frontend). Values were not decrypted.
+
 
 ## Counts
 
