@@ -248,10 +248,16 @@ before(async () => {
   assert.equal(probe.ok, true, `MySQL unreachable: ${probe.error}`);
 
   const app = require('../app.js');
-  for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.equal(mongoose.connection.readyState, 1, 'mongoose did not connect');
+  // CHANGED IN 3.6. This used to wait for `app.js` to open the Mongoose
+  // connection via connectDB(), then assert it had. `config/db.js` is deleted -
+  // the request path does not touch MongoDB at all - so a suite that still
+  // needs MongoDB for its own AK3 fixtures must connect for itself.
+  //
+  // The dependency was real and is now visible: the application no longer
+  // provides a MongoDB connection as a side effect of being imported, and
+  // anything relying on that was relying on the thing this package removes.
+  await mongoose.connect(process.env.MONGODB_URI);
+  assert.equal(mongoose.connection.readyState, 1, 'this suite connects to MongoDB itself');
 
   server = app.listen(0);
   await once(server, 'listening');
@@ -411,10 +417,18 @@ test('SEC-06 CLOSED (1/2): the transaction reference is UNGUESSABLE (CHANGED IN 
     );
   }
 
-  // And it is short: the previous scheme was 16-17 characters and is proven
-  // against the live gateway at that length. See the note in payment.js on the
-  // one thing to confirm against the PayU sandbox before cutover.
-  assert.ok(first.length <= 25, `txnid must stay short for PayU: ${first.length}`);
+  // AV3: PayU's DOCUMENTED limit is 25 characters -
+  // https://docs.payu.in/reference/addl_info-payment-apis
+  //   "Transaction ID (or Order ID) generated at the merchant end. Must be
+  //    unique for every new transaction. Character limit: 25."
+  //
+  // Asserted here so the two characters of headroom cannot be spent by someone
+  // lengthening the reference for entropy without knowing there is a ceiling.
+  assert.ok(
+    first.length <= 25,
+    `txnid exceeds PayU's documented 25-character limit: ${first.length} (${first})`
+  );
+  assert.match(first, /^[A-Za-z0-9]+$/, 'alphanumeric, no separators to be mangled');
 });
 
 test('SEC-07 CLOSED: a forged `userId` in the body is IGNORED (CHANGED IN 3.4)', async () => {

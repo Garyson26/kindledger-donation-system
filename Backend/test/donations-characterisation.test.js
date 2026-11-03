@@ -290,10 +290,16 @@ before(async () => {
   assert.equal(probe.ok, true, `MySQL unreachable: ${probe.error}`);
 
   const app = require('../app.js');
-  for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.equal(mongoose.connection.readyState, 1, 'mongoose did not connect');
+  // CHANGED IN 3.6. This used to wait for `app.js` to open the Mongoose
+  // connection via connectDB(), then assert it had. `config/db.js` is deleted -
+  // the request path does not touch MongoDB at all - so a suite that still
+  // needs MongoDB for its own AK3 fixtures must connect for itself.
+  //
+  // The dependency was real and is now visible: the application no longer
+  // provides a MongoDB connection as a side effect of being imported, and
+  // anything relying on that was relying on the thing this package removes.
+  await mongoose.connect(process.env.MONGODB_URI);
+  assert.equal(mongoose.connection.readyState, 1, 'this suite connects to MongoDB itself');
 
   server = app.listen(0);
   await once(server, 'listening');

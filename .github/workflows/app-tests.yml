@@ -43,6 +43,30 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # 0. No committed credentials (BJ4, CH5)
+  # ---------------------------------------------------------------------------
+  # Its own job, with no services, on every push to every branch. The
+  # repository is public, so a commit is public the moment it lands, and this
+  # stopped being a Phase 6 gate. It used to be a step inside the PayU job
+  # below, which has a MySQL service and so never started (CI-01). That means
+  # it never actually ran. It needs only node and git. Do not give this job a
+  # service, a matrix entry or a `needs:`: anything that can stop it starting
+  # silently turns the check off again.
+  no-secrets:
+    name: No committed credentials
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: No committed credentials (BJ4)
+        working-directory: Backend
+        run: npm run test:no-secrets
+
+  # ---------------------------------------------------------------------------
   # 1. PayU callbacks and reset controls (MongoDB data layer)
   # ---------------------------------------------------------------------------
   app-tests:
@@ -176,14 +200,6 @@ jobs:
         # - they move across when the route does.
         run: npm run test:categories
 
-      - name: Category bridge (ADR-050, temporary)
-        working-directory: Backend
-        # The bridge is deleted in package 3.6, and is tested anyway: for the
-        # duration of Phase 3 it sits on the PAYMENT PRICING path. It needs both
-        # stores, which is why it is in this job - the data-layer job has no
-        # MongoDB.
-        run: npm run test:bridge
-
       - name: Donation characterisation (SPEC-3 package 3.3 baseline)
         working-directory: Backend
         run: npm run test:donations
@@ -226,6 +242,64 @@ jobs:
       - name: Destructive-job authorisation (AT1)
         working-directory: Backend
         run: npm run test:destructive-jobs
+
+      # AE1-a. The ONE irreversible step in package 3.6: a minted legacy_id and
+      # a genuine one are the same 24 hex characters, and the only thing that
+      # tells them apart is whether a MongoDB document with that _id exists.
+      # Run this after the cutover and the distinction is gone for ever, so the
+      # ORDERING is asserted here rather than written in a runbook.
+      - name: Minted legacy_id removal and its ordering (AE1-a)
+        working-directory: Backend
+        env:
+          TEST_MONGODB_URI: mongodb://127.0.0.1:27017/kindledger_nullminted_ci
+        run: npm run test:null-minted
+
+      # AE3 PART 1. ADR-050 makes deleting a bridge an EMPIRICAL question, and
+      # `readyToDelete()` can only answer it for one process - `node --test`
+      # gives each suite its own, so the counter resets fifteen times.
+      #
+      # This runs every suite and fails if a MongoDB fallback fired outside the
+      # one suite that exists to drive it. On its first run it reported 34, of
+      # which 32 were a test fixture creating its auth user in MongoDB - the
+      # bridge was not carrying traffic, the suite was manufacturing it.
+      - name: Bridge exit check - zero MongoDB fallbacks (AE3 part 1)
+        working-directory: Backend
+        run: npm run test:bridge-exit
+
+      # BB4/BC1. A BLOCKING pre-flight finding that the load does NOT refuse
+      # cannot be added silently. Writing this check found TWO existing errors:
+      # mixed-case-status contradicted its own detail text, and strict-sql-mode
+      # is genuinely blocking-but-loadable. No database needed.
+      - name: Pre-flight finding invariants (BB4)
+        working-directory: Backend
+        run: npm run test:preflight-findings
+
+      # BB3. The 3.5a residual, MEASURED rather than noted: /signup's two
+      # branches are separated by ~243 ms with no overlap, so one request
+      # classifies an address. Pinned, not closed.
+      #
+      # Runs the file DIRECTLY, not under `node --test`: both branches start an
+      # SMTP connection that cannot complete in CI, and nodemailer holds the
+      # sockets past the test.
+      # BB3/BE1/BG1/BG3. Six timing measurements. Three were oracles with
+      # non-overlapping distributions and are now equalised; three are
+      # sha256-scale and accepted with their numbers. The tests assert the
+      # separations STAY closed.
+      - name: Endpoint timing separations (BB3, BE1, BG1, BG3)
+        working-directory: Backend
+        run: npm run test:signup-timing
+
+      # BG2. BG1's equalisation converts an information leak into a CPU cost,
+      # and authLimiter is the only bound on it. This fails if any equalised
+      # endpoint loses its limiter - which would silently turn a closed oracle
+      # into a 60x CPU amplifier. SEC-04 is why this is asserted, not noted.
+      - name: Password-timing mitigation dependency (BG2)
+        working-directory: Backend
+        run: npm run test:password-timing
+
+      # BJ4's no-committed-credentials check moved to its own job, no-secrets,
+      # at the top of this file (CH5). It needs no services, and here it sat
+      # behind a MySQL container that never starts (CI-01).
 
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)

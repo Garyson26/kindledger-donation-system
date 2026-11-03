@@ -3,7 +3,6 @@ const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const helmet = require("helmet");
-const connectDB = require("./config/db");
 
 // Load environment variables
 require("dotenv").config();
@@ -95,8 +94,23 @@ app.use("/api/admin", restrictiveCors, adminRoutes);
 app.use("/api/users", restrictiveCors, userRoutes);
 app.use("/api/payment", openCors, paymentRoutes);
 
-// Connect Database
-connectDB();
+// =============================================================================
+// THE MONGODB CONNECTION IS GONE (package 3.6)
+// =============================================================================
+// WAS: `connectDB()`, which opened a Mongoose connection to MONGODB_URI and
+// called `process.exit(1)` if it failed - so an unreachable MongoDB killed the
+// process at boot, for a store nothing in the request path had read since
+// package 3.4.
+//
+// `config/db.js` is deleted with it. MySQL is reached through
+// `config/prisma.js`, which deliberately does NOT exit on a failed connection:
+// the asymmetry is recorded in routes/health.js, and it is why an unreachable
+// database now produces an unhealthy service rather than no service.
+//
+// Mongoose itself is NOT removed from package.json here. `etl/` and
+// `scripts/seedDatabase.js` still use it, and package 4c removes those with the
+// models. ADR-059: a package removing a dependency cannot also remove it from
+// the components whose job is to stop needing it.
 
 // services/dataCleanupService.js is GONE as of package 3.3. It targeted
 // MongoDB, it was never initialised here (it also assumed a long-lived process,

@@ -68,6 +68,7 @@ const Donation = require('../models/Donation');
 const User = require('../models/User');
 // Categories are MySQL from package 3.1 onwards.
 const categories = require('../repositories/categories');
+const usersRepo = require('../repositories/users');
 const prismaModule = require('../config/prisma');
 // Package 3.1r: the Mongoose model and the ETL, so this suite can exercise
 // categories that existed BEFORE the migration - which is the case ADR-056
@@ -77,6 +78,18 @@ const { runMigration } = require('../etl/migrate');
 
 const NAME_PREFIX = 'ZZZ CAT TEST';
 const EMAIL_PREFIX = 'zzz-cat-test';
+/**
+ * A SEPARATE PREFIX FOR THE AUTH FIXTURES, and the reason is a bug this change
+ * caused: `resetData()` deletes MySQL users by EMAIL_PREFIX between tests. While
+ * the admin and plain-user fixtures lived in MongoDB that was harmless; the
+ * moment they moved to MySQL, every authenticated test after the first reset
+ * answered 404 "User not found".
+ *
+ * The lifetime is the point - these two exist for the WHOLE FILE, the donor
+ * users exist per test - so they must not share a prefix with the thing that
+ * gets wiped.
+ */
+const AUTH_EMAIL_PREFIX = 'zzz-catauth';
 
 let server;
 let base;
@@ -116,6 +129,7 @@ const store = {
   async resetAll() {
     await this.resetData();
     await User.deleteMany({ email: new RegExp('^' + EMAIL_PREFIX) });
+    await usersRepo.deleteByEmailPrefix(AUTH_EMAIL_PREFIX);
   },
 
   /**
@@ -237,17 +251,37 @@ const store = {
     await MongoCategory.deleteMany({ name: new RegExp('^' + NAME_PREFIX) });
   },
 
+  /**
+   * THE SUITE'S AUTH FIXTURE - MySQL since 3.6, and it was the largest single
+   * source of a false signal in the repository.
+   *
+   * WAS: created in MONGODB, a leftover from package 3.1 when users still lived
+   * there. Every authenticated request in this file then missed MySQL and was
+   * resolved through the auth bridge, logging [AUTH-DECISION-FROM-MONGO].
+   *
+   * THIRTY-TWO of them - by far the biggest number in the AE3 exit check, and
+   * every one of them SYNTHETIC. The bridge was not carrying traffic; this
+   * fixture was manufacturing it. A count that large is not ignorable and not
+   * explicable without reading the fixture, which is exactly the property that
+   * makes an exit check useless: it reported a number nobody could act on.
+   *
+   * The user under test here is incidental - this suite is about CATEGORIES.
+   * It needs an admin and a plain user that the middleware accepts, and since
+   * 3.2 that means MySQL.
+   */
   async createUser(role, tag) {
-    const email = `${EMAIL_PREFIX}-${tag}@invalid.test`;
+    const email = `${AUTH_EMAIL_PREFIX}-${tag}@invalid.test`;
+    await usersRepo.deleteByEmailPrefix(email);
     await User.deleteOne({ email });
-    const doc = await User.create({
+    const created = await usersRepo.create({
       name: 'ZZZ Cat Test ' + role,
       email,
-      password: await bcrypt.hash('FixturePass123!', 10),
+      password: 'FixturePass123!',
       role,
       isVerified: true,
     });
-    return doc._id.toString();
+    const fresh = await usersRepo.findById(created.id);
+    return fresh.legacyId || fresh.id;
   },
 };
 
@@ -337,10 +371,16 @@ before(async () => {
   assert.equal(probe.ok, true, `MySQL unreachable: ${probe.error}`);
 
   const app = require('../app.js');
-  for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.equal(mongoose.connection.readyState, 1, 'mongoose did not reach a connected state');
+  // CHANGED IN 3.6. This used to wait for `app.js` to open the Mongoose
+  // connection via connectDB(), then assert it had. `config/db.js` is deleted -
+  // the request path does not touch MongoDB at all - so a suite that still
+  // needs MongoDB for its own AK3 fixtures must connect for itself.
+  //
+  // The dependency was real and is now visible: the application no longer
+  // provides a MongoDB connection as a side effect of being imported, and
+  // anything relying on that was relying on the thing this package removes.
+  await mongoose.connect(process.env.MONGODB_URI);
+  assert.equal(mongoose.connection.readyState, 1, 'this suite connects to MongoDB itself');
 
   server = app.listen(0);
   await once(server, 'listening');
@@ -862,12 +902,18 @@ test('QUIRK: deleting a category REFERENCED BY A DONATION succeeds and orphans t
   assert.equal(stillThere.isArchived, true);
   assert.equal(await store.readDonationCategoryRef(donationId), catId);
 
-  // And the bridge still resolves it for the unmigrated readers, so an old
-  // donation's receipt does not lose its category.
-  const bridge = require('../services/categoryBridge');
-  const resolved = await bridge.resolveCategory(catId);
+  // CHANGED IN 3.6: the bridge is deleted, so this asserts the PROPERTY it was
+  // there to demonstrate rather than the mechanism. An archived category must
+  // still be resolvable by the id a historical donation carries, or an old
+  // receipt loses the category that priced it.
+  //
+  // The bridge was never doing the work here - it delegated to this repository
+  // and the answer was always `_source: 'mysql'`. Asserting the resolution
+  // survives the deletion is the outcome; asserting the bridge returned it was
+  // asserting the plumbing (BH2).
+  const resolved = await categories.findByLegacyId(catId) || await categories.findById(catId);
   assert.ok(resolved, 'an archived category still resolves for historical records');
-  assert.equal(resolved._source, 'mysql');
+  assert.equal(resolved.isArchived, true, 'and is still marked archived');
 });
 
 // =============================================================================

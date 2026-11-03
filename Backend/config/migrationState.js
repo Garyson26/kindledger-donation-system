@@ -80,7 +80,10 @@ const ENTITIES = {
       'and writes MySQL. scripts/seedDatabase.js still creates MongoDB ' +
       'categories, but it is a development seeder behind NODE_ENV!=production ' +
       'AND ALLOW_SEED=true, so it cannot write a deployed store.',
-    mongooseAllowed: ['etl/', 'services/categoryBridge.js', 'scripts/seedDatabase.js', 'test/'],
+    // 3.6: services/categoryBridge.js is DELETED and out of this list. An
+    // allowlist entry for a file that no longer exists is a standing
+    // permission nobody is using and the next person assumes is needed.
+    mongooseAllowed: ['etl/', 'scripts/seedDatabase.js', 'test/'],
   },
 
   user: {
@@ -97,7 +100,8 @@ const ENTITIES = {
       'scripts/seedDatabase.js still creates MongoDB users, but it is a ' +
       'development seeder behind NODE_ENV!=production AND ALLOW_SEED=true, so ' +
       'it cannot write a deployed store.',
-    mongooseAllowed: ['etl/', 'services/userBridge.js', 'scripts/seedDatabase.js', 'test/'],
+    // 3.6: services/userBridge.js is DELETED and out of this list.
+    mongooseAllowed: ['etl/', 'scripts/seedDatabase.js', 'test/'],
   },
 
   donation: {

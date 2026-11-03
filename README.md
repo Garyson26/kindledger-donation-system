@@ -5,8 +5,9 @@ categories, give as a guest or a registered user, and pay through **PayU Money**
 Administrators manage categories, donors, and donation records from an admin
 console with reporting and PDF receipts.
 
-**Stack:** React 18 + Vite SPA · Express 5 API on Node 20 · MongoDB Atlas ·
-PayU Money · deployed as two Vercel projects.
+**Stack:** React 18 + Vite SPA · Express 5 API on Node 20 · **MySQL 8.4 via
+Prisma** · Redis for rate limiting · PayU Money · Docker Compose for local and
+self-hosted deployment.
 
 ---
 
@@ -30,8 +31,12 @@ PayU Money · deployed as two Vercel projects.
 
 ## Quick start
 
-**Prerequisites:** Node >= 20, npm >= 10, a MongoDB instance, PayU test
-credentials, and an SMTP account (Gmail App Password works).
+**Prerequisites:** Docker and Compose v2 — the stack brings up MySQL, Redis,
+the API and nginx. For running the API outside Docker you also need Node >= 20
+and npm >= 10, plus a MySQL 8.4 instance and Redis.
+
+PayU credentials and an SMTP account (a Gmail App Password works) are needed for
+payments and email respectively; the rest of the system runs without them.
 
 ```bash
 git clone https://github.com/Garyson26/kindledger-donation-system.git
@@ -59,11 +64,12 @@ boot without the first two.
 
 | Variable | Notes |
 |---|---|
-| `MONGODB_URI` | MongoDB connection string |
+| `DATABASE_URL` | MySQL connection string, e.g. `mysql://user:pass@db:3306/kindledger`. Reserved characters must be percent-encoded |
+| `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` | Used by the `db` service in the compose stack |
 | `JWT_SECRET` | **Must be >= 32 characters.** `openssl rand -hex 32` |
 | `ADMIN_CREATION_KEY` | Required before any admin account can be self-registered |
 | `ALLOWED_ORIGINS` | Comma-separated frontend origins, no trailing slash |
-| `PAYU_MERCHANT_KEY`, `PAYU_MERCHANT_SALT`, `PAYU_BASE_URL` | PayU credentials and environment |
+| `PAYU_MERCHANT_KEY`, `PAYU_MERCHANT_SALT`, `PAYU_BASE_URL` | PayU credentials and environment. **`PAYU_MERCHANT_SALT` is the secret the callback signature is built from — without it the API refuses to build or verify a PayU hash rather than computing one anybody could forge (ENV-01)** |
 | `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL` | Backend `/api/payment/*` callback URLs |
 | `FRONTEND_SUCCESS_URL`, `FRONTEND_FAILURE_URL` | Where donors are redirected after payment |
 | `EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_SERVICE` | SMTP / Gmail credentials for OTP email |
@@ -205,24 +211,42 @@ fails with a 401 (BUG-04 in the docs), so the purge is not running.
 
 ## License
 
-**Undecided — do not rely on the current state of the repository.**
+**[Apache License 2.0](LICENSE).** See [NOTICE](NOTICE).
 
-[LICENSE](LICENSE) currently contains the **GNU GPL v3** text, while
-`Backend/package.json` declares `ISC` and `Frontend/package.json` declares
-nothing. That inconsistency is known and is deliberately left in place rather
-than resolved in passing, because picking the licence is a real decision with
-consequences that are easy to get wrong:
+The four artefacts that previously disagreed - `LICENSE` carrying GPL v3,
+`Backend/package.json` declaring ISC, `Frontend/package.json` declaring nothing,
+and this section saying "undecided" - now all say Apache-2.0.
 
-- **GPL-3.0** copyleft triggers on *conveying* — i.e. distributing the code.
-  Hosting a modified web application for network users is generally **not**
-  conveying, so under GPL-3.0 someone could fork KindLedger, modify it, run it
-  as a donation platform, and publish nothing.
-- **AGPL-3.0** is the licence that closes that gap: its section 13 extends the
-  obligation to users who interact with the software over a network.
-- Neither licence protects the "Powered by KindLedger" attribution footer. That
-  is a separate question, and a licence that forbade removing the attribution
-  would not be open source by the OSI definition.
+### Why Apache-2.0 rather than a copyleft licence
 
-The licence and the attribution question will be decided together. Until then,
-treat the licensing of this repository as unsettled and do not assume a
-permissive grant.
+- **GPL-3.0** was never the right fit for this project, and not for the reason
+  it is usually rejected. Its copyleft triggers on *conveying* - distributing
+  the code - and hosting a modified web application for network users is
+  generally not conveying. Someone could fork KindLedger, modify it, run it as a
+  donation platform, and publish nothing. **GPL here would impose obligations on
+  the people least likely to be the problem** - NGOs distributing a modified
+  copy to a peer - while leaving commercial hosting untouched.
+- **AGPL-3.0** closes that gap through section 13. It was the serious
+  alternative and was rejected because the goal is adoption by small NGOs, and
+  AGPL is the licence most likely to make a volunteer developer or a donated
+  hosting provider back away.
+- **Apache-2.0** grants patent rights explicitly (section 3), which neither MIT
+  nor ISC does, and carries attribution into derivative works through the NOTICE
+  file (section 4(d)).
+
+### What the licence does NOT do
+
+**It does not protect the "Powered by KindLedger Donation System" footer.** A
+fork may remove it, lawfully. That footer is an honour-system request, kept as a
+hardcoded component with no configuration surface, and the reason it is not a
+licence clause is that a licence forbidding its removal would not be open source
+under the OSI definition.
+
+This is stated plainly so that nobody later believes the licence is doing work
+it is not. The NOTICE file is the part with legal force; the footer is not.
+
+### On the previous GPL text
+
+Commit `4f3b7ec` added the GPL v3 text while this repository was private. No
+public distribution occurred under it, so **no public GPL grant exists** and
+nothing is being revoked. This is a first choice, not a change of licence.

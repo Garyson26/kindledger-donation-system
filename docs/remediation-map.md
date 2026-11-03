@@ -163,9 +163,9 @@ them in would make them look like ordinary work items.
 | U-1 | Licence (DEF-01) | **Gary.** Recommendation: Apache-2.0 | Phase 6 |
 | U-2 | `verify_payment` reconciliation | **3.4, DESIGN ONLY (re-homed by AT2)** - was 3.5, which no longer exists. The call itself is a later package | nothing |
 | U-3 | The `Cancelled` state | **Code to 3.2; the data question to the J3 session** | nothing |
-| U-4 | BUG-05 redirect URLs | **Gary, production session** | nothing |
+| U-4 | BUG-05 redirect URLs | **HALF CLOSED (AW3).** `.env.example` already matches `App.jsx`. The deployed values need one `vercel env pull` - not a session | nothing |
 | U-5 | `for_ocean_security_review.md` at HEAD | **Done in package 3.0** - see below | nothing |
-| U-6 | prisma advisory | **Trigger, not cadence** - start of every phase | nothing |
+| U-6 | prisma advisory | **DONE (AW3).** 3 high, one chain, in the PRODUCTION tree via `@prisma/client`; not attacker-reachable. Fix deserves its own package | nothing |
 
 ### U-1. DEF-01 - the licence is undecided and blocks publication
 **Source** ADR-020, ADR-029 (ADR-029 is on the unmerged `docs/incident-j1-j6`
@@ -258,12 +258,37 @@ donor lands on a blank page. This cannot be closed by reading code: it depends
 on **the values actually deployed**, which are in Vercel's environment settings
 and have never been confirmed.
 
-**ASSIGNED TO GARY, production session.** Read the deployed
-`FRONTEND_SUCCESS_URL` and `FRONTEND_FAILURE_URL` and compare against the routes
-in `App.jsx`. If they match, this closes as a documentation defect in
-`.env.example` alone. If they do not, every donor who has paid since the values
-were set has landed on a blank page after a successful payment, and the finding
-is considerably larger than it reads here.
+**HALF OF THIS IS ALREADY CLOSED, AND HAD BEEN FOR SEVERAL PACKAGES (AX5).**
+`.env.example` lines 219-220 read `/payment-success` and `/payment-failure`,
+which match `App.jsx:180-181` exactly. The documentation defect was fixed and
+the finding was never updated - it has been describing a corrected file.
+
+**WHAT REMAINS IS ONE COMMAND, NOT A SESSION.**
+
+```
+vercel env pull        # or one look at the dashboard
+```
+
+and compare two values against exactly:
+
+```
+/payment-success
+/payment-failure
+```
+
+If they match, U-4 closes entirely. If they do not, every donor who has paid
+since the values were set has landed on a blank page after a successful payment.
+
+**The comparison is pre-computed, so whoever reads the values is CONFIRMING
+rather than INVESTIGATING.** That is a materially smaller ask than "a production
+session" and should be described as one.
+
+Checked and not available from here, both reasons verified rather than assumed:
+the Vercel tooling in this session can WRITE environment variables and not read
+them, and the backend deployment is `BLOCKED` with `live: false`, answering 404 -
+so behavioural probing is unavailable too. (The invalid-hash path would otherwise
+have revealed `FRONTEND_FAILURE_URL` without any credential, since it redirects
+before any hash check passes.)
 
 ### U-5. SEC-17 (second half) - `for_ocean_security_review.md` is tracked in the repository root
 **Source** SEC-17; ADR-030. **Provenance R.**
@@ -445,7 +470,7 @@ bridge for the six unmigrated read sites.
 | | |
 |---|---|
 | `routes/categories.js` | rewritten against `repositories/categories`; no Mongoose |
-| `services/categoryBridge.js` | temporary, deleted in 3.6; logs and counts every MongoDB fallback |
+| `services/categoryBridge.js` | temporary, deleted in 3.6 (the BRIDGE goes in 3.6; Mongoose itself survives in `etl/` until 4c - ADR-059); logs and counts every MongoDB fallback |
 | `test/categories-characterisation.test.js` | 22 scenarios, green BEFORE and AFTER the migration |
 | `test/category-bridge.test.js` | 11 scenarios, both paths plus twelve malformed inputs |
 | six read sites | `payment.js` x2, `admin.js` x1, `donations.js` x4 |
@@ -883,6 +908,810 @@ both were found, and is AD2's method applied to something other than ordering.
 
 **Applies to AJ3's severity pass**, which is the same rule aimed at one class of
 claim - a severity derived from a mechanism is an inherited guess at an outcome.
+
+---
+
+## AW2 - the destructive-assertion audit. One finding, and it is not a test.
+
+**AW1's question, applied to every assertion in 259 tests that something is
+cleared, voided, disabled, locked, deleted or revoked at a threshold or on a
+failure count:**
+
+> What does an attacker gain by reaching that threshold ON SOMEONE ELSE'S
+> BEHALF?
+
+**The absences are evidence, so every one is listed - including the "nothing"s.**
+
+### The matrix
+
+| Assertion | Threshold | What an attacker gains by triggering it on a third party |
+|---|---|---|
+| `setActive(false)` increments `token_version` (`data-layer:225`) | an admin disables an account | **Nothing.** Only an admin reaches it |
+| admin password change revokes sessions (`admin-char:604`) | an admin sets a password | **Nothing.** Only an admin reaches it |
+| `setPassword` increments `token_version` (`data-layer:182`) | the password changes | **Nothing.** Requires already controlling the account or a valid reset code |
+| the reset code is CONSUMED on success (`auth-reset:281`) | a CORRECT code is used | **Nothing.** Requires the code, at which point they have won already |
+| the attempt counter is NOT cleared at `/verify` (`auth-reset:294`, ADR-034) | — | **Nothing** - it asserts a non-clearing, which is the safe direction |
+| the attempt counter IS carried by the ETL (`etl:216`) | migration | **Nothing.** Carrying it is the conservative choice; resetting would hand an in-progress attacker a fresh budget |
+| expired pending signups are swept (`data-layer:710`) | 24 hours | **Nothing.** The rows expire by design and hold only unverified attempts |
+| the retention purge deletes donations (`data-layer:826`) | ten years + AT1's gates | **Nothing.** Unreachable without an operator's explicit authorisation |
+| DELETE archives a category rather than removing it (`categories:810`) | an admin deletes | **Nothing.** Only an admin reaches it, and ADR-004 made it a soft delete |
+| the reset code SURVIVES the cap (`auth-reset:263`) | 5 wrong codes | **Nothing - this is the one AV1 FIXED.** It previously read `hasResetCode === false` and was the finding AW1 records |
+| **`signupOtpAttempts` is reset to 0 by `upsert`** (`data-layer:246`) | **a second `/signup` for the same address** | **SEE SIGNUP-01 BELOW** |
+
+### Ten of eleven are "nothing", and the reason is structural
+
+**Every safe one has the same property: the threshold is reachable only by
+someone who already holds the authority the destruction represents** - an admin,
+or the holder of a valid code, or the passage of time. The unsafe one is the
+only case where an ANONYMOUS third party can reach the threshold.
+
+That is a sharper form of AW1's question, and it is worth stating as the rule
+this audit actually found:
+
+> **A destructive threshold is safe when reaching it requires authority the
+> destruction itself presupposes. It is dangerous when an unauthenticated party
+> can reach it on someone else's behalf.**
+
+### SIGNUP-01 - PRE-REGISTRATION ACCOUNT TAKEOVER
+
+**Severity: High. Provenance X - proved by probe, output below. NOT introduced by
+package 3.5a; found by auditing in its neighbourhood.**
+
+`POST /api/auth/signup` is unauthenticated and accepts any address. For an
+address with NO account it stores a pending signup containing **the name, the
+role and the PASSWORD HASH the caller supplied** - and emails that address a
+code saying *"Thank you for joining For Ocean Foundation! To complete your
+registration, please verify your email address with this code."*
+
+**If the recipient enters that code, an account is created with the ATTACKER'S
+PASSWORD, and the attacker can sign in as them.**
+
+Measured, end to end:
+
+```
+--- 1. ATTACKER initiates a signup for the victim address ---
+  status: 200 {"message":"Registration initiated. Please check your email..."}
+  pending row created: true
+  name stored: Totally The Victim
+  password hash is the ATTACKER-chosen one: true
+
+--- 2. Can an attacker RESET the OTP attempt counter by re-posting? ---
+  attempts before re-post: 4 -> after: 0
+
+--- 3. If the victim verifies, WHOSE password does the account have? ---
+  verify status: 200
+  account created: true
+  ATTACKER PASSWORD WORKS ON IT: true
+```
+
+**Three separate problems, and the third is the one that matters:**
+
+1. **An attacker can destroy a legitimate in-flight signup.** `upsert` replaces
+   the whole row, so re-posting the address invalidates the OTP already sitting
+   in the victim's inbox. Repeatable.
+2. **`signupOtpAttempts` resets to 0 on every re-post.** It does not help brute
+   force - each re-post also changes the code - but a counter that any
+   anonymous caller can reset is not a counter.
+3. **THE ACCOUNT IS CREATED WITH THE ATTACKER'S PASSWORD.** The victim believes
+   the account is theirs. Everything they subsequently do - donations, profile,
+   receipts - is visible to whoever chose that password.
+
+**The email is the whole attack surface**, and it currently reads as a
+legitimate welcome. It thanks the recipient for joining something they did not
+join, and asks for an action. Contrast 3.5a's new notice, which was written for
+a recipient who did not initiate the request and says *"you do not need to do
+anything"* and *"we will never ask you for your password or a verification code
+by email."* **The template written for the untrusted case is careful; the one
+that has always existed is not.**
+
+### CLOSED IN AX1 - and recommendation 1 was NOT what closed it
+
+**Recommendation 1 - the email warning - is IMPLEMENTED and is a MITIGATION.**
+It asks the recipient to make the right decision. It cannot make the attack
+fail, because the attack succeeds precisely when the recipient makes the wrong
+one, and no test can assert that a human read a paragraph.
+
+**What closes it: `/signup/verify-otp` now requires the password the signup was
+started with.**
+
+> **The OTP proves control of the ADDRESS. It does not prove who STARTED the
+> signup.** Those are different facts and the flow treated them as one.
+
+The password is the only thing the initiator holds that a recipient does not:
+
+| | Knows the password | Outcome |
+|---|---|---|
+| a genuine signer-up | yes - they chose it | verifies |
+| an address owner who did not sign up | **no** | **cannot verify** |
+
+**`/login` already required exactly this** before re-sending an OTP for a pending
+signup - the precedent was in the same file, and the strictly more dangerous
+endpoint did not have it.
+
+The frontend already held the password in state across both steps of its
+single-page flow; it simply never sent it. One field.
+
+**Proved by running the attack, not by asserting the line is present**
+(`test:auth-char`): the attacker initiates, re-posts to reset the counter, the
+victim enters the code - **and no account is created.** With a control test that
+a genuine signup still completes, so the proof is not that the endpoint is
+broken.
+
+### STILL NOT IMPLEMENTED, with their evidence
+
+**Recommendation 2 - do not reset `signupOtpAttempts` on a re-post.** Still
+live: the test above ASSERTS the counter resets from 4 to 0, so the residual is
+pinned rather than assumed closed. It no longer contributes to takeover, because
+the chain breaks later; it remains a counter any anonymous caller can reset.
+
+**Recommendation 3 - rate-limit `/signup` per ADDRESS.** Still live. An attacker
+can still destroy a legitimate in-flight signup by re-posting the address, since
+`upsert` replaces the row and invalidates the OTP already in the victim's inbox.
+That is a denial of registration, not a takeover.
+
+**Neither is inherited as "probably fine" - both are asserted or stated with the
+behaviour that establishes them.**
+
+---
+
+## Package 3.5a - SEC-08's LAST ORACLE CLOSED
+
+`config/email.js` gains one template and `/signup` uses it. AQ2's audit said it
+would be one template; it was one template.
+
+### Both halves are required
+
+A uniform response with no email behind it is **a lie to the attacker and a
+SILENCE TO THE VICTIM** - the person whose address was used would never learn it
+happened. So the existing-account path sends a notice and says the same thing to
+the caller either way.
+
+**What the notice must not do**, which is the whole design:
+
+- **No code and no link.** Someone who does not control the address caused it to
+  be sent. Anything actionable is a capability handed to them if that mailbox is
+  ever compromised, and this recipient has nothing to DO.
+- **It does not say who tried.** We do not know - the attempt carries an address
+  and a name the attacker typed, and no verified identity.
+- **It does not echo the attacker's `name`.** Reflecting it would let anyone
+  send arbitrary text to any address in the system, in an email from us. The
+  greeting uses the name on the EXISTING account; the only attacker-controlled
+  value in the message is the address, which the recipient already knows.
+
+### I INVERTED THE ORACLE BEFORE I CLOSED IT
+
+The first version made only the NOTICE fire-and-forget and left the OTP path
+awaiting its send, rolling back and answering 500 on failure.
+
+**That did not close the oracle - it turned it around.** With mail degraded, an
+address that HAS an account answers 200 and one that does not answers 500, which
+distinguishes them perfectly. Worse than before, because the 500 looks like an
+infrastructure problem rather than a disclosure.
+
+**The asymmetry was in the branch I was not editing.** My own comment at that
+site anticipated the shape and named the wrong branch. The test caught it on the
+first run; reading the code did not.
+
+`/signup/resend-otp` had already been made fire-and-forget for exactly this
+reason, **in the same file, three functions away.** A precedent that close and
+still not applied is the argument for running the thing rather than reasoning
+about it.
+
+### THE COST, STATED
+
+A user whose address genuinely bounces is told "check your email" and receives
+nothing. That is inherent to a uniform response and it is the price SEC-08 asks.
+The pending row is now KEPT rather than rolled back, so `/signup/resend-otp` is
+a real recovery path, and the 24-hour sweep removes it if nobody uses it.
+
+### One field is excluded from the byte-comparison, with an argument
+
+`email` differs between the two responses because each **echoes the address the
+caller sent**. That is definitionally not a disclosure - the attacker chose the
+value. Every other field must match byte for byte, and the test additionally
+asserts that the excluded field IS a pure echo and that both bodies carry the
+same KEYS, so it cannot quietly become a carrier later.
+
+**An exclusion with an argument is different from a comparison that never
+looked**, which is the distinction AP1 is actually about.
+
+### What is NOT closed
+
+**A TIMING difference.** The new-account path hashes a password and writes a
+row; the existing-account path does neither. That is a far weaker signal than a
+distinct message, and closing it means constant-time signup - a different piece
+of work. Recorded here rather than left implied by the absence of a comment.
+
+---
+
+## AZ2 - A DELETION CRITERION ATTACHED TO A FILE IS WRONG WHEN THE FILE'S CONTENTS HAVE DIVERGENT LIFETIMES
+
+ADR-047 said `docker-compose.legacy-mongo.yml` exists only while `config/db.js`
+does. **That is true of one half of the file and false of the other:**
+
+| What the override provides | Dies when | Package |
+|---|---|---|
+| `MONGODB_URI` on the api service | `config/db.js` goes | **3.6** |
+| the `mongo` SERVICE itself | 4b's snapshot rehearsal has restored into it and the ETL is gone | **4c** |
+
+Amended with a superseding note rather than rewritten, per the ADR-012
+precedent - the original reasoning is what makes the correction legible.
+
+### The generalisation
+
+> **A deletion criterion attached to a FILE is wrong when the file's contents
+> have divergent lifetimes. Attach it to the CAPABILITY instead.**
+
+"Delete `docker-compose.legacy-mongo.yml` when `config/db.js` goes" binds two
+capabilities that happen to share a file. The criterion that survives is
+"the api stops needing `MONGODB_URI`" and, separately, "nothing needs a local
+MongoDB".
+
+### The sweep - every remaining "delete X when Y" where X is a FILE
+
+| Criterion | X is a file or a capability? | Verdict |
+|---|---|---|
+| ADR-047, the override | **FILE** - two capabilities in it | **The finding above.** Split |
+| ADR-050, delete the bridges when `fallbackCount()` is zero | capability - "nothing needs the MongoDB fallback" | **Safe.** And it is measured, not declared |
+| AE1-a, NULL minted `legacy_id`s before MongoDB is deleted | capability - "MongoDB is still readable" | **Safe**, and the ordering is the whole point |
+| AV2's boot-registration gate, "delete in the same commit that removes Mongoose" | **FILE-shaped** - it names a commit, not a condition | **Corrected by ADR-059.** It said 3.6; Mongoose survives in `etl/` until 4c, so the gate still has a subject. Re-homed |
+| ADR-033, duplicate index declarations "moot once the models go" | capability - "no Mongoose schema is loaded" | **Safe** |
+| U-5 / ADR-030, the history scrub in Phase 6 | capability | **Safe** |
+
+**Two of six were file-shaped, and both were wrong.** That is a high enough rate
+to be worth the sweep rather than a note.
+
+---
+
+## AZ3 - WHAT AY2's FOURTH INSTANCE UNDERCUTS
+
+**It is not only a finding about a fix. It undercuts the assumption behind every
+ADR in this repository.**
+
+The practice here rests on: *write the reasoning down, next to the thing, and it
+will be available to whoever needs it next.* Fifty-nine ADRs, a remediation map,
+and comment blocks longer than the functions they describe all assume it.
+
+**AX4 is a counter-example at the shortest distance the assumption could
+possibly be tested at.** `/signup/resend-otp` was fire-and-forget WITH A COMMENT
+SAYING WHY - "so a mail failure cannot distinguish by status either". Three
+functions later, in the same file, in the same editing session, I made only one
+branch fire-and-forget and left the sibling awaiting its send. And the comment I
+wrote at the site I WAS editing reasoned about that exact risk and named the
+wrong branch.
+
+> **Writing a thing down does not make it available to whoever needs it next. Not
+> at any distance, including three functions, including when the person who needs
+> it is the person who wrote it, forty minutes later.**
+
+### What that means for the practice, stated honestly
+
+**The ADRs are not worthless - but their value is not where it feels like it is.**
+
+- **They are excellent for the reader who already suspects something** and goes
+  looking. Every inherited-claim correction in this project was found by someone
+  asking a question and finding the answer recorded.
+- **They are close to useless as a CONTROL at the point of change.** A document
+  consulted only by someone who already suspects the problem cannot prevent the
+  problem, because the person about to make the mistake does not suspect it -
+  that is what makes it a mistake.
+
+### The countermeasure is ENUMERATE-AND-STATE AT THE POINT OF CHANGE
+
+Not "read the ADR". Not "check nearby". **At the moment of fixing an asymmetry,
+list every sibling and write down what each one does.** That converts the check
+from something requiring suspicion into something requiring only a list - and a
+list can be produced by someone who has no idea what they are looking for, which
+is precisely the person who needs it.
+
+**Every mechanical gate in this project has the same shape and that is why they
+work**: the drift gate, the migration-state self-check, the boot-registration
+set, the destructive-job authorisation. None requires anyone to suspect anything.
+**The ADRs explain those gates; they do not substitute for them**, and AX4 is the
+clearest evidence that they cannot.
+
+---
+
+## AY1 - A MITIGATION THAT DEPENDS ON A HUMAN CANNOT CARRY A CLOSURE CLAIM
+
+**Recorded because the instruction was wrong, and that is worth keeping as
+carefully as a wrong implementation.**
+
+AX1 asked for SIGNUP-01's recommendation 1 - a warning in the signup email - to
+be proved to the same standard as the finding: the attack failing end to end.
+
+**That was not possible, and the impossibility is structural rather than a
+matter of effort.** The warning asks the recipient to decide correctly. The
+attack succeeds precisely when they decide incorrectly. A test can assert the
+paragraph is present; it cannot assert that a human read it, believed it, and
+acted on it - and the case where they did not is the entire attack.
+
+> **When a recommendation's effectiveness depends on a human reading something,
+> it CANNOT carry a closure claim under AU2. Either it is paired with a
+> MECHANICAL control that can, or the finding stays OPEN with the mitigation
+> noted.**
+
+Added to the per-package criteria. It is the natural completion of AU2: that
+rule says a closure claim must cite the behaviour establishing it, and this says
+what to do when no behaviour can.
+
+**Asking for proof of an unprovable control is itself a defect in the
+instruction**, and it is a quiet one - it reads as rigour. The tell is that the
+proof would have to assert something about a person rather than about the
+system.
+
+For SIGNUP-01 the answer was the second branch: the warning shipped as a
+mitigation, and `/signup/verify-otp` requiring the initiating password is the
+mechanical control that carries the closure.
+
+---
+
+## AY2 - THE ADJACENCY PATTERN: a control a few functions from where it was missing
+
+**Four instances in this phase, and the fourth is the most surprising.**
+
+| # | The control that existed | Where it was missing | Distance |
+|---|---|---|---|
+| 1 | SEC-08 unified on three endpoints (3.2) | a fourth endpoint differing on body text (AP1) | same file |
+| 2 | `passwordProblem`, one validator for five paths | `admin.js` had a sixth, check 10 / message 6 (AT5) | one file away |
+| 3 | `/login` required the pending password before re-sending an OTP | `/signup/verify-otp` did not require it at all (AX1) | **same file** |
+| 4 | `/signup/resend-otp` was fire-and-forget, WITH A COMMENT SAYING WHY | `/signup`'s OTP path awaited its send (AX4) | **three functions** |
+
+### The fourth is different in kind
+
+The first three are a control not propagating. **The fourth is CORRECT REASONING,
+WRITTEN DOWN, IN THE SAME FILE, failing to reach the next function** - and worse,
+my own comment at the site I was editing reasoned about the exact risk and
+attributed it to the wrong branch.
+
+**This is AK3's meta-lesson at a smaller and far more surprising scale.** AK3 was
+about a rule stated for one control failing to propagate to others - a
+documentation-level failure over packages. This is the same failure over
+FUNCTIONS, within a single editing session, with the explanation already visible
+on screen.
+
+### The countermeasure, and why "check nearby" is not it
+
+> **When fixing an asymmetry, ENUMERATE every sibling branch and endpoint in the
+> same file and STATE, for each, whether it has the same property.**
+
+Not "check nearby". **"Nearby" is what has failed four times.** The enumeration
+has to be written down, because the failure mode is not forgetting to look - it
+is looking and not seeing, which an unwritten check cannot catch. Three of the
+four had the answer already present in the file.
+
+Added to the per-package criteria. **Applied retroactively in 3.6** for each fix
+this phase that turned on a branch condition.
+
+---
+
+## AX4 - THE INVERTED ORACLE. Eleventh inherited claim, and it made things WORSE.
+
+Package 3.5a's first version made only the signup-attempt NOTICE
+fire-and-forget, leaving the OTP path awaiting its send with a rollback and a
+500.
+
+**That did not close the oracle. It turned it around** - and the new one is
+worse than the original:
+
+| | Known address | Unknown address |
+|---|---|---|
+| Before 3.5a | `400 "User already exists"` | `200` |
+| **After the first attempt** | `200` | **`500`** (mail degraded) |
+| After the fix | `200` | `200` |
+
+### WHY THE INVERTED FORM IS WORSE THAN THE ORIGINAL
+
+**A 500 reads as infrastructure, not as disclosure.** The original oracle was a
+message that said in plain words what it revealed - anyone auditing it could see
+it. The inverted one looks like a mail outage, which is a thing that genuinely
+happens, and an operator seeing intermittent 500s on signup investigates SMTP.
+
+**The oracle goes quiet while staying open.** That is the worst of both: it still
+distinguishes the two cases perfectly for anyone probing, and it no longer looks
+like a security finding to anyone maintaining.
+
+### THE ASYMMETRY WAS IN THE BRANCH I WAS NOT EDITING
+
+I was writing the existing-account branch. The defect was in the new-account
+branch, which I had not touched and therefore did not re-read - and **my own
+comment at the site I WAS editing named the wrong branch**, reasoning about the
+risk correctly and attributing it backwards.
+
+**Three functions away in the same file, `/signup/resend-otp` had already been
+made fire-and-forget for exactly this reason**, with a comment saying so: "Fire
+and forget, so a mail failure cannot distinguish by status either."
+
+A precedent that close, already applied, in the same file, for the same reason,
+and still not carried across. That is the strongest argument available for
+running the thing rather than reasoning about it: **the reasoning was present,
+correct, and written down, and it still did not reach the adjacent branch.**
+
+---
+
+## AW1 - A TEST THAT ENCODED A HARM AS A REQUIREMENT, AND THEN PROTECTED IT
+
+**Its own class. The three neighbours are all about CONTROLS; this one is about
+a TEST.**
+
+| | What was wrong |
+|---|---|
+| **AT3** | the FIX instantiated the shape its rule prohibited |
+| **AU3** | the CONTROL was correct only where nothing was at stake |
+| **AV2** | the control was RIGHT; its model of the code and the runtime's diverged |
+| **AW1** | **nothing was a control at all.** A TEST asserted a harm as a requirement, and the discipline protecting tests then protected the harm |
+
+### The shape, in four steps
+
+1. **`clearResetCode` at the cap defended nothing.** An exhausted counter
+   refuses the code without ever comparing it, so voiding it removed no
+   capability from an attacker.
+2. **It handed anyone who knows an address a five-request denial of service** on
+   that user's pending reset. Request a reset for someone, guess five times,
+   their code is destroyed. Repeat.
+3. **SEC-02's regression suite asserted it as a requirement**, in good faith:
+   `assert.equal(u.hasResetCode, false, 'the reset code must be voided at the cap')`.
+4. **It survived because it reads like defence in depth.** "The code is voided
+   at the cap" is the sentence a careful person writes. Nothing about it looks
+   like a mistake, and the assertion message argues for itself.
+
+### THE UNCOMFORTABLE PART, WHICH BELONGS IN THE RECORD
+
+**The discipline that makes tests trustworthy is what gave this its
+durability.**
+
+- *Do not edit scenarios quietly* (SPEC-3 section 4.1) meant nobody could remove
+  it without a deliberate act and a written justification.
+- *Assert the strongest true thing* (BUG-11, AP1) meant it was written as a
+  tight, specific assertion rather than a loose one - which made it harder to
+  drift past.
+- *A regression suite must pass UNCHANGED* meant every subsequent package
+  treated it as fixed ground.
+
+**A WRONG ASSERTION INHERITS THE PROTECTION BUILT FOR RIGHT ONES.** Every one of
+those rules is correct and I would keep all three. The cost of them is that a
+mistake written in the protected form is more durable than one written
+carelessly - and the more security-shaped the mistake sounds, the longer it
+lasts.
+
+That is not an argument for weaker discipline. It is an argument that the
+discipline has no opinion about whether an assertion is CORRECT, only about
+whether it is STABLE, and something else has to supply the first.
+
+### The countermeasure, as a question
+
+Added to the per-package acceptance criteria:
+
+> **For any assertion that a control DESTROYS or REVOKES something at a
+> threshold, ask: what does an attacker gain by reaching that threshold ON
+> SOMEONE ELSE'S BEHALF?**
+
+A question rather than a rule, because the answer is often "nothing" and the
+assertion is then correct - the point is that it must be ASKED, not that the
+pattern is forbidden. `setActive(false)` incrementing `token_version` is exactly
+this shape and is right: an attacker cannot reach that threshold, only an admin
+can.
+
+**AW2 applies this question to every existing suite.**
+
+---
+
+## AW3 - which open items are BLOCKED, and which are merely PARKED
+
+**Applying AV3's instinct: "deferring a question a public document answers is
+how a blocker acquires a dependency it never had."**
+
+| Item | Verdict |
+|---|---|
+| **U-1** Licence | **Genuinely blocked, on a PERSON.** Not a lookup - it is a choice about what the organisation wants. No document answers it |
+| **U-3** the `Cancelled` state, data half | **Genuinely blocked.** Needs a count from production MongoDB. That is J3 |
+| **U-4** BUG-05 redirect URLs | **HALF ALREADY CLOSED, and the map did not say so. The rest is narrower than recorded** - see below |
+| **U-6** prisma advisory | **NOT BLOCKED. Done - see below** |
+| **J3** production Mongo credentials | **Genuinely blocked.** Credentials |
+| **4b** snapshot rehearsal | **Genuinely blocked.** Depends on J3 |
+| **PAY-03** firstname 20 in PayU's TEST env | **Genuinely blocked** on a sandbox run - but the DOCUMENTED half is already extracted (AV3), so the sandbox exercise is a confirmation rather than an investigation |
+
+### U-4 - the `.env.example` half is ALREADY FIXED
+
+The map says: "`.env.example` used `/payment/success` and `/payment/failure`;
+`App.jsx` defines `/payment-success` and `/payment-failure`."
+
+**Checked. `.env.example` lines 219-220 now read:**
+
+```
+FRONTEND_SUCCESS_URL=https://donation.example.org/payment-success
+FRONTEND_FAILURE_URL=https://donation.example.org/payment-failure
+```
+
+**Which match `App.jsx:180-181` exactly.** The documentation defect was fixed at
+some point and the finding was never updated - it has been describing a
+corrected file for several packages.
+
+**What remains is the DEPLOYED values, and that is genuinely unreachable from
+here** - two independent reasons, both checked rather than assumed:
+
+1. The Vercel tooling available to this session can WRITE environment variables
+   and cannot READ them. `get_project` returns framework, domains and deployment
+   state; no environment values.
+2. Behavioural probing is unavailable: the backend deployment's `readyState` is
+   `BLOCKED` and `live` is `false`, and the production domain answers 404. (The
+   invalid-hash path would otherwise have revealed `FRONTEND_FAILURE_URL`
+   without any credential, since it redirects before any hash check passes.)
+
+**But it is no longer a "production session".** It is one `vercel env pull`, or
+one look at the dashboard, comparing two values against exactly:
+
+```
+/payment-success
+/payment-failure
+```
+
+The comparison is pre-computed, so whoever reads the values is confirming rather
+than investigating. **That is the difference AV3 is about**: the task did not
+shrink, the part of it that needed a human did.
+
+### U-6 - the prisma advisory check, DONE
+
+The item was "trigger, not cadence - start of every phase", and Phase 4 is next.
+Run against the deployed tree:
+
+```
+deepmerge-ts  <8.0.0   HIGH   stack exhaustion on recursive object graphs
+  @prisma/config
+    prisma
+3 high severity vulnerabilities
+```
+
+**The chain IS in the PRODUCTION tree, and the obvious reading is wrong.**
+`prisma` is declared a devDependency - so the natural conclusion is "build
+tooling only". `npm ls` says otherwise:
+
+```
+@prisma/client@6.19.3      <- a production dependency
+`-- prisma@6.19.3
+  `-- @prisma/config@6.19.3
+    `-- deepmerge-ts@7.1.5
+```
+
+`@prisma/client` pulls `prisma` transitively. **Checking the declaration would
+have given the wrong answer; checking the tree gave the right one.**
+
+**It is not reachable by an attacker.** `deepmerge-ts` is used by
+`@prisma/config` to merge Prisma CONFIGURATION, which is developer-controlled.
+No request path reaches it, and stack exhaustion needs attacker-controlled
+recursive input.
+
+**Its own package, 4d, AFTER 4c (AZ1)** - so that a failure in either cannot
+be attributed to the other. The fix is a
+Prisma bump, which regenerates the client - the one dependency the entire data
+layer sits on. It deserves a full suite run of its own rather than being
+absorbed into a package that is already removing Mongoose.
+
+---
+
+## AV1 - the per-address reset cap. SEC-02 vs SEC-08 RESOLVED.
+
+**`config/rateLimiters.resetAttemptLimiter`.** Five attempts per address per
+fifteen minutes, shared by `/forgot-password/verify` and `/reset`.
+
+### AQ1's three requirements, and how each is met
+
+**1. COVERS ADDRESSES WITH NO ACCOUNT.** It is a limiter, not a column. A column
+can only exist for an address that has a row, which was the whole problem.
+
+**2. CAPS THE RESPONSE, NOT THE ACCOUNT.** It is a WINDOW: it expires by itself,
+writes nothing to the user's row, and `/forgot-password/request` is deliberately
+NOT behind it, so a delayed user can always obtain a fresh code and a fresh
+per-account budget. A per-address counter that disabled anything would be a
+denial-of-service primitive handed to anyone who knows an address.
+
+**3. FULL BODY IDENTICAL AT THE CAP.** Asserted with `deepEqual` over the whole
+body, in `test:auth-char`, for an address with an account and one without.
+
+### THE UNIFORMITY IS STRUCTURAL, NOT MAINTAINED BY HAND
+
+The cap response is produced by MIDDLEWARE, before the handler, before anything
+has been looked up. **There is no code path in which the two cases could
+diverge** - as opposed to two branches a later edit has to keep byte-identical.
+
+That distinction is the lesson of AP1, which exists because my first SEC-08 fix
+unified three endpoints and left a fourth differing on body text. A property
+maintained by construction does not need the discipline that one maintained by
+agreement does.
+
+### VOIDING THE RESET CODE WAS A GRIEFING PRIMITIVE, AND A TEST REQUIRED IT
+
+The old cap did `clearResetCode(user.id)`. It defended nothing - an exhausted
+counter refuses the code without ever comparing it - while letting anyone who
+knows an address destroy that user's pending reset with five requests.
+
+**SEC-02's regression suite asserted it**: `'the reset code must be voided at the
+cap'`. A regression test was requiring a denial-of-service primitive, in good
+faith, because "the code is voided" reads like defence in depth. That is the
+most useful thing in this package: **a test can encode a harm as a requirement,
+and the more security-shaped the assertion sounds, the longer it survives.**
+
+### The deliberate edit (SPEC-3 section 4.1)
+
+Stated rather than made quietly, with the before and after in the test file
+itself:
+
+| Before | After |
+|---|---|
+| `status === 429` | `status === 400` |
+| `/Too many attempts/i` | `'Invalid verification code'` |
+| `hasResetCode === false` - *"must be voided at the cap"* | `hasResetCode === true` - **must SURVIVE the cap** |
+| `passwordIsOriginal === true` | **unchanged** - the security property, and it still holds |
+
+The 429 has not disappeared. It moved to the per-address limiter, which produces
+it for EVERY address. SEC-02's control still announces itself; it no longer
+announces who has an account.
+
+### A TEST THAT PASSED WITH A FALSE PREMISE
+
+`auth-characterisation`'s oracle test went green after the limiter landed and
+before it was edited: the known address tripped the new per-address cap at 429,
+and the unknown address - a DIFFERENT address with its own untouched bucket -
+still answered 400. The assertion held and its premise was gone.
+
+**A test can survive the removal of the thing it was written to pin, when what
+it measures is a side effect rather than the property.** It only failed honestly
+once rewritten to drive BOTH addresses to the cap, which is what the finding was
+always about.
+
+### DEPLOY-01, a third time
+
+A per-address cap over a 15-minute window plus a shared, durable Redis store
+made `test:auth` fail on its FIRST request with `429/0` - the previous run's
+budget, on a stable fixture address. The first two instances were per-IP; this
+bucket is one no amount of varying the client address can escape. Fixture
+addresses are now unique per run.
+
+---
+
+## AV2 - A CORRECT CONTROL, ACTING ON A CORRECT FINDING, BROKE A LIVE PATH
+
+**Its own class. Not AT3, not AU3, and the difference is the useful part.**
+
+| | What went wrong |
+|---|---|
+| **AT3** (3 instances) | the FIX was wrong - it instantiated the shape its rule prohibited |
+| **AU3** | the CONTROL was incomplete - correct on the subset where nothing was at stake |
+| **AV2 (PAY-02)** | **nothing was wrong.** The finding was real, the control was right, the remedy was correct, and a live path broke |
+
+AT4's gate says: no file may import the Mongoose model of an entity whose
+authoritative store is MySQL. `routes/admin.js` imported `models/User` and used
+it nowhere. The gate flagged it; the import was removed; both were correct.
+
+And `GET /api/payment/status/:txnid` started answering 500 to every request,
+because `.populate('userId')` resolves through Mongoose's GLOBAL MODEL REGISTRY
+and that `require()` was the only thing populating it.
+
+### The statement
+
+> **A correct control acting on a correct finding can break a live path when its
+> MODEL OF THE CODE and the RUNTIME'S MODEL diverge.**
+>
+> AT4 checks REFERENCES. Mongoose's model registration is a SIDE EFFECT OF
+> MODULE LOADING. Those are different properties, and no amount of care about
+> the first tells you anything about the second.
+
+The control was not checking the wrong thing - "does a file reference a migrated
+model" is exactly the right question for the coupling AT4 was built to find. It
+is that the ANSWER to that question does not determine whether the import can be
+removed, and nothing in the question hints that it might not.
+
+### U-6 IS THE SAME CLASS (AX2)
+
+`prisma` is declared a **devDependency**. The obvious reading is "build tooling
+only, not shipped". `npm ls` says otherwise:
+
+```
+@prisma/client@6.19.3      <- a PRODUCTION dependency
+`-- prisma@6.19.3
+  `-- @prisma/config@6.19.3
+    `-- deepmerge-ts@7.1.5   <- the advisory
+```
+
+**Checking the DECLARATION gives the wrong answer. Checking the TREE gives the
+right one.** The declaration is a statement of intent; the tree is what npm
+installs. Those are different properties, exactly as "does a file reference a
+model" and "does loading it register one" are different properties.
+
+Filed here rather than as a dependency note, because the interesting part is not
+the advisory - it is that a reasonable person checks `package.json`, concludes
+"dev-only", and is wrong.
+
+### The countermeasure is NOT a better import checker
+
+That is the tempting conclusion and it is wrong. A checker that also understood
+Mongoose's registry would miss the next registry - a decorator, a plugin system,
+an `express.Router` collected at import time, a `process.on` handler. **The
+space of load-time side effects is not enumerable by static analysis**, which is
+precisely why they are side effects.
+
+> **REMOVALS GET THE SAME INJECTION-PROOF STANDARD AS ADDITIONS.**
+
+This project already proves a gate by breaking the thing it guards and watching
+it fail. That discipline had only ever been applied to what a change ADDS.
+PAY-02 says a deletion is a change to the running system and earns the same
+treatment: delete it, run the thing that might have depended on it, and look.
+
+Concretely, the cost of catching PAY-02 was one request to an endpoint in the
+file's blast radius - and the baseline that eventually caught it was written one
+package later, for a different reason, because AU1 required it.
+
+### The gate, and ITS OWN EXPIRY DATE
+
+`test/migration-state.test.js` asserts the exact set of Mongoose models the app
+registers at boot. As of package 3.4 that set is **empty**.
+
+**IT MUST BE REMOVED IN PACKAGE 4c, IN THE SAME COMMIT THAT REMOVES MONGOOSE
+(corrected by ADR-059 - Mongoose survives 3.6 in `etl/`, so the gate still has a
+subject until 4c).**
+Once no Mongoose exists, the gate guards a coupling that cannot occur - and a
+gate protecting nothing is AU3's shape one package out: it passes forever,
+nobody can tell whether it still works, and it makes the suite look better
+covered than it is.
+
+Recorded here AND in the test's own comment, because a note in only one of the
+two is how a gate outlives its subject.
+
+---
+
+## AV3 - the txnid length claim: CLOSED from the public documentation
+
+**Carried as UNVERIFIED for exactly one package, and closed without a sandbox.**
+
+Package 3.4 replaced the guessable `TXN${Date.now()}${rand(0,999)}` reference
+(16-17 characters, proven against the live gateway) with 80 random bits
+(23 characters). The claim "PayU accepts 23 characters" rested on reasoning
+rather than on an observation, and it was the ONLY unverified claim on the money
+path.
+
+**PayU documents it:**
+
+> "Transaction ID (or Order ID) generated at the merchant end. Must be unique
+> for every new transaction. **Character limit: 25.**"
+> — https://docs.payu.in/reference/addl_info-payment-apis
+
+23 of 25, alphanumeric, two characters of headroom. **Asserted by
+`test:payment-char` so the headroom cannot be spent by someone lengthening the
+reference for entropy without knowing there is a ceiling.**
+
+It did not need the sandbox credentials at all - the `llms.txt` route reached it
+in three fetches. Worth noting because the instinct was to defer it to 4b, and
+deferring a question that a public document answers is how a blocker acquires a
+dependency it never had.
+
+### THE SAME PAGE SURFACED A SHARPER ONE: PAY-03
+
+| Field | Production limit | **TEST limit** |
+|---|---|---|
+| `firstname` | 60 | **20** |
+| productinfo | 100 | 100 |
+| email | 50 | 50 |
+| udf1-udf5 | 255 | 255 |
+
+**`firstname` is truncated to 20 characters in PayU's TEST environment and 60 in
+production.** Our own callback fixtures use
+`'ZZZ SYNTHETIC TEST DO NOT PROCESS'` - **33 characters**.
+
+**Why that is a trap rather than a detail.** `firstname` is a SIGNED field: it
+appears in both the request hash and the response hash. If PayU's test
+environment stores a truncated value and signs its response with that, the
+response hash is computed over a different string than the one we sent, and
+`verifyHash` refuses it. **Every sandbox payment would fail hash verification,
+and the symptom - "invalid_hash" - points at the hashing code, which is correct.**
+
+It is not live today: nothing reaches PayU from the test suite. It becomes live
+the moment anyone runs a sandbox payment, which is the first thing 4b does.
+
+**Assigned to Phase 4b's pre-cutover checklist**, alongside the credentials
+dependency. The fix is to keep the donor name under 20 characters in any sandbox
+exercise, or to confirm PayU rejects rather than truncates - a distinction the
+documentation does not make and which decides whether this is a nuisance or a
+silent one.
 
 ---
 
@@ -2036,7 +2865,8 @@ case-variant emails (the second insert hits the unique index). So overriding a
 BLOCKING finding was strictly worse than not overriding it, in every case the
 check can produce. The flag was offering a choice that did not exist.
 
-**Fixed**: findings carry `loaderRefuses`, and those are refused BEFORE anything
+**Fixed**: findings carry `refusedAtLoad` (renamed from `loaderRefuses` by BD1),
+and those are refused BEFORE anything
 is written, with the report saying why and pointing at the source data. Proved
 by re-running: the load now refuses with MySQL untouched at 0/0/0.
 
@@ -2058,7 +2888,7 @@ that does not exist. **The flag is now removed**, and passing it is a loud
 refusal rather than a silent no-op, because an operator who types a flag from an
 old runbook and sees a successful run concludes it worked.
 
-`loaderRefuses` is KEPT as reporting rather than deleted with the flag. It no
+`refusedAtLoad` is KEPT as reporting rather than deleted with the flag. It no
 longer changes behaviour; it records which findings the loader would also throw
 on, and it is the thing to check the day a BLOCKING-but-loadable finding is
 added - because on that day the question of an override becomes real again, and
@@ -2427,6 +3257,48 @@ It did not. The test I later wrote failed with `Missing expected rejection`,
 which is precisely the state the citation rule asks you to discover before
 writing the sentence rather than after.
 
+#### AND FOR DESTRUCTIVE ASSERTIONS, ONE MORE QUESTION (AW1)
+
+> **For any assertion that a control DESTROYS or REVOKES something at a
+> threshold, ask: what does an attacker gain by reaching that threshold ON
+> SOMEONE ELSE'S BEHALF?**
+
+A question, not a prohibition - the answer is often "nothing" and the assertion
+is then correct. It exists because SEC-02's suite asserted that a user's reset
+code must be VOIDED at the attempt cap, which defended nothing and handed anyone
+who knows an address a five-request denial of service on that user's reset. See
+AW1.
+
+#### A MITIGATION THAT DEPENDS ON A HUMAN (AY1)
+
+> When a recommendation's effectiveness depends on a human reading something, it
+> CANNOT carry a closure claim. Either pair it with a mechanical control that
+> can, or leave the finding OPEN with the mitigation noted.
+
+#### WHEN FIXING AN ASYMMETRY, ENUMERATE THE SIBLINGS (AY2)
+
+> Enumerate every sibling branch and endpoint in the same file and STATE, for
+> each, whether it has the same property. Written down, not checked mentally -
+> the failure mode is looking and not seeing, four times so far.
+
+#### THE RULE THAT AUDIT FOUND (AX3)
+
+The question above is what to ASK. This is what the answer turned out to be, and
+it is checkable by inspection rather than by investigation:
+
+> **A destructive threshold is SAFE when reaching it requires authority the
+> destruction itself presupposes. It is DANGEROUS when an unauthenticated party
+> can reach it on someone else's behalf.**
+
+Ten of the eleven destructive assertions in the suites were safe, and **all ten
+for that one structural reason** - an admin, or the holder of a valid code, or
+the passage of time. **The reason is the finding, not the count.** A future
+package does not need to re-run the audit to classify a new assertion; it needs
+to name who can reach the threshold.
+
+The eleventh was `signupOtpAttempts` resetting on a second `/signup`, reachable
+by anyone, which is SIGNUP-01.
+
 #### What this does NOT require
 
 It does not require a test for every claim. It requires that a claim with no
@@ -2449,10 +3321,13 @@ not, and is worse than silence, because the next reader inherits it.
 | 7 | The auto-verify branch is "narrowed to accounts that predate the OTP flow" | **my own comment, 3.2** | **NEVER IMPLEMENTED** - it applies to everyone |
 | 8 | BUG-03's counter is "always 0" | the review, restated in the map | **WRONG** - it counts the lowercase subset; measured 1 of 2 (AR1) |
 | 9 | SEC-10 is closed: "one shared validator across all five paths" | **my own claim, package 3.2** | **TRUE OF ONE FILE.** It was local to routes/auth.js; admin.js had a sixth, whose check said 10 and whose message said 6 (AT5) |
+| 10 | "`present()` below already returns `legacyId \|\| id`" | **my own comment, package 3.4** | **WRONG.** It returned `legacyId` alone, so every new category got `_id: null`. Caught in minutes by four assertions |
+| 11 | "making the notice fire-and-forget closes the oracle" | **my own comment, package 3.5a** | **IT INVERTED IT.** See AX4 below |
 
-**Nine now.** Number 8 arrived during the audit commissioned because of number 7,
-and number 9 during the package commissioned because of number 8. The claims do
-not run out, and each pass that looks for them finds one.
+**ELEVEN NOW.** Number 8 arrived during the audit commissioned because of number
+7, number 9 during the package commissioned because of number 8, and numbers 10
+and 11 in the two packages after that. The claims do not run out, and each pass
+that looks for them finds one.
 
 **THREE OF THE NINE ARE MINE, AND TWO OF THE LAST THREE.** That is the shift
 worth naming: the rule was built for claims inherited from other people's
@@ -2549,8 +3424,12 @@ specific.
 > not. See "Package 3.3" above.
 | **3.5a** | **`config/email.js`** (AQ2) | none - it was unowned |
 | ~~**3.5**~~ | ~~`admin.js`~~ **DONE IN AS7.** Migrating its user operations and the two `/stats` counts was the whole file - there was no remainder. BUG-04's dead Vercel cron declaration is all that is left, and it is a deployment change | - |
-| **3.6** | Mongoose removal | no file imports Mongoose; `fallbackCount()` zero (AE3) |
+| **3.6** | Mongoose removal from the REQUEST PATH and the test suites. `etl/` and `models/` RETAINED (ADR-059) | no file reachable from a request imports Mongoose; `fallbackCount()` zero (AE3) |
 | **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
+| **4c** | Terminal cleanup: `etl/`, `models/`, the `mongoose` dependency, `scripts/seedDatabase.js`, `docker-compose.legacy-mongo.yml` | 4b complete, rollback boundary closed |
+| **4d** | The Prisma advisory bump (U-6) - its own package because it regenerates the client the data layer sits on | after 4c, so a failure in either cannot be attributed to the other |
+| **5** | Frontend | Phase 4 complete |
+| **6** | Release: licence, history scrub, publication gate | Phase 5 complete |
 
 **4a moving ahead does not reorder the phases** - it splits one. 4b stays last
 and is stronger for it: the ETL will have been exercised by five route packages
@@ -2739,15 +3618,21 @@ The original table is kept below as the record of what the package was given.
 | ADR-024 §3 / ADR-026 / ADR-027 | - | No security decision may rest on an unsigned field; unsigned text must be escaped per sink | Keep the `verifyHash` banner; escape at each sink, not at ingest | Test asserts `unmappedstatus` cannot drive the decision | **R** |
 | SPEC-3 §4.6 | - | Alternate-case parser fallbacks (`.AMOUNT`, `.STATUS`, `udf_4`, `udf[4]`) | Delete them; keep the banner comment | Tests unchanged - they are unreachable today | **R** |
 
-### Mongoose removal  *(trigger: no file imports Mongoose; currently 3.6)*
+### Mongoose removal  *(REQUEST PATH in 3.6; the dependency itself in 4c - ADR-059)*
 
-Exit criteria are SPEC-3 section 7. The map's own condition: every Phase 3
-finding above is closed or explicitly deferred, and SEC-04 is reported closed
-with its wiring commit, reversing the Phase 2 report.
+Exit criteria are SPEC-3 section 7, **restated as two by ADR-059** because one of
+them would have made the cutover impossible: the ETL reads production MongoDB
+through Mongoose, and 4b is what runs it.
+
+1. **3.6** - no file reachable from a request imports Mongoose. Gated by
+   `test/migration-state.test.js`, which asserts the app registers ZERO Mongoose
+   models at boot.
+2. **4c** - `etl/` and `models/` are the last importers, deleted once 4b closes.
 
 | ID | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|
-| ADR-047 | `docker-compose.legacy-mongo.yml` exists only while `config/db.js` does | Delete both | Plain `docker compose up`, four healthy, no override | **R** |
+| ADR-047 (first half) | the `config/db.js` coupling | Delete `config/db.js` and its `connectDB()` call; the api stops needing `MONGODB_URI` | Boot with no `MONGODB_URI`; no Mongoose connection attempted | **R**, **3.6** |
+| ADR-047 (second half) | the `mongo` SERVICE in the override | Delete `docker-compose.legacy-mongo.yml` | Plain `docker compose up`, four healthy, no override | **R**, **4c** - 4b's snapshot rehearsal restores INTO that service |
 
 ---
 
@@ -2819,6 +3704,1045 @@ silently reconciled.
 | SEC-09 | Review inferred it from the code | **ADR-032** | ADR-032. Upgraded to observed; the finding itself is unchanged |
 
 ---
+
+---
+
+## BA3 - A NOTE ABOUT A RESIDUAL IS NOT A CONTROL, AND THE DISTANCE WAS ZERO
+
+AZ3 found that correct reasoning written down does not propagate at three
+functions' distance. **This is the same failure at zero distance.**
+
+In `etl/nullMintedLegacyIds.js` I wrote, under a heading reading THE RESIDUAL,
+STATED RATHER THAN IMPLIED, that the guard catches an EMPTY MongoDB source but
+NOT a POPULATED WRONG one. I wrote it minutes before running the suite. Then I
+pointed the suite at a scratch database and it permanently nulled the `legacy_id`
+of both categories the ETL had migrated from `kindledger_legacy`.
+
+Same author. Same session. Same file. Minutes apart. The note did not reach the
+code, and nothing about proximity helped.
+
+### It is also AZ3's OTHER shape - the gate after the candidate count
+
+Catching an empty source but not a populated wrong one validates the case where
+nothing is at stake. An empty source is the case where a careful operator has
+already noticed something is wrong; a populated wrong one is the case that looks
+normal. **The guard fired on every configuration except the dangerous one.**
+
+### The rule
+
+> **A note about a residual must be converted into a guard or a test in the same
+> commit, or it is not a control. Writing it down is documentation of a hazard,
+> not mitigation of one.**
+
+The countermeasure is AZ3's, because it is the only one available: enumerate and
+state at the point of change. Not "check whether a guard is needed" - state, for
+each residual, what closes it.
+
+---
+
+## BA3 - THE RESIDUAL AUDIT: every documented residual, and what closes it
+
+Commissioned by BA3. **Absences are reported, not omitted** - the "no" rows are
+the output of this audit, not the leftovers.
+
+### THE RULE THIS TABLE NOW ENFORCES (BB5)
+
+> **A documented residual with no test is indistinguishable from one nobody has
+> thought about, and the map cannot tell them apart.**
+
+So every row carries **either a test name or the word UNPINNED**. There are no
+prose-only residuals in this project. A row that cannot name a test is making a
+claim about a hazard that nothing would notice changing, and saying so in the
+same column as the rows that can is what makes the difference visible.
+
+"PINNED" does not mean fixed. Rows 5, 6, 7 and 9 are **open**, and safe to leave
+open, because a test asserts the defective behaviour exactly - so closing it
+FAILS that test, and the failure is the notification.
+
+| # | Residual, as documented | Guard | Test that pins it, or UNPINNED | Verdict |
+|---|---|---|---|---|
+| 1 | **BUG-02's mixed-case `status` migrates invisibly** - MySQL silently canonicalises `'approved'`, erasing the only record of the corruption (ADR-014) | `etl/preflight.js` counts and reports before any insert | `etl.test.js` test 8, with the count | **CLOSED** |
+| 2 | **`sql_mode` is settable at runtime**, so the boot check does not cover a connection opened later - and the ETL is exactly such a connection (ADR-022) | `etl/preflight.js` re-checks `@@SESSION.sql_mode`; `etl/cli.js` makes it FATAL | **UNPINNED** - nothing asserts the ETL refuses a non-strict connection | **GUARD ONLY.** Acceptable, since the guard is the control - but it has never been seen to fire |
+| 3 | **`LIKE` wildcards in a search term** - a parameterised query stops injection, not `%` meaning "anything" | `escapeLike()` in the repositories | `admin-characterisation` and `donations-characterisation` both exercise `%`, `_`, `%%` | **CLOSED** |
+| 4 | **SEC-08's residual oracle** - a mail failure must not distinguish known from unknown by status either | both branches fire-and-forget, one shared `res.json` | asserted in `auth-characterisation.test.js` | **CLOSED** |
+| 5 | **SIGNUP-01 rec 2** - `signupOtpAttempts` resets on a re-post, so any anonymous caller can reset the counter | none - deliberately still live | **yes** - the test ASSERTS the counter resets 4 -> 0, pinning the residual rather than assuming it closed | **PINNED.** Open, but it cannot silently change |
+| 6 | **SIGNUP-01 rec 3** - `/signup` is not rate-limited per address, and `upsert` lets an attacker destroy a legitimate in-flight signup by re-posting the address | none - deliberately still live | **`auth-characterisation.test.js`** - "a re-post DESTROYS a legitimate in-flight signup" and "the re-post is UNLIMITED", both with a control (BB2) | **PINNED, STILL OPEN.** Demonstrated end to end: the victim's emailed code is dead and no account is created, so it is denial of registration and not takeover. Implementing the limit has a trigger, not a phase - see below |
+| 7 | **The 3.5a TIMING difference** - the new-account signup path hashes a password and writes a row; the existing-account path does neither | none | **`signup-timing.test.js`** (BB3) - MEASURED, with the number recorded | **PINNED, STILL OPEN, AND LARGER THAN EXPECTED.** See the BB3 measurement below |
+| 8 | **`refusedAtLoad` (was `loaderRefuses`) is reporting only** - kept for the day a BLOCKING-but-loadable finding is added | **`finding()` now THROWS** at construction unless the check is in `BLOCKING_BUT_LOADABLE` with a reason (BB4) | **`preflight-findings.test.js`** - the rejection proved by injection | **CLOSED - and writing it found the day had already come TWICE.** See below |
+| 9 | **AE1-a against a POPULATED WRONG MongoDB** - the emptiness guard cannot see it | **IDENTITY CHECK IN THE OPERATION** (BB1): documents on the other side and NOT ONE shared identifier is refused with `ERR_SOURCE_MISMATCH` | **`null-minted.test.js`** - "a POPULATED WRONG database is REFUSED", by injection against a 5000-document source | **CLOSED for the wrong-database case.** The PARTIAL-overlap case remains and is row 12 |
+| 10 | **AE1-a's FALSE refusal** - an entity legitimately all-minted is indistinguishable from the wrong database | `entities` scoping, so an operator can proceed deliberately | the dry-run test exercises the shape | **CLOSED as far as it can be.** The two cases are indistinguishable by construction; refusing is the correct default |
+| 11 | **AE3 part 2** - `fallbackCount()` zero across a MANUAL exercise of every migrated route, against a database holding both migrated and post-3.1 records | none | **none, by nature** | **OPEN.** A runbook step, and AY1 already says a runbook step is not a closure claim. See BA4 |
+
+### What the audit found, and what acting on it found
+
+The audit reported four residuals with neither a guard nor a test - rows 6, 7,
+8 and 11 - plus row 9's guard being in the wrong place. **Acting on them found
+things the audit could not have.**
+
+#### Row 9 -> BB1. The guard protected the test suite, not the cutover
+
+Moved into the operation, and changed from EMPTINESS to IDENTITY: *documents on
+the other side, and not one identifier in common, is not the database these rows
+came from.* A count cannot see that; sharing identifiers is what "the source"
+MEANS. Proved by injection against a 5000-document source - the case the old
+guard passed.
+
+It is deliberately **not a threshold**. "Share at least one identifier" is the
+weakest possible statement of sameness and needs no number to argue about.
+
+The cutover is why it could not wait: in 4b, production MongoDB IS the oracle,
+and there is no `kindledger_legacy` to restore from.
+
+#### Row 8 -> BB4. The flag that was meant to announce the day was mis-set
+
+`finding()` now THROWS when a BLOCKING finding declares `refusedAtLoad: false`
+unless it is acknowledged with a reason. **Writing the check found the day had
+already arrived, twice:**
+
+- `mixed-case-status` (non-canonicalisable) was blocking with the flag
+  false, and that was simply WRONG - MySQL rejects an out-of-set ENUM under
+  strict mode, and the finding's own detail text says so. **The flag whose job
+  was to notice this discrepancy was itself wrong about it.**
+- `strict-sql-mode` is GENUINELY blocking-but-loadable: the loader does not
+  throw on a permissive `sql_mode`, it truncates silently. Nothing to override,
+  because the remedy is the connection and not the data. Acknowledged.
+
+A note saying "check this on the day" could not have found either, because the
+day does not announce itself. The constructor does.
+
+#### Row 6 -> BB2. Pinned, and deliberately not fixed
+
+The per-address limit is separate work, and not trivially safe: **a limit keyed
+on an address the attacker supplies is itself a way to lock a real user out of
+registering**, which is AV1's shape and needs the same care. What could not wait
+was that it was the only residual neither closed nor recorded.
+
+#### The rule that generalises
+
+> **The output of an audit like this is not the closed rows. It is that a
+> documented residual with no test is indistinguishable from one nobody has
+> thought about - and every row that had to be converted from prose into a check
+> turned out to contain something the prose had got wrong.**
+
+Three of the four unpinned rows were not merely unwatched. Row 8's flag was
+mis-set, row 9's guard was in the wrong component, and row 7's signal (below)
+was larger than the note implied. **The act of writing the check is what found
+them**, which is AZ3's countermeasure doing the thing it was adopted for.
+
+---
+
+## BA2 - ADR-059's SHAPE, RECURRING
+
+> **A component whose purpose is to demonstrate the thing being removed cannot
+> survive into the evidence that it can be removed.**
+
+ADR-059 said a package removing a dependency cannot remove it from the component
+whose job is to stop needing it. This is the same relation, between a control
+and its evidence.
+
+The AK3 fixtures exist to assert that the bridge works - that an un-migrated
+record still resolves. The bridge's deletion evidence is that nothing uses it.
+**Both cannot hold.** So the fixtures go first, and AZ4's steps 2 and 3 swap.
+
+This is the second instance. The difference worth recording is that ADR-059 was
+found by reasoning about a plan, and this one was found by a check producing a
+number that made no sense. Two routes to the same shape, and only the second is
+repeatable.
+
+---
+
+## BA4 - A NUMBER THAT CANNOT DISTINGUISH ITS OWN EXPLANATIONS IS NOT EVIDENCE
+
+AE3's exit check reported **34 fallbacks**. Two readings were available:
+
+1. the bridge is load-bearing, and deleting it breaks authentication;
+2. the fixtures manufacture the traffic, and the number is noise.
+
+**Neither was checkable without reading the fixtures**, and the second reading is
+the one a tired person picks the day before a cutover. The answer turned out to
+be (2) for 32 of the 34 - but the metric could not say so.
+
+**The mechanical half:** `readyToDelete()` counts within ONE PROCESS, and
+`node --test` gives each suite its own. The number ADR-050 asked for did not
+exist anywhere. It is now `test/bridge-exit-check.js`, a CI gate.
+
+**The conceptual half, which is the one that generalises:**
+
+> **An exit metric must be able to distinguish its own readings. If two
+> incompatible explanations produce the same number, it is not an exit criterion
+> - it is a prompt to go and read the code, and it will be read in whichever
+> direction the schedule prefers.**
+
+Applied to AE3, the fix is not to weight synthetic records but to **remove
+them**: a record that cannot exist in production after the ETL has no business
+in the evidence at all. That is BA2.
+
+
+---
+
+## BC1 - A FLAG THAT IS THE SOLE CHECK ON A PROPERTY CAN ONLY AGREE WITH ITSELF
+
+BB4's construction-time guard found **two existing errors on its first run**, not
+a future one. That is the strongest case this project has produced for BA3's
+rule, because a note cannot find anything - only a check that runs can.
+
+| Finding | What was wrong |
+|---|---|
+| `mixed-case-status` | BLOCKING with the flag FALSE, **contradicting its own detail text**, which says in words that MySQL will REJECT these rows. The flag whose job was to notice the discrepancy was itself the discrepancy, and nothing could catch that because the flag was the only check |
+| `strict-sql-mode` | Genuinely blocking-but-loadable. The loader truncates silently rather than throwing, and there is nothing to override because the remedy is the CONNECTION, not the data. **That is ETL-01's shape reappearing inside the mechanism built to classify ETL-01** |
+
+Two instances of metadata being wrong about the thing it describes.
+
+> **Any flag that is the SOLE check on a property needs a second mechanism
+> deriving that property independently, or it can only ever agree with itself.**
+
+The second mechanism here is `test/etl.test.js`, which asserts the refusals by
+their SHAPE - a duplicate-key violation, an ENUM rejection - rather than by any
+message of ours. It fails if the property stops holding, whatever the flag says.
+
+---
+
+## BD1 - THE FLAG WAS TRUE ABOUT THE SYSTEM AND FALSE ABOUT THE LOADER
+
+`loaderRefuses` is now **`refusedAtLoad`**, and the rename is not tidiness.
+
+**Two of the five refusals come from the SCHEMA, not from `migrate.js`:**
+
+| Finding | What actually refuses it |
+|---|---|
+| `strict-sql-mode` | **Nothing.** Acknowledged in `BLOCKING_BUT_LOADABLE` |
+| `case-variant-emails` | **SCHEMA** - `uq_users_email` under `utf8mb4_0900_as_ci`, which is case-INsensitive, so two accounts differing only in case collapse onto one row |
+| `mixed-case-status` | **SCHEMA** - the `ENUM` plus `STRICT_TRANS_TABLES`. Without strict mode MySQL would insert the empty string instead |
+| `orphaned-category` | `migrate.js` - an explicit throw |
+| `implausible-dates` | `migrate.js` - an explicit throw |
+
+The old name invited exactly the reasoning that produced the original error:
+read "loaderRefuses", look in `migrate.js`, find nothing, conclude the flag is
+wrong. That is how `mixed-case-status` came to be marked false.
+
+> **A property owned by the schema and named after the loader is invisible to
+> anyone changing the schema.**
+
+Relaxing the email collation or dropping `uq_users_email` silently removes a
+migration safety property, and **nothing in the ETL would change to show it**.
+So the warning now lives in `db/schema.sql`, next to the index, per AI4 - the
+warning goes where the mistake gets made, not where it gets noticed.
+
+---
+
+## BD2 - THE OTHER THREE BLOCKING FINDINGS, AUDITED THE SAME WAY
+
+BC2's instruction was not to assume the remaining three were right because the
+guard passes, since the guard was written from the same understanding that
+produced the errors. Two of the three had **no behavioural citation either** -
+only a pre-flight test, so `refusedAtLoad: true` was an assertion about code
+nobody had executed.
+
+Both are TRUE. Both are now cited to behaviour:
+
+- **`BC2: CASE-VARIANT EMAILS fail the load - and it is the INDEX that refuses`**
+  asserts a duplicate-key refusal (`P2002` / `Duplicate entry`), deliberately
+  NOT a message of ours, because there is no message of ours.
+- **`BC2: a status in NO casing fails the load - and it is the ENUM that refuses`**
+  is the `mixed-case-status` detail text, executed.
+
+`orphaned-category` and `implausible-dates` were already cited by the two
+existing "FAILS THE LOAD" tests. ETL suite: 18 of 18.
+
+---
+
+## BD3 - WHY THE 4b MATCH-RATE FLOOR IS 1.0, DERIVED RATHER THAN CHOSEN
+
+The value matters less than the derivation, because the derivation is what tells
+a future reader that a 0.98 is **a stop condition and not a tolerance**.
+
+1. A minted `legacy_id` exists because `routes/categories.js` and
+   `repositories/users.js` FABRICATED one for a row created through the running
+   application, so that a required Mongoose ObjectId ref would resolve.
+2. **That code has never been deployed.** Phase 3 runs in development only.
+3. Production MySQL is therefore populated by the ETL and by nothing else.
+4. Every `legacy_id` in production MySQL came from production MongoDB.
+5. **So every one of them must resolve. The expected rate is exactly 1.0.**
+
+It follows that a production rate below 1.0 does not mean "some rows were
+minted" - that cannot happen in production. It means one of:
+
+- rows were **deleted from MongoDB after the ETL ran** - which the freeze window
+  exists to prevent, so its occurrence means the freeze was not held; or
+- **this is not the database the ETL read** - an old snapshot, a staging copy.
+
+Both are reasons to stop. Lowering the floor to make a run succeed converts an
+alarm into a permission, and the run it permits destroys migration history
+permanently, because after the cutover there is no oracle left to rebuild it.
+
+The floor is checked across every entity **before any write**, and the CLI
+requires `--min-match-rate` on every apply run - not only in production, because
+a flag first typed on the run that matters is a flag nobody has typed.
+
+---
+
+## BD4 - THE 3.5a TIMING DIFFERENCE, MEASURED
+
+**The note said it was "a far weaker signal than a distinct message". It is not.**
+
+```
+BB3 MEASUREMENT (12 samples each, interleaved, medians):
+  UNKNOWN address (hashes + writes): 247.5 ms
+  KNOWN address   (neither)        :   4.6 ms
+  SEPARATION                       : 242.8 ms
+  ratio                            :  53.27x
+```
+
+And the distributions **do not overlap at all** - the slowest known-address
+response is faster than the fastest unknown one - which is the strongest form
+the finding can take. **One request classifies an address.** The body is
+identical either way, which is what 3.5a closed; the clock is not.
+
+It is not an accident of implementation that a tidy-up removes. The separation
+IS bcrypt at cost 12, which SEC-18 deliberately chose to be expensive. Closing
+it means constant-time signup, and the obvious cheap fix - defer the hash - is
+a different trade-off, not a free one.
+
+Pinned by `test/signup-timing.test.js` on the BB2 model: the test asserts the
+separation, so closing it FAILS the test.
+
+### The collection problem, which is its own small finding
+
+The measurement takes **3.6 seconds**. Collecting it took several ten-minute
+timeouts, and the cause was not the measurement:
+
+Both `/signup` branches start an SMTP connection that cannot complete in this
+environment. `nodemailer` holds those sockets past the end of the test, so under
+`node --test` - which runs each file in a child process and drains its pipe -
+the run presents as a hang long after the numbers exist. Same class as the Redis
+`unref` finding: **a held socket presenting as a hang, whose natural fix is a
+force-exit flag.**
+
+The suite now runs the file DIRECTLY rather than under `node --test`, and forces
+exit after cleanup.
+
+> **THAT IS CORRECT FOR A MEASUREMENT HARNESS AND IS NOT A PATTERN FOR THE
+> APPLICATION SUITES.** In those, a process that will not exit is EVIDENCE - of
+> a connection never closed, a timer never cleared, a listener never removed.
+> Forcing exit there would delete the signal rather than the delay. This suite
+> is exempt because it deliberately drives a path whose side effect cannot
+> complete, and it exists to produce one number.
+
+
+---
+
+## BE2 - THE COMPOSITION CLASS: TWO CORRECT CONTROLS, ONE VULNERABILITY
+
+Every class catalogued so far is a control that is **wrong** - missing, mis-set,
+validated where nothing is at stake, depending on a human, agreeing with itself.
+This one is different, and the difference is the point:
+
+> **Two independently correct controls producing a vulnerability by interaction.
+> Neither is wrong. Neither can be fixed by making it more correct.**
+
+- **SEC-18** made bcrypt cost 12 on purpose. The cost factor is the control; a
+  cheap hash would be the defect.
+- **SEC-08** made the responses identical on purpose. Package 3.5a spent a whole
+  package closing the last body-shaped oracle.
+
+**The oracle lives in the gap between them.** SEC-08 equalised what the endpoint
+SAYS. SEC-18 guaranteed that one branch would take 240 ms longer to say it.
+Reviewing either control on its own finds nothing, because neither is defective.
+
+### Why nothing in this process was looking for it
+
+**The map tracks findings individually.** Every row is one finding, with its own
+owner, its own package and its own test. That structure is what has made the
+work tractable, and it has no representation for *"these two rows interact"*.
+
+- AR6's inherited-claim gate reads claims one at a time.
+- BB4's invariant checks one finding's flags against itself.
+- The `readyToDelete` / exit-check machinery measures one property.
+- A code review of `repositories/users.js` sees a correct cost factor. A review
+  of `routes/auth.js` sees correct identical responses.
+
+**No single-finding review could have caught this**, and the only reason it was
+caught at all is that BB3 measured a residual instead of restating it. The
+measurement was commissioned to decide whether a note was signal or noise; what
+it actually found was an interaction nobody had a place to write down.
+
+### The countermeasure, which is weaker than the others and should be admitted as such
+
+There is no gate for this. What there is:
+
+1. **When a control is deliberately EXPENSIVE, ask what else observes its cost.**
+   Cost is an output. bcrypt's expense is visible to anyone who can time a
+   request, and "identical responses" does not cover it.
+2. **When a finding is closed by making two paths identical, name the dimension.**
+   3.5a closed SEC-08 *in the body*. Writing "in the body" would have left the
+   clock visibly unclosed rather than implicitly so.
+3. **Measure residuals rather than characterising them** (BB3). The prose said
+   "a far weaker signal than a distinct message". It is a 52x signal with no
+   overlap between the distributions. Characterisation was the error.
+
+---
+
+## BE1 - THE SAME SHAPE, EVERYWHERE IT OCCURS
+
+Enumerated rather than checked nearby (AY2). **Every endpoint that performs real
+cryptographic work in one branch and returns early in its sibling.**
+
+### Measured - bcrypt-sized, all three with NON-OVERLAPPING distributions
+
+| Endpoint | Expensive branch | Early-returning sibling | Separation | What it reveals |
+|---|---|---|---|---|
+| `POST /signup` | unknown address -> `bcrypt.hash` + write | known address -> neither | **237.7 ms (51.9x)** | account existence |
+| `POST /login` | pending signup OR registered user -> `bcrypt.compare` | **neither exists -> refused before any bcrypt** | **236.0 ms (60.0x)** | account existence, on the canonical enumeration endpoint |
+| `POST /signup/verify-otp` | pending row -> `bcrypt.compare` | no pending row -> `false`, no bcrypt | **240.7 ms** | whether a signup is IN FLIGHT for an address |
+
+**`/login` is the worst of the three and was not the one noticed.** `/signup`
+was measured first only because BA3's audit happened to carry a note about it.
+Its three-way structure - pending signup, registered user, neither - means an
+unknown address is refused before any hashing at all.
+
+**`/signup/verify-otp` contradicts its own comment.** The comment AX1 left says
+the password requirement "adds no oracle: a caller cannot learn whether the
+address has a signup in flight". That is TRUE OF THE BODY AND FALSE OF THE
+CLOCK. Another confident sentence written next to code, in the class AJ3 named.
+
+### Enumerated, same shape, NOT yet measured - stated rather than assumed
+
+| Endpoint | Shape | Expected size |
+|---|---|---|
+| `POST /signup/resend-otp` | `pendingSignups.verifyPassword` - identical structure to `/signup/verify-otp` | bcrypt-sized. Almost certainly the same ~240 ms |
+| `POST /forgot-password/request` | known+active -> sha256 + one UPDATE + mail dispatch; unknown -> nothing | **small** - milliseconds, not hundreds. Real but far below the bcrypt cases |
+| `POST /login/resend-otp` | same shape as above | small |
+
+### Checked and found NOT to have it - reported because "nothing" is an answer
+
+| Endpoint | Why not |
+|---|---|
+| `POST /login/verify-otp` | `verifyLoginOtp` is **sha256**, microseconds. The branch exists; the cost does not |
+| `POST /forgot-password/verify`, `POST /forgot-password/reset` | `verifyResetCode` is sha256, same reason |
+| `POST /change-password` | behind `authMiddleware` - the caller already IS the account, so there is nothing to enumerate |
+| `GET /me`, every donation and payment route | no password-shaped comparison on a branch |
+
+**So: four bcrypt-sized oracles, not one**, three of them measured and the
+fourth structurally identical to one that was.
+
+---
+
+## BE4 - `git add -A` HAS NOW TWICE COMMITTED SOMETHING UNINTENDED
+
+An unexplained edit was sitting in the working tree - the README's title
+demoted from `#` to `##` - and `git add -A` swept it into a commit about the
+pre-flight invariant. Reverted in a separate commit; Gary did not make the
+change knowingly.
+
+It is a hygiene point rather than a finding, and it is recorded because it is
+the SECOND time in this project. The pattern is that `-A` stages whatever is
+there, and "whatever is there" is not always mine - an editor's autoformat, a
+stray keystroke, a tool writing a file.
+
+> **Review `git status` before staging, or stage by path. A commit message that
+> describes one change while the commit contains two is a small lie that a
+> future bisect believes.**
+
+
+---
+
+## BG1 - THE THREE ORACLES, CLOSED AND RE-MEASURED
+
+| Endpoint | Before | After | Change |
+|---|---|---|---|
+| `POST /signup` | 237.7 ms, 51.9x, **no overlap** | **13.0 ms, 1.06x** | equalised |
+| `POST /login` | 236.0 ms, 60.0x, **no overlap** | **3.6 ms, 1.02x** | equalised |
+| `POST /signup/verify-otp` | 240.7 ms, **no overlap** | **9.3 ms** | equalised |
+
+`config/passwordTiming.js` holds the equaliser. The branch with no row to check
+spends a bcrypt against a throwaway hash and discards the result.
+
+**The dummy hash is GENERATED at load from `BCRYPT_COST`, not hardcoded**, and
+`BCRYPT_COST` now has one definition that both repositories import. A literal
+`$2a$12$...` would be a second place encoding the cost, and when SEC-18 next
+revisits it the dummy would drift away from the real work - turning a full
+equalisation into a partial one by an amount nobody chose.
+
+### The residual, which is the database write and is deliberately NOT equalised
+
+The remaining 3-13 ms is the row each unknown-address branch WRITES and the
+known branch does not. Equalising it means performing a dummy database write on
+behalf of an address that does not exist, which hands an unauthenticated caller
+unbounded writes - **a worse problem than the one it closes**. Asserted as small
+rather than claimed to be zero.
+
+### THE FIX I GOT WRONG, WHICH ONLY RE-MEASUREMENT FOUND
+
+`/signup/verify-otp` leaks whether a signup is in flight. The comment pointed at
+`pendingSignups.verifyPassword`, I equalised that function, and **the separation
+did not move at all - still 234.1 ms.**
+
+The route returns at `if (!pending) return refuse(...)` **before that function is
+ever called.** I was looking at the right endpoint, for the right reason, with
+the right fix, and fixed a line the request never reaches.
+
+> **Inspection said fixed. The measurement said 234.1 ms.** That is the entire
+> argument for re-measurement as the acceptance criterion, demonstrated by the
+> work rather than asserted about it - and it is the second time in this package
+> that measuring corrected something reading had settled.
+
+### And an error in my own enumeration, corrected the same way
+
+I recorded `/signup/resend-otp` as "structurally identical to
+`/signup/verify-otp`, bcrypt-sized", from a grep hit on
+`pendingSignups.verifyPassword` **that is actually inside `/login`**. That
+endpoint does not call it at all - it calls `setOtp`, which is sha256.
+
+So Class A is THREE endpoints, not four. The enumeration was right to exist and
+wrong in a detail, and the detail was caught by measuring the endpoint instead
+of trusting the row.
+
+---
+
+## BG2 - THE MITIGATION'S DEPENDENCY, ASSERTED
+
+> **The dummy-bcrypt mitigation is safe only while `authLimiter` is wired and
+> effective on `/signup`, `/login` and `/signup/verify-otp`.**
+
+BG1 converts an information leak into a CPU cost: a request refused in 4 ms now
+costs ~240 ms, and an unauthenticated caller can force it. `authLimiter` at 5
+per minute per IP is the only bound. **Unlimited, each of those endpoints is a
+60x CPU amplifier.**
+
+That bound is a control which has already failed once here - SEC-04 was a
+limiter built, not wired, and reported closed while it was not. A mitigation
+resting on it cannot rest on a comment.
+
+`test/password-timing.test.js` asserts it **behaviourally**, not structurally:
+it bursts requests from one address until refused. "A limiter is in the chain"
+and "the endpoint is limited" are different claims, and a limiter keyed on
+something an attacker varies would satisfy the first and not the second. It also
+asserts that `burnEquivalentBcrypt` still costs a real bcrypt - if somebody stubs
+it out, every oracle reopens and the timing tests would still pass, because they
+compare two branches that would both have become fast.
+
+---
+
+## BG3 - THE sha256-SCALE ENDPOINTS: MEASURED, AND CLOSED AS ACCEPTED
+
+"Real but small" with no number was BB3's original state, so each got one.
+
+| Endpoint | Working branch | Idle branch | Separation |
+|---|---|---|---|
+| `POST /signup/resend-otp` | 7.81 ms | 2.62 ms | **5.2-5.4 ms** |
+| `POST /login/resend-otp` | 9.74 ms | 2.63 ms | **6.2-7.1 ms** |
+| `POST /forgot-password/request` | 9.15 ms | 2.81 ms | **6.2-6.5 ms** |
+
+All three are one sha256 plus one UPDATE - the same work, and the numbers agree.
+
+**The "distributions overlap" verdict is NOT a reliable discriminator, and
+saying so is part of the finding.** Across runs it flipped for
+`/signup/resend-otp` on the strength of one or two outliers in the idle branch.
+The stable quantity is the separation: **5-7 ms, everywhere.**
+
+### The decision: ACCEPTED, not equalised
+
+- **5-7 ms is not a single-request oracle across a network.** Internet jitter is
+  tens of milliseconds; one request decides nothing. Recovering the signal needs
+  many samples per address, through a limiter of 5 per minute per IP.
+- **The fix would be worse than the finding.** These branches differ by a
+  database WRITE, not a hash. Equalising means writing a row for an address that
+  does not exist - unbounded writes from unauthenticated callers.
+- It is **pinned anyway**: each test asserts the separation stays under 50 ms,
+  which is what fails if somebody moves a password hash onto one of these paths.
+
+This is the first row in the audit closed by MEASURING IT AND ACCEPTING IT
+rather than by fixing it, and the number is what makes that a decision instead
+of a shrug.
+
+---
+
+## BG4 - A CLAIM THAT SOMETHING "ADDS NO ORACLE" MUST NAME ITS CHANNELS
+
+`/signup/verify-otp` carried, in this project, written by me:
+
+> "ANSWERS 'Invalid OTP' like every other failure here, **so it adds no oracle**:
+> a caller cannot learn whether the address has a signup in flight, nor whether
+> their password guess was right."
+
+**True of the body. False of the clock.** 240.7 ms of separation, and the
+distributions did not overlap - one request answered the exact question the
+sentence says cannot be answered.
+
+### Against AZ3: proximity in TIME is no better than proximity in the FILE
+
+AZ3 found correct reasoning failing to travel three functions. BA3 found it
+failing to travel three lines, same author, same session. **This is shorter
+still: the author knew the timing class and wrote a claim the class contradicts.**
+
+There is no distance left to shorten. Nearness - in the file, in the session, in
+the author's own attention - does not propagate anything. Only a check does.
+
+### The countermeasure is AU2's, and the citation rule gains a clause
+
+The comment asserted a closure and **cited nothing**. Under AU2 it was already
+defective before it was wrong.
+
+> **A claim that something "adds no oracle" must name which CHANNELS were
+> checked. Body, status and timing are separate channels, and a claim covering
+> one is not a claim covering the others.**
+
+Applied: the comment now reads "adds no oracle IN THE BODY OR THE STATUS", and
+the timing channel is closed by code with a test rather than by a sentence. The
+same clause applies to the SEC-08 closures generally - 3.5a closed SEC-08 *in the
+body*, and writing those three words at the time would have left the clock
+visibly open instead of implicitly so (BE2).
+
+
+---
+
+## BH5 - A MISSING ENVIRONMENT VARIABLE SILENTLY DISABLES SEC-01
+
+### (a) The diagnosis was wrong and the consequence was worse
+
+The symptom was that `docker compose` warns about a dozen blank variables. The
+supposed cause - compose not finding the env file - is **not what is happening**.
+`.env` is found; it holds ten keys; the warned variables **are simply not in it**.
+`--env-file` would change nothing.
+
+That matters because the fix is different, and because one of the absent
+variables is `PAYU_MERCHANT_SALT`.
+
+> **`docker-compose.yml` declares `PAYU_MERCHANT_SALT` as a bare `${VAR}` - no
+> default, no `:?` - and it is absent from `.env`. So a plain `docker compose up`
+> produces a stack that reports HEALTHY while `verifyHash` computes
+> `sha512("undefined|success|...")`, which anybody can compute too.**
+
+Every callback endpoint would accept a forged "payment succeeded" and mark a
+donation PAID. Nothing looks wrong in the logs, because from the code's point of
+view nothing IS wrong: it verified a hash, and the hash matched.
+
+**This is not a weaker check. It is a public one.**
+
+### The sixth AY2 adjacency, and the control was in the same directory
+
+`config/jwt.js` refuses to load at all without a 32-character `JWT_SECRET`.
+`config/payu.js`, sitting beside it, read an equally load-bearing secret into
+`undefined` and said nothing.
+
+### The fix refuses at the SECURITY DECISION, not at boot
+
+`assertSigningConfigured()` throws inside `generateHash` and `verifyHash`. A
+require-time throw like jwt.js's would stop the application starting for work
+that never touches payments - including the harnesses that boot the app to
+measure auth timing - and that creates pressure to invent a dummy salt, which is
+how a guard becomes a formality. `docker-compose.yml` keeps `${VAR}` with the
+reasoning written next to it.
+
+### And a threshold I invented rejected a legitimate value immediately
+
+My first version required 16+ characters for BOTH the salt and the key. It
+rejected `TESTMERCHANTKEY` - fifteen - and failed sixteen tests on first run.
+
+**The merchant KEY is an identifier, not a secret.** It travels in the payment
+form, the customer's browser sees it, and PayU's own test key is `gtKFFx`.
+Requiring length of it is a category error.
+
+That is BB1's argument - "a threshold is a number you choose and then have to
+relax" - which I had written three steps earlier and then did not apply.
+
+### (b) `.env.example` - checked, and CLEAN
+
+Reported because nothing is an answer. Every secret is blank
+(`MYSQL_ROOT_PASSWORD=`, `MYSQL_PASSWORD=`, `JWT_SECRET=`, `ADMIN_CREATION_KEY=`,
+`PAYU_MERCHANT_SALT=`, `EMAIL_PASSWORD=`, `HEALTH_DIAGNOSTIC_SECRET=`), and
+`DATABASE_URL` carries a visible `CHANGEME` rather than a working password. A
+self-hoster copying it inherits nothing usable.
+
+**For Phase 6's publication gate:** the local `.env` holds `klpass` / `rootpw`.
+Those are fine locally and must never become defaults anywhere - the gate should
+assert that no tracked file contains a non-empty credential value, rather than
+relying on `.env.example` continuing to be written carefully.
+
+
+---
+
+## ENV-01 (HIGH) - A BARE `${VAR}` MADE SEC-01 A PUBLIC CHECK
+
+**Severity: HIGH. Fails OPEN, and fails SILENTLY.**
+
+`docker-compose.yml` declared `PAYU_MERCHANT_SALT` as a bare `${VAR}` - no
+default, no `:?` - and it is absent from `.env`. A plain `docker compose up`
+therefore started a stack reporting four healthy services in which
+
+    verifyHash -> sha512("undefined|success|||...")
+
+is a value **anyone can compute**. Every forged "payment succeeded" callback is
+accepted and the donation marked Paid.
+
+**The logs show a hash verified and matched**, because one was. There is no
+error, no warning, and no symptom until somebody reconciles against the bank.
+
+### This is the self-hosting story for the whole project
+
+An NGO clones the repository, copies the compose file, misses one variable, and
+accepts forged payments with nothing in the logs to show it. That is not a
+misconfiguration they could reasonably detect - it is the system working exactly
+as written.
+
+**Fixed** by `config/payu.js assertSigningConfigured()`, which refuses at the
+point the secret is USED rather than at boot. Proved by outcome: a callback
+forged with a blank salt leaves the donation `Pending`
+(`payment-callbacks.test.js`, and the forging helper is parameterised so the
+seventeen SEC-01 tests prove its formula).
+
+### THE RULE, FOR PHASE 6
+
+> **No security-critical variable may be declared as a bare `${VAR}`. Either
+> `:?` so compose refuses to start, or a runtime guard at the decision point.**
+
+### Every variable in `docker-compose.yml`, audited on that basis
+
+| Variable | Declared | Security-critical? | Behaviour when absent |
+|---|---|---|---|
+| `PAYU_MERCHANT_SALT` | bare | **YES - the signing secret** | was FAIL-OPEN; now refused at `verifyHash`/`generateHash` |
+| `PAYU_MERCHANT_KEY` | bare | yes, as an identifier | now refused for absence (not length - see BJ2) |
+| `JWT_SECRET` | `:?` | **YES** | compose refuses; `config/jwt.js` also throws |
+| `ADMIN_CREATION_KEY` | `:?` | **YES** | compose refuses |
+| `DATABASE_URL` | `:?` | yes | compose refuses |
+| `MYSQL_PASSWORD` / `MYSQL_ROOT_PASSWORD` | `:?` | yes | compose refuses (the bare second occurrence is the healthcheck, covered by the same value) |
+| `ALLOWED_ORIGINS` | bare | **yes - CORS** | **FAILS CLOSED, checked.** Empty list, so every cross-origin request is rejected. Correct direction, and worth having confirmed rather than assumed |
+| `HEALTH_DIAGNOSTIC_SECRET` | `:-` empty | yes | the diagnostic form is unavailable - fails closed |
+| `EMAIL_PASSWORD`, `EMAIL_USER`, `SMTP_HOST`, `EMAIL_SERVICE` | bare | no, but delivery-critical | mail fails with EAUTH; OTP and reset codes are not delivered. Fails closed, loudly in logs, and the endpoints are fire-and-forget so no oracle |
+| `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL`, `FRONTEND_*_URL` | bare | no | PayU redirects nowhere; the flow breaks visibly |
+| `JOB_*`, `SCHEDULER_ENABLED` | `:-false` | yes, DESTRUCTIVE | default OFF (AT1) - the right direction |
+| `MONGODB_URI` | `:-` empty | no | request-path Mongoose is removed in this package |
+| `NODE_ENV`, `REDIS_URL`, `PORT`, `RATE_LIMIT_PREFIX`, `PRISMA_CONNECTION_LIMIT`, `SMTP_PORT/SECURE`, `PAYU_BASE_URL`, `MYSQL_USER/DATABASE`, `HTTP(S)_PORT` | `:-` | no | sensible defaults |
+
+**One fail-open security-critical variable, and it was the payment one.**
+
+---
+
+## BJ2 - A THRESHOLD I INVENTED, THREE STEPS AFTER ARGUING AGAINST ONE
+
+BB1 chose "share at least one identifier" over a match-rate threshold, with the
+reason written down: *a threshold has to be chosen, argued about and eventually
+relaxed.*
+
+Three steps later I required **16+ characters for the PayU merchant key**. PayU
+ships `gtKFFx`. The suite's `TESTMERCHANTKEY` is fifteen, and sixteen tests
+failed on the first run.
+
+### It was also the wrong CONTROL, not merely the wrong number
+
+The two values need different properties, and conflating them is the actual
+error:
+
+| Value | What it is | What it needs | Guard |
+|---|---|---|---|
+| `PAYU_MERCHANT_SALT` | a SECRET - never leaves the server, and the only thing making a callback unforgeable | **entropy** | present, and long enough not to be `test` / `salt` / `changeme` |
+| `PAYU_MERCHANT_KEY` | an IDENTIFIER - travels in the payment form, the customer's browser sees it | **correctness** - it must be the right merchant | present. Length says nothing about it, and PayU's own is six characters |
+
+A length floor on an identifier is not a weak control. It is a control for a
+property that value does not have.
+
+### Against the AZ3 tally
+
+AZ3 was three functions. BA3 was three lines, same session. BG4 was zero
+distance - the author knew the class. **This is the next step along: reasoning
+failing to reach the author's own NEXT DECISION.**
+
+There is nothing left to shorten, and the countermeasure has not changed because
+no other one has worked: **enumerate and state at the point of change.** Writing
+"what property does this value need?" before writing the check would have caught
+it; writing it afterwards did.
+
+---
+
+## BJ4 - "NO TRACKED FILE CARRIES A WORKING CREDENTIAL", AS A CHECK
+
+`.env.example` being clean is one file staying well-written. The control is
+`test/no-committed-secrets.test.js`, in CI, which reads what git tracks.
+
+**Scope**: env templates, compose files, application source, schema, workflows -
+everything a self-hoster deploys. `Backend/test/` is excluded **with a property
+rather than by a blanket skip**: its fixtures are credentials for nothing.
+
+It proves itself three ways, because a scan is the easiest thing in the world to
+write vacuously:
+
+1. It fires on a planted `JWT_SECRET=...` (injection, AV2).
+2. It does NOT fire on `<placeholder>`, `${REFERENCE}`, `CHANGEME` or the
+   `ci-only-*` values the workflows use for a database that lives ninety seconds.
+3. **It asserts it actually matched files.** A scope pattern that silently stops
+   matching would report a clean sweep over nothing - the BH3 shape, applied to
+   the check itself.
+
+Current result: **clean.** The `ci-only-*` workflow values are deliberate and
+named as such; pushing them into repository settings would make them harder to
+read and no safer.
+
+### And a second env template nobody had looked at
+
+`Backend/.env.example` exists alongside the root one. It carries no live
+credentials - every secret is a `<placeholder>` - but it is **stale and
+actively misleading**: it documents `MONGODB_URI` as the datastore and contains
+no `DATABASE_URL` and no MySQL variables at all.
+
+Two files claim to be the environment template and disagree, and the one a
+self-hoster might follow points at the store this project has spent six packages
+leaving. It is removed with the request-path Mongoose in this package.
+
+I found it only because BJ4's scan enumerated tracked files. Checking "the
+`.env.example`" by name would not have - AY2 again.
+
+
+---
+
+## BH3 - THE VACUITY SWEEP: three instances, and the third was in the deletion gate
+
+> **A test that can pass while its subject is removed is not a test. It is a
+> comment with a green tick.**
+
+Two instances were known before the sweep: PAY-02 (a removal verified by
+reference-counting when runtime registration was the property) and BH5's forged
+callback (signed with the real salt against an endpoint using a blank one, so it
+would have been refused for a HASH MISMATCH and passed while proving nothing).
+
+The sweep looked for two signatures across all twenty suites.
+
+### Signature 1 - a refusal assertion that accepts ANY error
+
+**One instance, and it was mine.** `null-minted.test.js`'s "the refusal writes
+NOTHING" used `assert.rejects(fn)` with no matcher. The test's point is the
+write-nothing assertions that follow - and those would hold just as well if the
+call had rejected because of a typo in the options object. Now asserts
+`ERR_SOURCE_EMPTY`.
+
+Everything else already asserted a code or a message. `destructive-jobs.test.js`
+is the model: specific codes, a positive control that the purge DOES run with
+both gates open, and a test that discriminates WHICH gate refused.
+
+### Signature 2 - a scan that reports clean because it scanned nothing
+
+**One instance, in the worst possible place: `bridge-exit-check.js`**, the gate
+that authorises deleting the bridges. A renamed directory or a changed suffix
+would empty the suite list, skip every loop body, find no offender, and print
+"AE3 PART 1 PASSES" on zero evidence.
+
+`migration-state.test.js` **already had this property** - *"CONTROL FAILED:
+nothing imports models/X, so the scan finds nothing"* - and the exit check did
+not. The control existed one suite away. **AY2, seventh instance.**
+
+Both now assert they matched files, and name three suites explicitly, because a
+count alone would not notice one file dropping out of the pattern.
+
+### The countermeasure BH2 asks for
+
+> **An acceptance criterion measures the OUTCOME, never the presence of the
+> change.** "The guard is called" is not a finding; "the forged callback is
+> refused" is. This is already how the timing work was accepted and is now
+> standard for every fix.
+
+---
+
+## BH3b - AND THE SWEEP FOUND A THIRD BY DOING THE DAMAGE AGAIN
+
+While re-running `null-minted.test.js` after tightening it, **the suite NULLed
+the two restored category `legacy_id`s a second time.**
+
+The first damage came from pointing the suite at a scratch MongoDB, and was
+closed by `assertSourceMatchesMySQL()`, which checks the REAL MongoDB before any
+write. **That guard cannot see this one.** BB1's tests pass a STUBBED `Category`
+whose `find` returned a fixed list, so every row the suite did not create looked
+absent from MongoDB and was nulled - through the one path where the real
+database is never consulted.
+
+> **A guard on the real dependency does nothing about a stub that lies about it.
+> As far as the code under test is concerned, THE STUB IS THE DEPENDENCY.**
+
+`sourceWith()` now resolves every id the suite did not create against the real
+collection, and invents an answer only for its own fixtures - so each test
+controls exactly the variable it is about. A regression test asserts the
+property directly.
+
+**That regression test is currently vacuous, and saying so is the point.** It
+iterates the rows the suite did not create, and those rows now have NULL
+`legacy_id` because this suite nulled them. It becomes live the moment they are
+restored - which is the third thing the sweep is about: a test whose fixture is
+absent proves nothing, quietly.
+
+
+---
+
+## BH1 - THE RETROACTIVE CHANNELS AUDIT
+
+BG4's clause applied backwards to every SEC-08 closure. Five channels: **body,
+status, timing, response size, error-path ordering.**
+
+| Endpoint | Body | Status | Timing | Size | Ordering |
+|---|---|---|---|---|---|
+| `POST /signup` | closed 3.5a | closed | **was 237.7 ms - closed BG1** | clean* | clean |
+| `POST /login` | closed | closed | **was 236.0 ms - closed BG1** | clean | clean |
+| `POST /signup/verify-otp` | closed | closed | **was 240.7 ms - closed BG1** | clean | clean |
+| `POST /signup/resend-otp` | closed | closed | **5.2 ms - accepted BG3** | clean | clean |
+| `POST /login/resend-otp` | closed | closed | **6.2 ms - accepted BG3** | clean | clean |
+| `POST /forgot-password/request` | closed | closed | **6.3 ms - accepted BG3** | clean | clean |
+
+\* `/signup` returns 140 bytes for a known address and 137 for an unknown one.
+The difference is the submitted address echoed back - a value the CALLER chose -
+so it carries nothing the caller did not already know. Compared with the echo
+normalised rather than raw, and the reason is in the test.
+
+### The answer to "expect more than one"
+
+**Only timing was channel-partial.** Response size and error-path ordering are
+clean on all six, including the malformed-request case where a missing password
+is rejected before the account lookup on both branches.
+
+That is a NEGATIVE result from a rule applied systematically, and it is worth
+more than the same conclusion by inspection: SEC-08 was marked closed while
+/login was measurable at 60x, so inspection had already been wrong here once.
+
+---
+
+## BH2 - PRESENCE IS NOT APPLICATION
+
+> **A fix can be correct, in the right file, for the right reason, and still not
+> execute.**
+
+| Instance | Verified by | The property that actually mattered |
+|---|---|---|
+| **PAY-02** | reference-counting an import | runtime model registration |
+| **BG1 / `/signup/verify-otp`** | the fix being present in `verifyPassword` | whether the request REACHES it - the route returns at `if (!pending)` first |
+
+Both times the change was right and inert. Both times **only measurement caught
+it**; in the second, inspection had already reported success.
+
+### The countermeasure
+
+> **An acceptance criterion measures the OUTCOME, never the presence of the
+> change.** Not "the guard is called" but "the forged callback is refused". Not
+> "the import is gone" but "the model is not registered at boot". Not "the
+> equaliser is in the branch" but "the two branches now take the same time".
+
+This is standard for every fix from here, not only timing ones. It is already
+how BH5's guard was accepted - the assertion is that a forged callback leaves
+the donation `Pending`, not that `assertSigningConfigured` appears in the file.
+
+
+---
+
+## PACKAGE 3.6 - THE REQUEST PATH LEAVES MONGODB
+
+Run in BA2's corrected order: the AK3 coupling first, then the evidence, then
+the deletions.
+
+### AE3, both parts
+
+**Part 1 PASSES.** Eighteen suites green in one run, **zero MongoDB fallbacks**,
+via `test/bridge-exit-check.js`. Two suites are named as run elsewhere rather
+than skipped: `trust-proxy` (host, through nginx) and `no-committed-secrets`
+(needs `git`, absent from the api image).
+
+**Part 2 is satisfied for users and donations and DEGRADED for categories.**
+The shared database holds one ETL-migrated user and five migrated donations
+carrying real `legacy_id`s, exercised by every route suite. The two migrated
+categories have NULL `legacy_id` **because this project's own test suite nulled
+them twice** (BH3b) and they await restoration. Stated rather than glossed: the
+category half of part 2 rests on fixtures, not on ETL-produced rows.
+
+### What was deleted, and what each consumer became
+
+| Deleted | Consumer | Now |
+|---|---|---|
+| `services/legacyBridge.js` | `idShape` in donations + payment | `utils/idShape.js` - never bridge logic, and a helper living in a file named after a temporary mechanism is how the mechanism outlives its purpose |
+| `services/categoryBridge.js` | `countCategories` in admin | `repositories/categories.countActive()` - it never consulted MongoDB, it delegated straight to that file |
+| `services/userBridge.js` | `resolveAuthUser` in both middlewares | `repositories/users.resolveForAuth()` - **MySQL only** |
+| `test/category-bridge.test.js` | - | gone with its subject |
+| `config/db.js` + `connectDB()` | `app.js` | nothing. The request path opens no Mongoose connection |
+| `Backend/.env.example` | - | the root template is authoritative (BK2) |
+
+### The behaviour change, stated as one
+
+> **An account that exists only in MongoDB can no longer hold a session.**
+
+The bridge used to resolve it and log `[AUTH-DECISION-FROM-MONGO]`. That is safe
+only because the ETL has run, so **the ETL is the thing standing between a real
+donor and a locked account** - ADR-056's constraint, and the reason AE3 demanded
+evidence before this deletion rather than after.
+
+### The coupling the suites had, made visible
+
+Seven suites asserted `mongoose.connection.readyState === 1` after importing
+`app.js` - they were relying on the APPLICATION to open a MongoDB connection as
+a side effect of being imported, for their OWN fixtures. Each now connects for
+itself.
+
+That dependency was invisible while it was satisfied. Removing `connectDB()` is
+what surfaced it, which is BA2 once more: a component's job ending does not
+remove what quietly depended on it.
+
+### ADR-047, first half only
+
+`MONGODB_URI` is out of the api service. **The `mongo` service stays** - 4b
+restores a production snapshot into it to rehearse the cutover, and the ETL and
+AK3 fixtures still read it. AZ2 found ADR-047 wrong precisely here.
+
+### Acceptance, measured
+
+- `docker compose up` with **no override**: four services, api **healthy**
+- `GET /api/health` -> `200 {"status":"ok"}`, `GET /api/categories` -> `200`
+  with real rows, both through nginx
+- `mongoose.modelNames()` after importing `app.js`: **`[]`**
+
+The last one is the boot-registration gate's property proved directly rather
+than asserted. **The gate itself STAYS** - BH4 asked for it to go with the
+request path, and ADR-059 says it cannot: it is the evidence for this package's
+work, and it goes with `models/` in 4c.
+
+
+---
+
+## U-6 CLOSED - and the bump everyone had queued would NOT have fixed it
+
+Three **HIGH** advisories: `deepmerge-ts < 8.0.0` (stack exhaustion on recursive
+object graphs), reaching the tree through `prisma -> @prisma/config`.
+
+### Two things the obvious fix gets wrong
+
+**1. It is in the PRODUCTION tree, though the declaration says otherwise.**
+`package.json` lists `prisma` under `devDependencies`. The tree says:
+
+    @prisma/client@6.19.3  (a PRODUCTION dependency)
+      -> prisma@6.19.3
+        -> @prisma/config@6.19.3
+          -> deepmerge-ts@7.1.5
+
+`npm audit --omit=dev` reports all three. U-6 recorded this discrepancy and it
+still holds: **the declaration is not the tree**, and only running `npm ls`
+distinguishes them.
+
+**2. UPGRADING PRISMA WOULD NOT HAVE FIXED IT.** The advisory's vulnerable range
+for `prisma` is `6.13.0-dev.1 - 8.1.0-dev.4` - **which includes all of v7.** The
+queued "bump Prisma" task, performed as written, would have moved 6.19.3 to
+7.10.0, changed a major version of the data layer, and left three HIGH
+advisories in place while looking like remediation.
+
+`npm audit fix` proposes `prisma@8.0.0-rc.15` - a release candidate, which is
+not a thing to put under a payment system.
+
+### What was actually done
+
+An `overrides` entry pinning `deepmerge-ts@^8.0.0`. The vulnerability is in
+`deepmerge-ts`; the fix is in `deepmerge-ts@8`; nothing else needs to move.
+
+    npm audit  ->  found 0 vulnerabilities
+    deepmerge-ts@8.0.2 resolved under @prisma/config@6.19.3
+
+Verified by OUTCOME (BH2), not by the version string: `npx prisma generate` runs
+inside the container, and `data-layer` + `schema` pass 57/57 against the real
+database. An override that silently broke the client would show there.
+
+> **An advisory names a vulnerable PACKAGE and a vulnerable RANGE. "Upgrade the
+> thing that depends on it" is not the same fix, and here it would have changed
+> a major version and closed nothing.**
+
 
 ## Counts
 

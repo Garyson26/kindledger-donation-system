@@ -18,9 +18,14 @@
 
 const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
+const { burnEquivalentBcrypt } = require('../config/passwordTiming');
 const { client, newUuid, iso } = require('./_shared');
 
-const BCRYPT_COST = 12;
+// BG1: ONE definition of the cost factor, in config/passwordTiming.js. It was
+// duplicated here and there, which would have let the dummy bcrypt that
+// equalises the missing-row branch drift away from the real one - and a
+// partial equalisation reopens the oracle without saying so.
+const { BCRYPT_COST } = require('../config/passwordTiming');
 const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
 /** SEC-13: OTPs are stored hashed, never in plaintext. */
@@ -128,7 +133,16 @@ async function verifyPassword(email, candidate, tx) {
     where: { email: normalised },
     select: { passwordHash: true },
   });
-  if (!row) return false;
+
+  // BG1: same equalisation as repositories/users.verifyPassword, and the oracle
+  // here was 240.7 ms - whether a signup is IN FLIGHT for an address.
+  //
+  // `/signup/verify-otp` carried a comment claiming the password requirement
+  // "adds no oracle: a caller cannot learn whether the address has a signup in
+  // flight". That was true of the BODY and false of the CLOCK, written in this
+  // project after the timing class had already been recorded.
+  if (!row) return burnEquivalentBcrypt(candidate);
+
   return bcrypt.compare(String(candidate), row.passwordHash);
 }
 

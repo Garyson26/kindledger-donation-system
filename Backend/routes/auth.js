@@ -39,7 +39,13 @@ const jwt = require("jsonwebtoken");
 const { refuse, failed } = require("../utils/respond");
 const authMiddleware = require("../middleware/authMiddleware");
 const { JWT_SECRET } = require("../config/jwt");
-const { sendVerificationEmail, sendLoginOTP, sendSignupOTP } = require("../config/email");
+const { burnEquivalentBcrypt } = require("../config/passwordTiming");
+const {
+  sendVerificationEmail,
+  sendLoginOTP,
+  sendSignupOTP,
+  sendSignupAttemptNotice,
+} = require("../config/email");
 
 // SEC-04. THIS IMPORT IS WHAT CLOSES THE FINDING. Phase 2 built
 // config/rateLimiters.js with a Redis store and nothing imported it; the
@@ -47,8 +53,18 @@ const { sendVerificationEmail, sendLoginOTP, sendSignupOTP } = require("../confi
 // Same 5-per-minute budget, so wiring it changes the STORE and nothing else -
 // a package that silently tightened the limit would be indistinguishable from
 // one that broke something.
-const { authLimiter: makeAuthLimiter } = require("../config/rateLimiters");
+const {
+  authLimiter: makeAuthLimiter,
+  resetAttemptLimiter: makeResetAttemptLimiter,
+} = require("../config/rateLimiters");
 const authLimiter = makeAuthLimiter();
+
+// AQ1, built in AV1. The per-ADDRESS reset-attempt cap. It runs BEFORE the
+// handler, so an address with no account is capped identically to one with an
+// account - the uniformity is structural rather than two branches somebody has
+// to keep byte-identical. See config/rateLimiters.js for why it is a window and
+// not a budget.
+const resetAttemptLimiter = makeResetAttemptLimiter();
 
 const users = require("../repositories/users");
 const pendingSignups = require("../repositories/pendingSignups");
@@ -145,40 +161,85 @@ router.post("/signup", authLimiter, async (req, res) => {
       assignedRole = "admin";
     }
 
+    // =========================================================================
+    // SEC-08's LAST ORACLE, CLOSED (package 3.5a)
+    // =========================================================================
+    // This answered `400 "User already exists with this email"`, which told an
+    // attacker the address holds an account. It answers identically now,
+    // whether or not it does.
+    //
+    // BOTH HALVES ARE REQUIRED. A uniform response with no email behind it is a
+    // lie to the attacker and a SILENCE TO THE VICTIM - the person whose
+    // address was used would never learn it happened. So the existing-account
+    // path sends a notice instead of an OTP, and says the same thing to the
+    // caller either way.
+    //
+    // BOTH SENDS ARE FIRE-AND-FORGET, AND GETTING THAT WRONG FIRST IS WHY THE
+    // COMMENT SAYS SO.
+    //
+    // My first version made only the NOTICE best-effort and left the OTP path
+    // awaiting its send with a rollback and a 500. That did not close the
+    // oracle - IT INVERTED IT. With mail degraded, an address that HAS an
+    // account answers 200 and one that does not answers 500, which distinguishes
+    // them perfectly. The test caught it immediately; reading the code did not,
+    // because the asymmetry is in the branch I was not editing.
+    //
+    // So neither branch signals mail delivery. `/signup/resend-otp` already
+    // worked this way for exactly this reason, in this file - the precedent was
+    // three functions away and I did not apply it.
+    //
+    // THE COST, STATED: a user whose address genuinely bounces is told "check
+    // your email" and receives nothing. That is inherent to a uniform response
+    // and it is the price SEC-08 asks. The pending row is KEPT rather than
+    // rolled back so `/signup/resend-otp` is a real recovery path, and the
+    // 24-hour sweep removes it if nobody uses it.
+    //
+    // WHAT REMAINS AND IS NOT CLOSED HERE: a TIMING difference. The new-account
+    // path hashes a password and writes a row; this one does neither. That is a
+    // far weaker signal than a distinct message and closing it means constant-
+    // time signup, which is a different piece of work. Recorded in the map
+    // rather than left implied by the absence of a comment.
     const existing = await users.findByEmail(email);
+
     if (existing) {
-      // SEC-08, THE ONE THAT IS DEFERRED AND WHY.
+      // BG1: SPEND THE BCRYPT THIS BRANCH DOES NOT NEED.
       //
-      // This response tells an attacker the address holds an account. Removing
-      // it properly means always answering "check your email" and sending
-      // EITHER a verification code OR a "someone tried to register with your
-      // address" notice - which needs a second email template in
-      // config/email.js, a file this package does not own.
+      // The other branch hashes the password at cost 12 before writing the
+      // pending row. This one neither hashes nor writes, and that difference
+      // was 237.7 ms - measured, with distributions that do not overlap, so a
+      // single request told an attacker whether the address was registered.
       //
-      // The security review reaches the same conclusion ("harder to remove
-      // without hurting UX"). Deferred to the package that owns the email
-      // templates, and recorded in the map rather than left as an omission.
-      return refuse(res, 400, "User already exists with this email. Please login instead.");
+      // Deliberately AWAITED and deliberately before the notice: the cost has
+      // to land inside the request, which is the whole mechanism.
+      await burnEquivalentBcrypt(password);
+
+      sendSignupAttemptNotice(email, existing.name).catch((e) =>
+        console.error("[auth] signup-attempt notice failed:", e && e.message)
+      );
+    } else {
+      const otp = generateVerificationCode();
+      await pendingSignups.upsert({
+        name,
+        email,
+        password,
+        role: assignedRole,
+        otp,
+        otpExpiresAt: Date.now() + OTP_TTL_MS,
+      });
+
+      // The Mongoose version rolled back here on a mail failure, reasoning that
+      // "a pending signup whose OTP was never delivered is a row nobody can act
+      // on". That stopped being true when `/signup/resend-otp` was made uniform
+      // - the row IS actionable now, by the person who owns the address.
+      sendSignupOTP(email, otp, name).catch((e) =>
+        console.error("[auth] signup OTP send failed:", e && e.message)
+      );
     }
 
-    const otp = generateVerificationCode();
-    await pendingSignups.upsert({
-      name,
-      email,
-      password,
-      role: assignedRole,
-      otp,
-      otpExpiresAt: Date.now() + OTP_TTL_MS,
-    });
-
-    const emailResult = await sendSignupOTP(email, otp, name);
-    if (!emailResult.success) {
-      // Roll back, exactly as the Mongoose version did: a pending signup whose
-      // OTP was never delivered is a row nobody can act on.
-      await pendingSignups.remove(email);
-      return refuse(res, 500, "Failed to send verification email. Please try again.");
-    }
-
+    // ONE response object, constructed once, reached by both paths. Two
+    // `res.json` calls with the same literal would be two things somebody has
+    // to keep byte-identical - which is exactly how my first SEC-08 fix left a
+    // fourth endpoint differing (AP1).
     res.json({
       message: "Registration initiated. Please check your email for OTP verification.",
       email,
@@ -190,7 +251,7 @@ router.post("/signup", authLimiter, async (req, res) => {
 
 router.post("/signup/verify-otp", authLimiter, async (req, res) => {
   try {
-    const { email, otp } = req.body;
+    const { email, otp, password } = req.body;
     if (!email || !otp) return refuse(res, 400, "Email and OTP are required");
 
     // SEC-08. EVERY failure on this endpoint answers identically, including
@@ -202,7 +263,62 @@ router.post("/signup/verify-otp", authLimiter, async (req, res) => {
     // The attempt cap still runs; it simply does not announce itself. A real
     // user who exhausts it requests a new code and it works.
     const pending = await pendingSignups.findByEmail(email);
-    if (!pending) return refuse(res, 400, "Invalid OTP");
+    if (!pending) {
+      // BG1, AND THIS IS THE LINE MY OWN ENUMERATION MISSED.
+      //
+      // I read the `pendingSignups.verifyPassword` call below, concluded the
+      // leak was the repository returning false without reaching bcrypt, and
+      // fixed it there. THE ROUTE RETURNS HERE FIRST, so that fix never ran on
+      // this path and the 240 ms separation was unchanged. Re-measuring is what
+      // caught it - inspection had already said it was fixed.
+      //
+      // That is the whole argument for measurement as the acceptance criterion:
+      // I was looking at the right endpoint, for the right reason, with the
+      // right fix, and still fixed a line the request never reaches.
+      await burnEquivalentBcrypt(password);
+      return refuse(res, 400, "Invalid OTP");
+    }
+
+    // =========================================================================
+    // SIGNUP-01 - THE CONTROL THAT BREAKS PRE-REGISTRATION TAKEOVER
+    // =========================================================================
+    // `/signup` is unauthenticated, so anyone could start a registration for
+    // ANY address using a password THEY chose. The address owner received a
+    // plausible welcome email, and if they entered the code, THE ACCOUNT WAS
+    // CREATED WITH THE ATTACKER'S PASSWORD - the attacker could then sign in as
+    // them, and everything the victim did afterwards was visible to whoever
+    // chose it.
+    //
+    // THE OTP PROVES CONTROL OF THE ADDRESS. IT DOES NOT PROVE WHO STARTED THE
+    // SIGNUP. Those are different facts and the flow was treating them as one.
+    // The password is the only thing the initiator has that a recipient does
+    // not, so requiring it here is what separates them.
+    //
+    //   legitimate user - knows their own password  -> verifies
+    //   address owner who did not sign up           -> CANNOT verify
+    //
+    // A warning in the email was the first thing suggested and it is a
+    // MITIGATION, not this. It asks the recipient to make the right decision;
+    // this removes the decision.
+    //
+    // `/login` already required exactly this to re-send an OTP for a pending
+    // signup (see above) - the precedent was in this file and the strictly more
+    // dangerous endpoint did not have it.
+    //
+    // ANSWERS "Invalid OTP" like every other failure here, so it adds no oracle
+    // IN THE BODY OR THE STATUS: a caller cannot learn whether the address has
+    // a signup in flight, nor whether their password guess was right.
+    //
+    // THE ORIGINAL OF THIS COMMENT SAID "adds no oracle" FLATLY, AND WAS WRONG
+    // (BG4). It was true of the body and false of the CLOCK - 240.7 ms of
+    // separation, because `verifyPassword` returned false without reaching
+    // bcrypt when there was no pending row. Body, status and timing are
+    // SEPARATE CHANNELS, and a claim covering one is not a claim covering the
+    // others. Closed in the repository by BG1; the claim now names its channels.
+    if (!password || !(await pendingSignups.verifyPassword(email, password))) {
+      await pendingSignups.incrementOtpAttempts(email);
+      return refuse(res, 400, "Invalid OTP");
+    }
 
     const verdict = await pendingSignups.verifyOtp(email, otp);
     if (!verdict.ok) {
@@ -283,13 +399,23 @@ router.post("/login", authLimiter, async (req, res) => {
     }
 
     const user = await users.findByEmail(email);
+
     // SEC-08, and the shape that must not change: an unknown address and a
     // wrong password answer IDENTICALLY. The natural repository implementation
     // returns null for one and false for the other, and reporting those
     // separately reads like better error handling - see the warning on
     // repositories/users.verifyPassword.
-    if (!user) return refuse(res, 400, "Invalid credentials");
-    if (!(await users.verifyPassword(user.id, password))) {
+    //
+    // CHANGED BY BG1, AND THE OLD SHAPE WAS `if (!user) return refuse(...)`.
+    // That answered in 4 ms where a known address took 240, so the identical
+    // bodies were decorating a 60x timing oracle on the canonical enumeration
+    // endpoint. Passing a null id is how this route says "no account here", and
+    // the repository spends the same bcrypt either way.
+    //
+    // ONE EXPRESSION, NOT TWO BRANCHES. Written as `user ? ... : ...` there
+    // would be a branch for somebody to shortcut later; written like this the
+    // work is unconditional.
+    if (!(await users.verifyPassword(user ? user.id : null, password))) {
       return refuse(res, 400, "Invalid credentials");
     }
 
@@ -427,7 +553,7 @@ router.post("/forgot-password/request", authLimiter, async (req, res) => {
   }
 });
 
-router.post("/forgot-password/verify", authLimiter, async (req, res) => {
+router.post("/forgot-password/verify", authLimiter, resetAttemptLimiter, async (req, res) => {
   try {
     const { email, code } = req.body;
     if (!email || !code) return refuse(res, 400, "Email and verification code are required");
@@ -439,24 +565,33 @@ router.post("/forgot-password/verify", authLimiter, async (req, res) => {
 
     const verdict = await users.verifyResetCode(user.id, code);
     if (!verdict.ok) {
-      // UNRESOLVED CONFLICT - SEC-02 versus SEC-08. See the map.
+      // THE SEC-02 / SEC-08 CONFLICT IS RESOLVED (AQ1, built in AV1).
       //
-      // SEC-08 wants this indistinguishable from "no such account", because an
-      // attacker can DRIVE a known account to the cap by requesting a reset and
-      // guessing five times, making the 429 an oracle in two steps.
+      // WAS: `429 Too many attempts` plus `clearResetCode(user.id)`. Two
+      // separate problems.
       //
-      // SEC-02's regression suite asserts the opposite: `429 Too many
-      // attempts`, because the control announcing itself is how that finding
-      // was shown to be closed.
+      //   1. THE 429 WAS AN ORACLE. It was reachable only for an address that
+      //      HAS an account - an attacker requested a reset for the address,
+      //      guessed five times, and the 429 confirmed the account exists. The
+      //      per-ADDRESS limiter now produces that 429 for every address, above
+      //      this handler, before anything has been looked up.
       //
-      // BOTH CANNOT HOLD. The 429 is kept, because SEC-02's suite must pass
-      // UNCHANGED (SPEC-3 section 4.1) and quietly editing it to accommodate
-      // this would be exactly the silent behaviour change that rule exists to
-      // prevent. The residual oracle is recorded and asserted below rather than
-      // left implicit.
+      //   2. VOIDING THE CODE WAS A GRIEFING PRIMITIVE. It defended nothing -
+      //      an exhausted counter already refuses the code without comparing it
+      //      - and it let anyone who knows an address destroy that user's
+      //      pending reset with five requests. That is capping the ACCOUNT, and
+      //      AQ1's second requirement exists to forbid it.
+      //
+      // So exhaustion now answers EXACTLY like a wrong code, and the row is
+      // untouched. The per-account counter remains as defence in depth: it
+      // survives a Redis outage, and it still refuses without ever revealing
+      // that it is the thing refusing.
+      //
+      // A user delayed by the cap is never stuck: `/forgot-password/request` is
+      // deliberately NOT behind this limiter, so a fresh code and a fresh
+      // per-account budget are always obtainable.
       if (verdict.reason === "attempts-exhausted") {
-        await users.clearResetCode(user.id);
-        return refuse(res, 429, "Too many attempts. Please request a new code.");
+        return refuse(res, 400, "Invalid verification code");
       }
       // SEC-08, AND MY FIRST FIX WAS INCOMPLETE. A known address with no code
       // answered "No verification code found" while an unknown address
@@ -478,7 +613,7 @@ router.post("/forgot-password/verify", authLimiter, async (req, res) => {
   }
 });
 
-router.post("/forgot-password/reset", authLimiter, async (req, res) => {
+router.post("/forgot-password/reset", authLimiter, resetAttemptLimiter, async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
     if (!email || !code || !newPassword) return refuse(res, 400, "All fields are required");
@@ -492,10 +627,13 @@ router.post("/forgot-password/reset", authLimiter, async (req, res) => {
 
     const verdict = await users.verifyResetCode(user.id, code);
     if (!verdict.ok) {
-      // Same unresolved SEC-02/SEC-08 conflict as /verify. The 429 stands.
+      // Same resolution as /verify (AQ1): exhaustion is indistinguishable from
+      // a wrong code, and the user's row is not touched. The two endpoints
+      // share ONE per-address bucket, so alternating between them cannot top
+      // the budget up - ADR-034's concern, enforced by the limiter's key rather
+      // than by each handler remembering.
       if (verdict.reason === "attempts-exhausted") {
-        await users.clearResetCode(user.id);
-        return refuse(res, 429, "Too many attempts. Please request a new code.");
+        return refuse(res, 400, "Invalid verification code");
       }
       // SEC-08: same as /verify - "no code" and "no such account" must be
       // indistinguishable.

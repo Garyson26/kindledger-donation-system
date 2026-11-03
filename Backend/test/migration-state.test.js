@@ -521,6 +521,15 @@ test('the set of Mongoose models registered at boot is DECLARED, not incidental'
   //
   // An empty expectation is a strong one. Anything appearing here is a route
   // reaching back to the old store, and the message below says so.
+  //
+  // ============================================================================
+  // DELETE THIS TEST IN PACKAGE 3.6, IN THE SAME COMMIT THAT REMOVES MONGOOSE.
+  // ============================================================================
+  // It guards a coupling that cannot exist once Mongoose is gone. A gate
+  // protecting nothing passes forever, nobody can tell whether it still works,
+  // and it makes this suite look better covered than it is - AU3's shape one
+  // package out. Recorded here AND in docs/remediation-map.md under AV2,
+  // because a note in only one of the two is how a gate outlives its subject.
   const expected = {};
 
   assert.deepEqual(

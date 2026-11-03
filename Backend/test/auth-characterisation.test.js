@@ -49,6 +49,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const MongoUser = require('../models/User');
 const users = require('../repositories/users');
+const pendingSignups = require('../repositories/pendingSignups');
 const prismaModule = require('../config/prisma');
 const { getPrisma } = require('../config/prisma');
 
@@ -70,8 +71,14 @@ const store = {
     await getPrisma().pendingSignup.deleteMany({ where: { email: { startsWith: TAG } } });
   },
 
-  async createUser({ email, role = 'user', isVerified = true, isActive = true }) {
-    const created = await users.create({ name: 'ZZZ AuthChar', email, password: PASSWORD, role, isVerified });
+  /**
+   * `legacyId` stands in for A USER THAT CAME FROM MONGODB. Since 3.6 nothing
+   * mints one, so a test that needs a migrated-looking user has to say so - and
+   * that is the point: the two identity shapes are now visibly different states,
+   * not an accident of which code path created the row.
+   */
+  async createUser({ email, role = 'user', isVerified = true, isActive = true, legacyId = null }) {
+    const created = await users.create({ name: 'ZZZ AuthChar', email, password: PASSWORD, role, isVerified, legacyId });
     if (!isActive) await users.setActive(created.id, false);
     const fresh = await users.findById(created.id);
     return { id: fresh.legacyId || fresh.id, uuid: fresh.id, tokenVersion: fresh.tokenVersion };
@@ -190,10 +197,16 @@ before(async () => {
   assert.ok(process.env.DATABASE_URL, 'Users are MySQL as of package 3.2');
 
   const app = require('../app.js');
-  for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.equal(mongoose.connection.readyState, 1, 'mongoose did not connect');
+  // CHANGED IN 3.6. This used to wait for `app.js` to open the Mongoose
+  // connection via connectDB(), then assert it had. `config/db.js` is deleted -
+  // the request path does not touch MongoDB at all - so a suite that still
+  // needs MongoDB for its own AK3 fixtures must connect for itself.
+  //
+  // The dependency was real and is now visible: the application no longer
+  // provides a MongoDB connection as a side effect of being imported, and
+  // anything relying on that was relying on the thing this package removes.
+  await mongoose.connect(process.env.MONGODB_URI);
+  assert.equal(mongoose.connection.readyState, 1, 'this suite connects to MongoDB itself');
 
   server = app.listen(0);
   await once(server, 'listening');
@@ -425,53 +438,96 @@ test('SEC-08 AUDIT: EVERY existence-dependent endpoint answers identically (AP1)
   }
 });
 
-test('SEC-02 vs SEC-08: the reset-code cap IS an oracle, and that is unresolved', async () => {
-  // AN UNRESOLVED CONFLICT, ASSERTED SO IT CANNOT BE FORGOTTEN.
+test('SEC-02 / SEC-08 RESOLVED: the cap is byte-identical either way (CHANGED IN AV1)', async () => {
+  // THIS TEST PREVIOUSLY ASSERTED THE ORACLE EXISTED, and said in its own
+  // comment that the day it was closed, this should be updated deliberately.
+  // That day is AQ1's per-address counter, built in AV1.
   //
-  // SEC-08 wants every response identical for existing and non-existing
-  // accounts. SEC-02's regression suite asserts `429 Too many attempts` at the
-  // cap, because a control that announces itself is how that finding was shown
-  // to be closed. An attacker can reach the cap on a KNOWN account by
-  // requesting a reset and guessing five times, so the 429 confirms existence.
+  //   WAS: assert.equal(known.status, 429)    known account reaches a cap
+  //        assert.equal(unknown.status, 400)  unknown address cannot
+  //        assert.notEqual(known, unknown)    <- the oracle, pinned
   //
-  // BOTH CANNOT HOLD as written. The 429 stands, because the SEC-02 suite must
-  // pass unchanged (SPEC-3 section 4.1). This test pins the residual oracle so
-  // the day it is closed, this fails and someone edits it deliberately.
+  //   NOW: both reach the SAME cap and answer with the SAME BODY.
   //
-  // The fix that satisfies both is a per-ADDRESS attempt counter that also
-  // applies to addresses with no account, so an unknown address exhausts and
-  // answers 429 too. That is new mechanism, not a tweak, and it is recorded in
-  // the map rather than improvised here.
+  // WORTH NOTING HOW IT PASSED IN BETWEEN. After the limiter landed and before
+  // this edit, the test still went green - the known address tripped the new
+  // per-address cap at 429 and the unknown address, being a DIFFERENT address
+  // with its own untouched bucket, still answered 400. The assertion held and
+  // its PREMISE was false. A test can survive the removal of the thing it was
+  // written to pin, if what it measures is a side effect rather than the
+  // property.
+  //
+  // AP1: the full BODY, deepEqual, never the status alone. That rule exists
+  // because my first SEC-08 fix unified three endpoints on status and left a
+  // fourth differing on body text.
   await store.reset();
-  const email = uniqEmail('capconflict');
+  const email = uniqEmail('capresolved');
   await store.createUser({ email });
   const absent = uniqEmail('capabsent');
 
   await post('/api/auth/forgot-password/request', { email });
-  // EXACTLY five, so the NEXT call is the one that trips the cap. A sixth here
-  // would trip it and VOID the code, and the assertion below would then see the
-  // no-code path returning 400 - which looks like the oracle being closed when
-  // it is only the fixture being off by one.
-  for (let i = 0; i < 5; i += 1) {
-    await post('/api/auth/forgot-password/verify', { email, code: '000000' });
-  }
 
-  const known = await post('/api/auth/forgot-password/verify', { email, code: '000000' });
-  const unknown = await post('/api/auth/forgot-password/verify', { email: absent, code: '000000' });
+  // Drive BOTH addresses to the cap. The point is that an address with NO
+  // ACCOUNT can reach one at all - under the old design it could not, which is
+  // exactly what made the cap an oracle.
+  const driveToCap = async (address) => {
+    let last = null;
+    for (let i = 0; i < 8; i += 1) {
+      last = await post('/api/auth/forgot-password/verify', { email: address, code: '000000' });
+      if (last.status === 429) return last;
+    }
+    return last;
+  };
 
-  assert.equal(known.status, 429, 'SEC-02: the cap announces itself');
-  assert.equal(unknown.status, 400, 'SEC-08: an unknown address cannot reach a cap');
-  assert.notEqual(
-    known.status,
+  const known = await driveToCap(email);
+  const unknown = await driveToCap(absent);
+
+  assert.equal(known.status, 429, 'an address WITH an account reaches the cap');
+  assert.equal(
     unknown.status,
-    'THE ORACLE, asserted deliberately. If this starts failing, the conflict was ' +
-      'resolved and this test should be updated to assert the new behaviour.'
+    429,
+    'AND SO DOES AN ADDRESS WITH NO ACCOUNT - the requirement the whole feature ' +
+      'exists for. If this is 400, the cap is keyed off something that only ' +
+      'exists for real users and the oracle is back.'
+  );
+
+  assert.deepEqual(
+    known.body,
+    unknown.body,
+    'AP1: the ENTIRE body identical, not merely the status. A difference here ' +
+      'is the finding, however small - an extra field or a nested code is ' +
+      'exactly where an oracle hides once the obvious string is unified.'
+  );
+
+  // AND THE CAP MUST NOT HAVE TOUCHED THE ACCOUNT (AQ1's second requirement).
+  // An attacker who drives a real user's address to the cap must not have
+  // destroyed that user's pending reset code.
+  const row = await users.findByEmail(email);
+  assert.ok(row, 'the account still exists');
+  assert.equal(row.isActive, true, 'and is not disabled - the cap is not a lockout');
+
+  const raw = await getPrisma().user.findUnique({
+    where: { uuid: row.id },
+    select: { resetCodeHash: true },
+  });
+  assert.ok(
+    raw.resetCodeHash,
+    "THE USER'S RESET CODE SURVIVED. Voiding it at the cap was a griefing " +
+      'primitive - anyone who knows an address could destroy a pending reset ' +
+      'with five requests - and removing that is AQ1 requirement 2.'
   );
 });
 
-test('SEC-08: the one remaining oracle is /signup, and it is deliberate', async () => {
-  // Recorded as a test so the deferral cannot be forgotten: if someone closes
-  // it, this fails and they update it on purpose.
+test('SEC-08 FULLY CLOSED: /signup answers identically either way (CHANGED IN 3.5a)', async () => {
+  // THIS TEST PINNED THE LAST ORACLE and said that if it ever started failing,
+  // the oracle had been closed and it should be updated on purpose. Package
+  // 3.5a closed it - the second email template, which is the only reason that
+  // package existed.
+  //
+  //   WAS: assert.notDeepEqual(known.body, unknown.body)   <- the oracle
+  //   NOW: assert.deepEqual(known.body, unknown.body)
+  //
+  // AP1: the ENTIRE body, deepEqual, and the status. Not the status alone.
   await store.reset();
   const email = uniqEmail('signupleak');
   await store.createUser({ email });
@@ -483,14 +539,64 @@ test('SEC-08: the one remaining oracle is /signup, and it is deliberate', async 
     password: 'ValidPassword1!',
   });
 
-  assert.notDeepEqual(
-    known.body,
-    unknown.body,
-    'STILL AN ORACLE, deliberately: closing it needs a second email template in ' +
-      'config/email.js, which package 3.2 does not own. If this assertion starts ' +
-      'failing, the oracle was closed and this test should be updated to assert that.'
+  assert.equal(known.status, unknown.status, 'same status');
+  assert.equal(known.status, 200, 'and both are accepted rather than both refused');
+
+  // ONE FIELD IS EXCLUDED, AND THE EXCLUSION IS ARGUED RATHER THAN ASSUMED.
+  //
+  // `email` differs because each response ECHOES THE ADDRESS THE CALLER SENT.
+  // That is definitionally not a disclosure: the attacker chose the value, so
+  // reading it back tells them nothing they did not already have. Every other
+  // field must match byte for byte.
+  //
+  // AP1 says compare the whole body, and this is not a weakening of it - an
+  // exclusion with a reason is different from a comparison that never looked.
+  // The two assertions below are what make it safe: the field is excluded AND
+  // proven to be a pure echo, so it cannot become a carrier later.
+  assert.deepEqual(
+    { ...known.body, email: null },
+    { ...unknown.body, email: null },
+    'every field except the echoed address must be identical'
   );
-  assert.match(known.body.error, /already exists/i);
+  assert.equal(known.body.email, email, 'the excluded field is a pure echo of the input');
+  assert.equal(
+    Object.keys(known.body).sort().join(','),
+    Object.keys(unknown.body).sort().join(','),
+    'and the two bodies carry the same KEYS, so nothing extra appears on one path'
+  );
+
+  // AND THE ACCOUNT MUST BE UNTOUCHED. A signup attempt against an existing
+  // address must not create a pending signup that could later be verified into
+  // a second account, or overwrite anything on the first.
+  const after = await store.readUser(email);
+  assert.ok(after, 'the existing account survives');
+  assert.equal(after.email, email.toLowerCase());
+
+  // The attacker's name must NOT have replaced the account holder's.
+  assert.notEqual(after.name, 'x', "the attacker's `name` field did not overwrite anything");
+});
+
+test('3.5a: a signup attempt on a known address creates NO pending signup', async () => {
+  // The uniform response must not be paid for by leaving a row an attacker can
+  // then verify. `/signup/verify-otp` would otherwise be a second route to the
+  // same oracle - and worse, a route to an account.
+  await store.reset();
+  const email = uniqEmail('nopending');
+  await store.createUser({ email });
+
+  await post('/api/auth/signup', { name: 'attacker', email, password: 'ValidPassword1!' });
+
+  const pending = await getPrisma().pendingSignup.findFirst({
+    where: { email: email.toLowerCase() },
+  });
+  assert.equal(pending, null, 'no pending signup row was created for an address that has an account');
+
+  // And a resend for that address still answers uniformly, so the absence of a
+  // row is not observable through the other endpoint either (AP1).
+  const resendKnown = await post('/api/auth/signup/resend-otp', { email });
+  const resendUnknown = await post('/api/auth/signup/resend-otp', { email: uniqEmail('nobody2') });
+  assert.equal(resendKnown.status, resendUnknown.status);
+  assert.deepEqual(resendKnown.body, resendUnknown.body);
 });
 
 test('SEC-08: the reset and resend paths no longer leak existence (CHANGED IN 3.2)', async () => {
@@ -594,10 +700,57 @@ test('AE4: what GET /api/auth/me ACTUALLY returns', async () => {
     assert.equal(forbidden in res.body, false, `${forbidden} must not be returned`);
   }
   assert.equal(res.body.email, email);
-  // CHANGED IN 3.2: `_id` is the ObjectId-shaped external id (ADR-051) and the
-  // uuid is returned alongside, so nothing is hidden.
-  assert.match(res.body._id, /^[0-9a-f]{24}$/);
-  assert.match(res.body.uuid, /^[0-9a-f]{8}-/);
+
+  // ===========================================================================
+  // CHANGED IN 3.6, DELIBERATELY - and this is the before and the after
+  // ===========================================================================
+  // WAS (3.2):  assert.match(res.body._id, /^[0-9a-f]{24}$/);
+  //             every user's external id was ObjectId-shaped, because
+  //             `repositories/users.js` MINTED one for users who had never been
+  //             near MongoDB. That was needed while `Donation.userId` was a
+  //             required Mongoose ObjectId ref.
+  //
+  // NOW (3.6):  package 3.4 migrated the donation write path, the ref is gone,
+  //             and AE1-b's sibling minter in users.js was removed. A user
+  //             created now has legacy_id NULL and IS ADDRESSED BY UUID.
+  //
+  // The old assertion did not become wrong by accident - it recorded a
+  // behaviour this package deliberately removed. It is replaced by the RULE
+  // rather than by the new absolute, so that it keeps discriminating: a
+  // MIGRATED user must still answer with its real ObjectId (ADR-051 keeps it as
+  // the external id through Phase 3), and a NEW one must answer with its uuid.
+  // Asserting only "it is a uuid" would pass even if migrated users had silently
+  // lost their ObjectId identity, which is the failure that would actually hurt.
+  const OBJECT_ID = /^[0-9a-f]{24}$/;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  assert.match(res.body.uuid, UUID, 'the uuid is always present and always a uuid');
+  assert.match(
+    res.body._id,
+    UUID,
+    'a user created AFTER 3.6 is addressed by uuid - no legacy_id is minted any more'
+  );
+  assert.equal(
+    res.body._id,
+    res.body.uuid,
+    'and with no legacy_id the external id IS the uuid, not a second value'
+  );
+
+  // The other half of the rule, on a user carrying a legacy_id - which since
+  // 3.6 only the ETL produces, so the fixture has to ask for one explicitly.
+  const migrated = await store.createUser({
+    email: uniqEmail('me-migrated'),
+    legacyId: crypto.randomBytes(12).toString('hex'),
+  });
+  const res2 = await get('/api/auth/me', tokenFor(migrated));
+  assert.equal(res2.status, 200, res2.raw.slice(0, 160));
+  assert.match(
+    res2.body._id,
+    OBJECT_ID,
+    'A MIGRATED user still answers with its ObjectId. If this fails, 3.6 did not ' +
+      'stop minting - it broke the identity of every record that came from MongoDB.'
+  );
+  assert.match(res2.body.uuid, UUID);
 });
 
 test('PUT /api/users/profile requires a token and updates the caller', async () => {
@@ -676,4 +829,226 @@ test('AK3: an UN-MIGRATED user authenticates through the bridge, loudly', async 
   const login = await post('/api/auth/login', { email, password: PASSWORD });
   assertRefused(login, 400);
   assert.equal(login.body.error, 'Invalid credentials');
+});
+
+// =============================================================================
+// SIGNUP-01 - pre-registration account takeover (AX1)
+// =============================================================================
+
+test('SIGNUP-01 CLOSED: a recipient who did not start the signup CANNOT complete it', async () => {
+  // THE ATTACK, RUN IN FULL, ASSERTED TO FAIL AT THE STEP THAT MATTERS.
+  //
+  // Proved working before this fix, in the AW2 audit:
+  //   pending row created: true
+  //   password hash is the ATTACKER-chosen one: true
+  //   attempts before re-post: 4 -> after: 0
+  //   account created: true
+  //   ATTACKER PASSWORD WORKS ON IT: true
+  //
+  // The OTP proves control of the ADDRESS. It does not prove who STARTED the
+  // signup. `/signup/verify-otp` now requires the password the signup was
+  // started with, which is the only thing the initiator has and the recipient
+  // does not.
+  await store.reset();
+  const victim = uniqEmail('signup01victim');
+  const ATTACKER_PASSWORD = 'AttackerChosen123!';
+
+  // 1. The attacker starts a registration for an address they do not own.
+  const initiated = await post('/api/auth/signup', {
+    name: 'Totally The Victim',
+    email: victim,
+    password: ATTACKER_PASSWORD,
+  });
+  assert.equal(initiated.status, 200, 'the attacker can still START one - that is SEC-08 uniformity');
+
+  // 2. The attacker re-posts to reset the OTP attempt counter. Part of the
+  //    proved chain, so it is part of the proof that the chain is broken.
+  const prisma = getPrisma();
+  await prisma.pendingSignup.update({
+    where: { email: victim.toLowerCase() },
+    data: { signupOtpAttempts: 4 },
+  });
+  await post('/api/auth/signup', { name: 'x', email: victim, password: ATTACKER_PASSWORD });
+  const afterRepost = await prisma.pendingSignup.findFirst({
+    where: { email: victim.toLowerCase() },
+    select: { signupOtpAttempts: true },
+  });
+  assert.equal(
+    afterRepost.signupOtpAttempts,
+    0,
+    'the re-post STILL resets the counter - recommendation 2 is NOT implemented, ' +
+      'and this asserts the residual rather than letting it be assumed closed'
+  );
+
+  // 3. The victim receives the code. Simulated by setting a known one, because
+  //    the suite cannot read the mailbox.
+  const KNOWN = '123456';
+  await require('../repositories/pendingSignups').setOtp(victim, KNOWN, Date.now() + 10 * 60 * 1000);
+
+  // 4. THE VICTIM ENTERS THE CODE - and this is where the chain now breaks.
+  //    They do not know the attacker's password, so they cannot supply it.
+  const victimAttempt = await post('/api/auth/signup/verify-otp', { email: victim, otp: KNOWN });
+  assertRefused(victimAttempt, 400);
+  assert.equal(victimAttempt.body.error, 'Invalid OTP', 'and it says nothing about why');
+
+  assert.equal(
+    await users.findByEmail(victim),
+    null,
+    'NO ACCOUNT WAS CREATED. This is the assertion the whole finding turns on.'
+  );
+
+  // 5. And guessing a DIFFERENT password does not work either, so the control
+  //    is the password and not merely the presence of the field.
+  const guessed = await post('/api/auth/signup/verify-otp', {
+    email: victim,
+    otp: KNOWN,
+    password: 'SomeOtherPassword1!',
+  });
+  assertRefused(guessed, 400);
+  assert.equal(await users.findByEmail(victim), null, 'still no account');
+});
+
+test('SIGNUP-01: the CONTROL - a genuine signup still completes', async () => {
+  // Without this, the test above proves only that verify-otp is broken, which a
+  // permanently failing endpoint would also satisfy.
+  await store.reset();
+  const email = uniqEmail('signup01real');
+  const PASSWORD = 'GenuineUser123!';
+
+  await post('/api/auth/signup', { name: 'Real User', email, password: PASSWORD });
+
+  const KNOWN = '654321';
+  await require('../repositories/pendingSignups').setOtp(email, KNOWN, Date.now() + 10 * 60 * 1000);
+
+  const verified = await post('/api/auth/signup/verify-otp', {
+    email,
+    otp: KNOWN,
+    password: PASSWORD,
+  });
+  assert.equal(verified.status, 200, `a genuine signup must complete: ${verified.raw.slice(0, 200)}`);
+  assert.ok(verified.body.token, 'and it issues a token');
+
+  const account = await users.findByEmail(email);
+  assert.ok(account, 'the account exists');
+  assert.equal(
+    await users.verifyPassword(account.id, PASSWORD),
+    true,
+    'with the password the person who signed up chose'
+  );
+});
+
+// =============================================================================
+// BB2 - SIGNUP-01 RECOMMENDATION 3, PINNED AND STILL OPEN
+// =============================================================================
+// These tests ASSERT A KNOWN DEFECT. They are not regressions when they pass,
+// and making them fail is the point of the work that closes the finding.
+//
+// WHY PINNED RATHER THAN FIXED (BB2): implementing a per-address limit on
+// /signup is separate work with its own trade-off - a limit keyed on an address
+// an attacker supplies is itself a way to lock a real user out of registering,
+// which is the AV1 shape and needs the same care. What could not wait is that
+// the residual was the only one in BA3's audit that was neither closed NOR
+// recorded by a test. A residual with a test cannot change unnoticed; one with a
+// prose note can, and this one is a live denial of registration against real
+// users.
+//
+// THE FINDING: /signup uses upsert. An attacker who knows a victim's address can
+// re-post it at will; each post REPLACES the pending row and invalidates the OTP
+// already sitting in the victim's inbox. The victim cannot complete registration
+// for as long as the attacker keeps posting. It is not account takeover - AX1
+// closed that chain - it is denial of registration, and it costs the attacker
+// one unauthenticated request.
+// =============================================================================
+
+test('BB2/SIGNUP-01 rec 3 (OPEN): a re-post DESTROYS a legitimate in-flight signup', async () => {
+  const victim = uniqEmail('bb2-victim');
+  const VICTIM_PASSWORD = 'VictimPassword1!';
+
+  // 1. The victim starts a genuine signup.
+  const started = await post('/api/auth/signup', {
+    name: 'ZZZ Victim',
+    email: victim,
+    password: VICTIM_PASSWORD,
+  });
+  assert.equal(started.status, 200, started.raw.slice(0, 160));
+
+  // 2. Give the pending row a code we know, standing in for the one that just
+  //    went to the victim's inbox.
+  const VICTIM_OTP = '246813';
+  await pendingSignups.setOtp(victim, VICTIM_OTP, new Date(Date.now() + 10 * 60 * 1000));
+
+  // CONTROL: without interference that code works. Without this the test could
+  // not tell "the attacker broke it" from "the code never worked".
+  const control = uniqEmail('bb2-control');
+  await post('/api/auth/signup', { name: 'ZZZ Control', email: control, password: VICTIM_PASSWORD });
+  await pendingSignups.setOtp(control, VICTIM_OTP, new Date(Date.now() + 10 * 60 * 1000));
+  const controlVerify = await post('/api/auth/signup/verify-otp', {
+    email: control,
+    otp: VICTIM_OTP,
+    password: VICTIM_PASSWORD,
+  });
+  assert.equal(
+    controlVerify.status,
+    200,
+    'CONTROL FAILED: an undisturbed signup must complete, or this test proves nothing'
+  );
+
+  // 3. The attacker re-posts the victim's address. One unauthenticated request,
+  //    no credentials, nothing they had to know except the address.
+  const attack = await post('/api/auth/signup', {
+    name: 'attacker',
+    email: victim,
+    password: 'AttackerPassword1!',
+  });
+  assert.equal(attack.status, 200, 'and it is accepted - there is no per-address limit');
+
+  // 4. THE DEFECT. The victim's emailed code is now dead.
+  const victimVerify = await post('/api/auth/signup/verify-otp', {
+    email: victim,
+    otp: VICTIM_OTP,
+    password: VICTIM_PASSWORD,
+  });
+  assert.notEqual(
+    victimVerify.status,
+    200,
+    'PINNED DEFECT: if this now SUCCEEDS, SIGNUP-01 rec 3 has been closed - ' +
+      'update the residual audit row and delete this test rather than making it pass'
+  );
+
+  // And no account exists for the victim, so it is a denial and not a takeover.
+  assert.equal(
+    await users.findByEmail(victim),
+    null,
+    'no account was created for either party - AX1 closed the takeover chain'
+  );
+});
+
+test('BB2/SIGNUP-01 rec 3 (OPEN): the re-post is UNLIMITED, which is what makes it useful', async () => {
+  // A single re-post is a nuisance. The absence of a per-address limit is what
+  // turns it into a sustained denial: the attacker simply keeps posting, and the
+  // victim's code is dead again within a second of every retry.
+  const victim = uniqEmail('bb2-repeat');
+
+  await post('/api/auth/signup', { name: 'ZZZ Victim', email: victim, password: 'VictimPassword1!' });
+
+  const statuses = [];
+  for (let i = 0; i < 6; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await post('/api/auth/signup', {
+      name: 'attacker',
+      email: victim,
+      password: 'AttackerPassword1!',
+    });
+    statuses.push(res.status);
+  }
+
+  assert.deepEqual(
+    statuses,
+    [200, 200, 200, 200, 200, 200],
+    'PINNED DEFECT: every re-post against the SAME ADDRESS is accepted. If any ' +
+      'of these becomes 429, a per-address limit has been added - close the ' +
+      'residual and delete this test. NOTE: the IP limiter does not fire here ' +
+      'because each request carries a distinct X-Forwarded-For, which is exactly ' +
+      'the attacker with more than one address.'
+  );
 });

@@ -3102,7 +3102,9 @@ choice that did not exist.**
 
 ### Decision
 
-A finding declares `loaderRefuses`. Findings carrying it are **refused before
+A finding declares `refusedAtLoad` (renamed from `loaderRefuses` by BD1, which
+found that two of the five refusals come from the SCHEMA and not from the
+loader). Findings carrying it are **refused before
 anything is written**, and the override does not apply to them. The report says
 so explicitly, names them, and directs the operator at the SOURCE data.
 
@@ -3123,3 +3125,213 @@ to none.
 - It belongs to the class in AP4: a control that is correct - refusing to guess
   a date - producing a symptom somewhere else, here a half-migrated database
   that reads like a loader bug.
+
+---
+
+## ADR-059 — Package 3.6 cannot remove Mongoose entirely, because Phase 4b needs it
+
+**Status** Accepted (package 3.6). Corrects the exit criterion recorded for 3.6.
+
+### Context
+
+3.6's recorded exit criterion is **"no file imports Mongoose"**, and the sequence
+puts it before 4b, whose entire job is running the ETL against production
+MongoDB. The ETL reads the old store through Mongoose:
+
+```
+Backend/etl/cli.js:25    const mongoose = require('mongoose');
+Backend/etl/cli.js:102   User: require('../models/User'),
+Backend/etl/cli.js:103   Category: require('../models/Category'),
+Backend/etl/cli.js:104   Donation: require('../models/Donation'),
+Backend/etl/cli.js:105   PendingSignup: require('../models/PendingSignup'),
+Backend/etl/preflight.js:31  const mongoose = require('mongoose');
+```
+
+**So 3.6 as specified would make the cutover impossible.** Satisfying the
+criterion means deleting the only code that can read the database the cutover
+has to migrate.
+
+### Why the criterion read as correct
+
+Because it IS correct about the thing anyone pictures on hearing "Mongoose
+removal" — the REQUEST PATH. Every route, middleware and service reaching the
+old store is what the finding is about, and that is finishable now.
+
+**The ETL is not a consumer of the old store; it is the BRIDGE OUT OF IT.** It is
+the one component whose purpose requires the dependency the package exists to
+delete, and it survives its own removal by being what performs the removal.
+
+### Decision
+
+**3.6 removes Mongoose from the REQUEST PATH and the test suites, and retains it
+in `Backend/etl/` and `Backend/models/`.** Two exit criteria replace one:
+
+1. **No file reachable from a request imports Mongoose** — already gated:
+   `test/migration-state.test.js` asserts the app registers ZERO Mongoose models
+   at boot (AV2's gate).
+2. **`Backend/etl/` and `Backend/models/` are the only remaining importers**,
+   deleted by a final cleanup AFTER 4b completes.
+
+### Consequences
+
+- **A terminal package 4c exists**: delete `Backend/models/`, `Backend/etl/`,
+  `scripts/seedDatabase.js`, the `mongoose` dependency and
+  `docker-compose.legacy-mongo.yml`. Trigger: 4b complete, rollback boundary
+  closed.
+- **ADR-047 is re-homed to 4c and was half right.** It ties the override's life
+  to `config/db.js`, which 3.6 does delete — but the override also provides the
+  `mongo` SERVICE, which 4b's snapshot rehearsal restores into and the ETL suite
+  needs. The two halves of that file have different lifetimes and ADR-047 saw
+  only one.
+- **AE1-a's `legacy_id` nulling stays in 3.6.** It depends on MongoDB being
+  READABLE to distinguish a minted id from a genuine one, which keeps it on the
+  safe side of the only irreversible step.
+- The AK3 fixtures in the route suites are deleted in 3.6: their subject is a
+  bridge fallback that no longer exists.
+
+### The shape, again
+
+The fourth ordering constraint found by asking what the DATA does rather than
+what the code layout suggests (ADR-055 FK direction, ADR-056 row location,
+ADR-057 writer/reader split). **A package named for removing a dependency cannot
+remove it from the component whose job is to stop needing it.**
+
+---
+
+## ADR-047 (AMENDED by AZ2) — the override file's two halves have different lifetimes
+
+**The original decision stands and is not rewritten** (ADR-012's precedent: the
+superseded reasoning is what makes the correction legible).
+
+ADR-047 recorded that `docker-compose.legacy-mongo.yml` exists only while
+`config/db.js` does, and that both are deleted together.
+
+**That is true of one half of the file and false of the other.**
+
+| What the override provides | Dies when | Package |
+|---|---|---|
+| `MONGODB_URI` on the api service | `config/db.js` goes — the app stops connecting to MongoDB | **3.6** |
+| the `mongo` SERVICE | nothing needs a local MongoDB: the ETL is gone and 4b's snapshot rehearsal has restored into it | **4c** |
+
+Phase 4b restores a production snapshot INTO that service to rehearse the
+cutover. Deleting the file in 3.6 would remove the thing the rehearsal runs
+against, and would do it two packages before anyone noticed.
+
+### The generalisation
+
+> **A deletion criterion attached to a FILE is wrong when the file's contents
+> have divergent lifetimes. Attach it to the CAPABILITY.**
+
+"Delete the override when `config/db.js` goes" binds two capabilities that
+happen to share a file. The criteria that survive are *"the api stops needing
+`MONGODB_URI`"* and, separately, *"nothing needs a local MongoDB"*.
+
+A sweep of the remaining "delete X when Y" criteria found six, of which two were
+file-shaped and both were wrong — this one, and AV2's boot-registration gate,
+which named a COMMIT rather than a condition and has been re-homed to 4c by
+ADR-059. Two of six was a high enough rate to justify the sweep rather than a
+note; it is recorded in the remediation map under AZ2.
+
+---
+
+## ADR-060: AE3's exit check cannot be satisfied by the suite that produces it
+
+**Status:** accepted (package 3.6)
+**Supersedes nothing. Constrains ADR-050's exit condition.**
+
+### What happened
+
+ADR-050 says a bridge may be deleted when `fallbackCount()` is zero over a real
+run. Package 3.6 mechanised that as `test/bridge-exit-check.js`, because
+`readyToDelete()` can only answer for ONE PROCESS and `node --test` gives each
+suite its own — the counter resets fifteen times, so the number ADR-050 asks for
+did not exist anywhere.
+
+The first mechanised run reported **34 fallbacks**, every one of them
+`[AUTH-DECISION-FROM-MONGO]`.
+
+**Thirty-two came from one test fixture.** `categories-characterisation.test.js`
+created its admin and plain-user in MongoDB — a leftover from package 3.1, when
+users still lived there — so every authenticated request in a suite *about
+categories* missed MySQL and was resolved through the auth bridge.
+
+### The finding
+
+> **The bridge was not carrying traffic. The test suite was manufacturing it.**
+
+Both readings of "34" were available and neither was checkable without reading
+the fixtures: *the bridge is live, do not delete it*, and *those are only
+fixtures, ignore them*. An exit check that can be read either way is not
+evidence, and the second reading is the one a tired person picks.
+
+This is AU3's pattern in a new place — a control validated only where nothing is
+at stake — but sharper: here the control's INPUT was produced by the thing it
+was measuring.
+
+### What follows
+
+1. The exit check is kept and is now a CI gate. It failed usefully on its first
+   run, which is the only evidence that a check of this kind works.
+2. **The AK3 Mongo-only fixtures must be removed BEFORE the bridge-deletion
+   evidence means anything**, which inverts AZ4's steps 2 and 3. This is
+   ADR-059's shape again: the evidence for removing a dependency cannot be
+   gathered while the component that manufactures it is still in place.
+3. The exclusion list names `category-bridge.test.js` explicitly rather than by
+   pattern, because that suite exists to drive the fallback and a pattern would
+   quietly grow to cover the next inconvenient suite.
+4. The two fallbacks that remain are AK3 tests asserting the bridge works —
+   the behaviour 3.6 removes. They change with the bridge, not before it.
+
+### The generalisation
+
+> **Before trusting a count, ask what produces the thing being counted. If the
+> answer is "the test suite", the count measures the fixtures.**
+
+---
+
+## ADR-061: Apache-2.0, and what it does not protect
+
+**Status:** accepted (BI1)
+**Supersedes:** the "undecided" state in which four artefacts disagreed.
+
+### The decision
+
+`LICENSE` (Apache-2.0 text), `NOTICE`, `Backend/package.json`,
+`Frontend/package.json` and `README.md` now all say **Apache-2.0**.
+
+### Why not copyleft
+
+GPL-3.0's copyleft triggers on CONVEYING. Hosting a modified web application is
+generally not conveying, so GPL would have bound an NGO handing a modified copy
+to a peer while leaving a commercial host free to publish nothing. **It imposes
+the obligation on the party least likely to be the problem.**
+
+AGPL-3.0 closes that through section 13 and was the serious alternative. It was
+rejected on adoption grounds: the goal is small NGOs running their own instance,
+and AGPL is the licence most likely to make a volunteer developer or a donated
+hosting provider back away.
+
+Apache-2.0 additionally grants patent rights explicitly (section 3), which MIT
+and ISC do not.
+
+### WHAT THE LICENCE DOES NOT DO, STATED SO NOBODY ASSUMES OTHERWISE
+
+> **Apache-2.0 does NOT protect the "Powered by KindLedger Donation System"
+> footer. A fork may legally remove it.**
+
+Section 4(d) carries the NOTICE file into derivative works. It says nothing
+about what the application renders at runtime. The footer is an **honour-system
+request**, and it is one by deliberate choice: a clause forbidding its removal
+would make this not open source under the OSI definition.
+
+Recorded because the failure mode is specific and this project has met its shape
+before - a control believed to be doing work it is not (BB4's flag, AU2's
+uncited claims). SPEC-5 section 5.2 requires the same sentence in the component's
+own comment, next to the code, per AI4.
+
+### On the GPL text that was there
+
+Commit `4f3b7ec` added GPL v3 while the repository was private. No public
+distribution occurred under it, so no public grant exists and nothing is
+revoked. This is a first choice, not a relicensing.
+

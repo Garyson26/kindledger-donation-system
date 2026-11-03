@@ -18,7 +18,8 @@
 const jwt = require("jsonwebtoken");
 const { JWT_SECRET } = require("../config/jwt");
 const { refuse } = require("../utils/respond");
-const { resolveAuthUser } = require("../services/userBridge");
+// 3.6: the bridge is gone. One store, so one lookup.
+const { resolveForAuth } = require("../repositories/users");
 
 const adminAuth = async (req, res, next) => {
   const token = req.headers["authorization"] || req.header("Authorization");
@@ -30,7 +31,7 @@ const adminAuth = async (req, res, next) => {
     const userId = decoded.userId || decoded.id || decoded.user || null;
     if (!userId) return refuse(res, 401, "Invalid token payload");
 
-    const user = await resolveAuthUser(userId);
+    const user = await resolveForAuth(userId);
     if (!user) return refuse(res, 404, "User not found");
 
     // SEC-05. A disabled admin is refused before the role is even considered:

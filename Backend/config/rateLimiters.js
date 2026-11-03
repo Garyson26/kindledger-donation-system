@@ -146,6 +146,24 @@ function keyFor(name, ip) {
 }
 
 /**
+ * The bucket key for a limiter that counts by EMAIL ADDRESS rather than by
+ * client address (AQ1).
+ *
+ * NORMALISED, so `A@x.com ` and `a@x.com` share one bucket. Without that the
+ * cap is bypassed by varying the case of an address the attacker already knows.
+ *
+ * HASHED, so Redis does not accumulate a readable list of every address anyone
+ * has attempted a password reset for. The counter needs to distinguish
+ * addresses; it does not need to reveal them, and a shared Redis is exactly the
+ * kind of place that list would be read from (DEPLOY-01).
+ */
+function keyForAddress(name, email) {
+  const normalised = String(email == null ? '' : email).trim().toLowerCase();
+  const digest = require('node:crypto').createHash('sha256').update(normalised).digest('hex');
+  return `${name}:addr:${digest.slice(0, 32)}`;
+}
+
+/**
  * Create a limiter.
  *
  * Every limiter shares one store instance. Separate windows are kept apart by
@@ -171,7 +189,7 @@ function keyFor(name, ip) {
  * helper and warns with ERR_ERL_KEY_GEN_IPV6. That warning is how this was
  * caught here - it fired during the SPEC-2 section 8 test run, not in review.
  */
-function createLimiter({ name, windowMs, max, message }) {
+function createLimiter({ name, windowMs, max, message, keyBy }) {
   const store = getStore();
   announceOnce();
   return rateLimit({
@@ -179,9 +197,16 @@ function createLimiter({ name, windowMs, max, message }) {
     max,
     standardHeaders: true,
     legacyHeaders: false,
-    message: { error: message },
+    // BUG-11's shape: `error` is canonical, `message` mirrors it for the
+    // frontend's existing fallback. express-rate-limit sends this object
+    // verbatim, so a limiter refusal has to carry the same shape as every other
+    // refusal or a client cannot read the reason (utils/respond.js).
+    message: { error: message, message },
     ...(store ? { store } : {}),
-    keyGenerator: (req) => keyFor(name, req.ip),
+    // `keyBy` lets a limiter count something other than the client address -
+    // currently only the per-address reset cap (AQ1). The default stays the
+    // ipKeyGenerator path, because getting THAT wrong is ADR-048.
+    keyGenerator: keyBy || ((req) => keyFor(name, req.ip)),
   });
 }
 
@@ -212,11 +237,71 @@ const paymentInitiateLimiter = () =>
     message: 'Too many donation attempts. Please try again shortly.',
   });
 
+/**
+ * THE PER-ADDRESS RESET-ATTEMPT CAP (AQ1, built in AV1).
+ *
+ * SEC-08 versus SEC-02, resolved. The per-ACCOUNT counter
+ * (`users.reset_code_attempts`) answered `429 Too many attempts` when
+ * exhausted - and that 429 was reachable ONLY for an address that has an
+ * account, so driving a known address to the cap confirmed the account exists.
+ * An oracle in two steps.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY THIS IS A LIMITER AND NOT A COLUMN
+ * -----------------------------------------------------------------------------
+ * A column can only exist for an address that has a row, which is the whole
+ * problem. This counts addresses, and an address with no account counts exactly
+ * like one with an account because NOTHING HAS BEEN LOOKED UP YET.
+ *
+ * **THE UNIFORMITY IS STRUCTURAL, NOT MAINTAINED BY HAND.** The cap response is
+ * produced by middleware that runs BEFORE the handler, so there is no code path
+ * in which the two cases could diverge - as opposed to two branches that a
+ * later edit has to keep byte-identical. AP1 was written because I got exactly
+ * that wrong once already, unifying three endpoints and leaving a fourth
+ * divergent.
+ *
+ * -----------------------------------------------------------------------------
+ * IT CAPS THE RESPONSE, NOT THE ACCOUNT (AQ1's second requirement)
+ * -----------------------------------------------------------------------------
+ * It is a WINDOW, not a budget that persists until something clears it:
+ *
+ *   - it expires on its own, so an attacker cannot hold a real user out
+ *   - it writes NOTHING to the user's row - no flag, no counter, no cleared code
+ *   - `/forgot-password/request` is NOT capped by it, so a user who has been
+ *     delayed can always obtain a fresh code and a fresh per-account budget
+ *
+ * A per-address counter that disabled anything would be a denial-of-service
+ * primitive handed to anyone who knows an address, which is the reason this
+ * requirement was written down before the feature was funded.
+ *
+ * ONE BUCKET ACROSS `/verify` AND `/reset`. They share a `name`, so they share
+ * a key - ADR-034's concern exactly: alternating between the two endpoints must
+ * not top the budget up.
+ *
+ * THE RATE THIS PERMITS: 5 guesses per 15 minutes against a six-digit code is
+ * about 480 a day against a space of 1,000,000, and the code itself expires in
+ * 15 minutes. The cap is not what makes guessing infeasible; it is what stops
+ * the ATTEMPT COUNT from being an oracle.
+ */
+const resetAttemptLimiter = () =>
+  createLimiter({
+    name: 'reset-attempt',
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: 'Too many attempts. Please request a new code.',
+    // Count the ADDRESS BEING ATTEMPTED, not the client. An attacker rotating
+    // IPs is the case this exists for; keying on the client would make it a
+    // second copy of the per-IP limiter.
+    keyBy: (req) => keyForAddress('reset-attempt', req.body && req.body.email),
+  });
+
 module.exports = {
   createLimiter,
   authLimiter,
   paymentInitiateLimiter,
+  resetAttemptLimiter,
   keyFor,
+  keyForAddress,
   /** 'redis' or 'memory'. Asserted by the tests. */
   storeKind: () => storeKind,
   /** For test teardown only. */

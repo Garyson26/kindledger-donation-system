@@ -197,7 +197,20 @@ async function deleteByNamePrefix(prefix, tx) {
   return res.count;
 }
 
+/**
+ * Total ACTIVE categories, for the admin dashboard tile (ADR-004).
+ *
+ * WAS `services/categoryBridge.countCategories`, which never consulted MongoDB
+ * at all - it delegated straight to this file. It lived in the bridge only
+ * because that is where `admin.js` already imported from, which is how a
+ * temporary module acquires permanent residents.
+ */
+async function countActive() {
+  return (await list()).length;
+}
+
 module.exports = {
+  countActive,
   create,
   findById,
   findByLegacyId,

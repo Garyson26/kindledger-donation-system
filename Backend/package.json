@@ -23,7 +23,6 @@
     "test:data-layer": "node --test test/data-layer.test.js",
     "test:trust-proxy": "node --test test/trust-proxy.test.js",
     "test:categories": "node --test test/categories-characterisation.test.js",
-    "test:bridge": "node --test test/category-bridge.test.js",
     "test:donations": "node --test test/donations-characterisation.test.js",
     "test:auth-char": "node --test test/auth-characterisation.test.js",
     "test:etl": "node --test test/etl.test.js",
@@ -32,14 +31,21 @@
     "test:destructive-jobs": "node --test test/destructive-jobs.test.js",
     "etl": "node etl/cli.js",
     "etl:preflight": "node etl/cli.js --preflight-only",
+    "etl:null-minted": "node etl/null-minted-cli.js",
+    "test:null-minted": "node --test test/null-minted.test.js",
     "test:payment": "node --test test/payment-callbacks.test.js",
     "test:payment-char": "node --test test/payment-characterisation.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
-    "test:charset": "node db/check-charset.js"
+    "test:charset": "node db/check-charset.js",
+    "test:bridge-exit": "node test/bridge-exit-check.js",
+    "test:preflight-findings": "node --test test/preflight-findings.test.js",
+    "test:signup-timing": "node test/signup-timing.test.js",
+    "test:password-timing": "node test/password-timing.test.js",
+    "test:no-secrets": "node --test test/no-committed-secrets.test.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=20.0.0",
     "npm": ">=10.0.0"
@@ -65,6 +71,9 @@
   "devDependencies": {
     "nodemon": "^3.1.10",
     "prisma": "^6.1.0"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
   },
   "//scripts": {
     "seed": "LEGACY MongoDB seeder. Still the production path until the Phase 4 cutover; do not repoint it at MySQL.",

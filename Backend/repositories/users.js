@@ -16,13 +16,18 @@
 'use strict';
 
 const bcrypt = require('bcryptjs');
+const { burnEquivalentBcrypt } = require('../config/passwordTiming');
 const crypto = require('node:crypto');
 const { client, newUuid, iso } = require('./_shared');
 // For createFromPendingSignup: the account and the pending row must move together.
 const { withTransaction } = require('../config/prisma');
 
 // SEC-18 asks for cost 12 rather than the 10 used throughout the legacy code.
-const BCRYPT_COST = 12;
+// BG1: ONE definition of the cost factor, in config/passwordTiming.js. It was
+// duplicated here and there, which would have let the dummy bcrypt that
+// equalises the missing-row branch drift away from the real one - and a
+// partial equalisation reopens the oracle without saying so.
+const { BCRYPT_COST } = require('../config/passwordTiming');
 
 const SELECT = {
   uuid: true,
@@ -72,12 +77,21 @@ async function create(input, tx) {
   const row = await client(tx).user.create({
     data: {
       uuid: input.uuid || newUuid(),
-      // ADR-051: MINTED when not supplied. A user created here with a null
-      // legacy_id would be addressed by uuid, and Donation.userId is a required
-      // Mongoose ObjectId ref until donations migrate - so that donation could
-      // not be attributed. The ETL supplies the real ObjectId and this branch
-      // is not taken for migrated rows.
-      legacyId: input.legacyId ?? mintObjectId(),
+      // NO LONGER MINTED (package 3.6). A user created here used to get a
+      // fabricated ObjectId because `Donation.userId` was a required Mongoose
+      // ObjectId ref, so a MySQL-only user could not be attributed a donation.
+      // Package 3.4 migrated the donation write path and that ref is gone.
+      //
+      // FOUND BY AY2's ENUMERATION, NOT BY THE TRIGGER. AE1-b fired in 3.4 and
+      // removed the minter from `routes/categories.js`. THIS FILE HAD THE SAME
+      // PROPERTY FOR THE SAME REASON AND WAS NOT TOUCHED - the fifth instance
+      // of a control existing a few functions from where it was missing, and
+      // the first one caught by enumerating siblings rather than by accident.
+      //
+      // A user created here now has `legacy_id` NULL and is addressed by uuid.
+      // `resolveAuthUser` already dispatches on the id SHAPE, so both forms
+      // circulate correctly (ADR-051).
+      legacyId: input.legacyId ?? null,
       name: input.name,
       // Lowercased on write. The unique index is case-insensitive
       // (utf8mb4_0900_as_ci) so this is defence in depth, not the only control.
@@ -119,11 +133,29 @@ async function findByEmail(email, tx) {
  * and must continue to.
  */
 async function verifyPassword(id, candidate, tx) {
+  // BG1: A NULL id IS A SUPPORTED CALL, and it is how the caller says "there is
+  // no account here". It exists so that `/login` cannot answer before spending
+  // the same bcrypt it would have spent on a real one - see below.
+  if (id == null) return burnEquivalentBcrypt(candidate);
+
   const row = await client(tx).user.findUnique({
     where: { uuid: id },
     select: { passwordHash: true },
   });
-  if (!row) return false;
+
+  // BG1: THE MISSING ROW COSTS THE SAME AS A PRESENT ONE.
+  //
+  // `return false` here is the natural implementation and it was a measured
+  // oracle: 236 ms of separation on /login, with distributions that do not
+  // overlap, so ONE request distinguished a registered address from an unknown
+  // one. The bodies were already identical - SEC-08 saw to that - and the cost
+  // of SEC-18's bcrypt is what carried the answer instead.
+  //
+  // CONSTANT TIME IS THE REPOSITORY'S JOB, NOT THE ROUTE'S. Put it in the route
+  // and every future route that looks a user up has to remember; put it here
+  // and forgetting is not available.
+  if (!row) return burnEquivalentBcrypt(candidate);
+
   return bcrypt.compare(String(candidate), row.passwordHash);
 }
 
@@ -231,6 +263,15 @@ async function setActive(id, isActive, tx) {
  * exists - look it up; no row means minted. Package 3.6 NULLs these BEFORE
  * deleting Mongo, in that order, or the distinction is lost permanently.
  */
+// RETAINED THOUGH NOTHING IN THIS FILE CALLS IT ANY MORE (package 3.6).
+//
+// `etl/migrate.js` does not need it - migrated rows carry their real ObjectId -
+// but the TEST SUITES do: several construct fixtures with ObjectId-shaped
+// external ids because that is still what the routes exchange for migrated
+// records (ADR-051). Deleting it would move that logic into four test files.
+//
+// It is exported and unused by production code. When ADR-051 retires the
+// ObjectId as an external identifier, this goes with it.
 let objectIdCounter = crypto.randomBytes(3).readUIntBE(0, 3);
 function mintObjectId() {
   const seconds = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0');
@@ -266,7 +307,10 @@ async function createFromPendingSignup(email, tx) {
     const row = await db.user.create({
       data: {
         uuid: newUuid(),
-        legacyId: mintObjectId(),
+        // NOT MINTED (package 3.6). The SECOND minting site in this file, and
+        // the reason AY2 asks for an enumeration rather than a search: the
+        // first one is where anybody would look.
+        legacyId: null,
         name: pending.name,
         email: pending.email,
         passwordHash: pending.passwordHash,
@@ -547,7 +591,60 @@ async function deleteInactiveOlderThan(cutoff, tx) {
   return res.count;
 }
 
+/**
+ * =============================================================================
+ * Resolve a user for an AUTHORISATION decision (package 3.6)
+ * =============================================================================
+ * WAS `services/userBridge.resolveAuthUser`, which tried MySQL and then fell
+ * back to MongoDB. **The fallback is gone with the bridge**, and the difference
+ * is a real behaviour change rather than a refactor:
+ *
+ *   BEFORE: a user who existed only in MongoDB could still hold a session. The
+ *           event was logged as [AUTH-DECISION-FROM-MONGO] because an
+ *           authorisation decision made from the store we were migrating away
+ *           from was the single most interesting event in the system (AJ1b).
+ *   NOW:    there is one store. An id that does not resolve in MySQL is not a
+ *           user, and the caller is refused.
+ *
+ * That is safe ONLY because the ETL has run - an un-migrated account now fails
+ * to authenticate rather than falling back, so the ETL is the thing standing
+ * between a real donor and a locked account. ADR-056's constraint, and the
+ * reason AE3 required evidence that no fallback was still firing before this
+ * could be deleted.
+ *
+ * THE NARROWER PROJECTION IS KEPT (AJ1). It returns less than a user record,
+ * not more: no email, nothing serialisable into a response. `isActive` and
+ * `tokenVersion` describe the account's security state and are no client's
+ * business - `tokenVersion` in particular tells an attacker holding a stale
+ * token exactly why it stopped working. NEVER PUT THIS IN A RESPONSE BODY.
+ */
+async function resolveForAuth(id, tx) {
+  const { idShape } = require('../utils/idShape');
+  const shape = idShape(id);
+  if (shape === 'invalid') return null;
+  const value = String(id).trim();
+
+  const row = shape === 'objectid' ? await findByLegacyId(value, tx) : await findById(value, tx);
+  if (!row) return null;
+
+  return {
+    // The EXTERNAL identifier - an ObjectId for a migrated record, the uuid for
+    // one created since (ADR-051, and 3.6 stopped minting).
+    id: row.legacyId || row.id,
+    // The uuid, for repository lookups.
+    uuid: row.id,
+    name: row.name || '',
+    role: row.role || 'user',
+    isActive: row.isActive !== false,
+    tokenVersion: typeof row.tokenVersion === 'number' ? row.tokenVersion : 0,
+    // Retained so a reader can see at a glance that there is only one store
+    // left. It was the field that distinguished a bridge answer from a real one.
+    _source: 'mysql',
+  };
+}
+
 module.exports = {
+  resolveForAuth,
   create,
   createFromPendingSignup,
   mintObjectId,

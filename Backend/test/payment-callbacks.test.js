@@ -172,12 +172,30 @@ const store = {
 // -----------------------------------------------------------------------------
 // PayU payload signing - the documented response formula (ADR-021)
 // -----------------------------------------------------------------------------
-function signResponse(d) {
+/**
+ * PARAMETERISED BY THE SALT (BH5), and the parameter is what keeps BH5's test
+ * honest.
+ *
+ * `signResponse` below passes the real SALT, so the seventeen SEC-01 tests
+ * prove this formula is the one the endpoint expects. BH5's test passes an
+ * EMPTY salt through the same function - so its forged hash is right by the
+ * same evidence, and a refusal can only mean the missing-secret guard fired.
+ *
+ * Without this, BH5's test signs with the real salt against an endpoint using a
+ * blank one, is refused for a HASH MISMATCH, and passes while proving nothing.
+ * That is the shape BH3 asks the suites to be audited for, and it appeared here
+ * while writing the test that looks for it.
+ */
+function signResponseWith(salt, d) {
   const s =
-    `${SALT}|${d.status}||||||${d.udf5 || ''}|${d.udf4 || ''}|${d.udf3 || ''}` +
+    `${salt}|${d.status}||||||${d.udf5 || ''}|${d.udf4 || ''}|${d.udf3 || ''}` +
     `|${d.udf2 || ''}|${d.udf1 || ''}|${d.email}|${d.firstname}|${d.productinfo}` +
     `|${d.amount}|${d.txnid}|${KEY}`;
   return crypto.createHash('sha512').update(s).digest('hex');
+}
+
+function signResponse(d) {
+  return signResponseWith(SALT, d);
 }
 
 function payload({ status, amount, txnid, donationId, extra = {} }) {
@@ -254,10 +272,16 @@ before(async () => {
   await assertMongoReachable();
 
   const app = require('../app.js');
-  for (let i = 0; i < 100 && mongoose.connection.readyState !== 1; i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.equal(mongoose.connection.readyState, 1, 'mongoose did not reach a connected state');
+  // CHANGED IN 3.6. This used to wait for `app.js` to open the Mongoose
+  // connection via connectDB(), then assert it had. `config/db.js` is deleted -
+  // the request path does not touch MongoDB at all - so a suite that still
+  // needs MongoDB for its own AK3 fixtures must connect for itself.
+  //
+  // The dependency was real and is now visible: the application no longer
+  // provides a MongoDB connection as a side effect of being imported, and
+  // anything relying on that was relying on the thing this package removes.
+  await mongoose.connect(process.env.MONGODB_URI);
+  assert.equal(mongoose.connection.readyState, 1, 'this suite connects to MongoDB itself');
 
   server = app.listen(0);
   await once(server, 'listening');
@@ -617,4 +641,120 @@ test('/cancel invents no error text and stores the PayU status verbatim', async 
   const d = await store.readDonation(id);
   assert.equal(d.errorMessage, null, 'error text must not be invented');
   assert.equal(d.gatewayStatus, 'failure', 'PayU status must be stored verbatim');
+});
+
+// =============================================================================
+// BH5 - a MISSING salt must not read as a PASSING check
+// =============================================================================
+// VERIFIED BY OUTCOME, NOT BY THE PRESENCE OF THE GUARD (BH2). The question is
+// not "is assertSigningConfigured called" - PAY-02 and BG1 were both fixes that
+// were present and did not execute. The question is whether a forged callback
+// is refused when the salt is blank, which is the thing that would hurt.
+//
+// This is the configuration a plain `docker compose up` produces TODAY:
+// docker-compose.yml declares PAYU_MERCHANT_SALT with no default and it is
+// absent from .env, so the stack reports healthy while the response hash is
+// computed over a string an attacker can build for themselves.
+
+test('BH5: with a BLANK salt a forged callback is REFUSED, not accepted', async () => {
+  // NOT HAND-ROLLED. The forged hash is built by `signResponse`, the SAME
+  // helper the seventeen passing tests above use - with the salt set to empty
+  // first. So the hash really is the one this endpoint would expect in that
+  // configuration, and the test cannot pass because I mis-assembled a string.
+  //
+  // That distinction matters here more than usual: a refusal caused by a WRONG
+  // hash and a refusal caused by the MISSING SECRET look identical from the
+  // outside, and only one of them is the property under test.
+  const { id, txnid } = await freshDonation();
+
+  const realSalt = process.env.PAYU_MERCHANT_SALT;
+  let res;
+  try {
+    process.env.PAYU_MERCHANT_SALT = '';
+    const forged = payload({ status: 'success', amount: '1500.00', txnid, donationId: id });
+    // Re-signed with the EMPTY salt, through the same function the passing
+    // tests use. This is the hash the endpoint expects when unconfigured.
+    forged.hash = signResponseWith('', forged);
+    res = await postForm('success', forged);
+  } finally {
+    process.env.PAYU_MERCHANT_SALT = realSalt;
+  }
+
+  // THE OUTCOME, WHICH IS THE ONLY THING THAT MATTERS (BH2).
+  const d = await store.readDonation(id);
+  assert.equal(
+    d.paymentStatus,
+    'Pending',
+    'A FORGED CALLBACK WAS ACCEPTED. With a blank salt the expected hash is ' +
+      'computable by anyone - this test just computed it knowing no secret - so ' +
+      'without the guard this marks a donation PAID without payment (SEC-01).'
+  );
+  assert.ok(
+    !/payment-success/.test(String(res.location || '')),
+    'and the donor is not sent to the success page either'
+  );
+});
+
+test('BH5: the refusal names the variable and says what happens without it', () => {
+  const realSalt = process.env.PAYU_MERCHANT_SALT;
+  try {
+    process.env.PAYU_MERCHANT_SALT = '';
+    assert.throws(
+      () => require('../config/payu').assertSigningConfigured(),
+      (err) => {
+        assert.equal(err.code, 'ERR_PAYU_UNCONFIGURED');
+        assert.match(err.message, /PAYU_MERCHANT_SALT/, 'names the variable');
+        assert.match(err.message, /forged/, 'and says what happens without it');
+        return true;
+      }
+    );
+  } finally {
+    process.env.PAYU_MERCHANT_SALT = realSalt;
+  }
+});
+
+test('BH5: a PLACEHOLDER salt is refused too - blank is not the only failure', () => {
+  // `test`, `salt`, `changeme`. What somebody types to get past an emptiness
+  // check, which is why emptiness is not the check.
+  const realSalt = process.env.PAYU_MERCHANT_SALT;
+  try {
+    for (const placeholder of ['test', 'salt', 'changeme']) {
+      process.env.PAYU_MERCHANT_SALT = placeholder;
+      assert.throws(
+        () => require('../config/payu').assertSigningConfigured(),
+        /REFUSING/,
+        `"${placeholder}" must not be accepted as a signing secret`
+      );
+    }
+  } finally {
+    process.env.PAYU_MERCHANT_SALT = realSalt;
+  }
+});
+
+test('BH5: the merchant KEY is an identifier, not a secret, and is not length-checked', () => {
+  // PayU's own test key is `gtKFFx` - six characters, printed in their docs and
+  // sent in the payment form. My first version of this guard required 16+ for
+  // BOTH values and rejected `TESTMERCHANTKEY` at fifteen, failing sixteen
+  // tests on first contact.
+  //
+  // The lesson is BB1's, which I had written three steps earlier: a threshold
+  // is a number you choose and then have to relax. It belongs on the SECRET and
+  // nowhere else.
+  const realKey = process.env.PAYU_MERCHANT_KEY;
+  try {
+    process.env.PAYU_MERCHANT_KEY = 'gtKFFx';
+    assert.doesNotThrow(
+      () => require('../config/payu').assertSigningConfigured(),
+      'a short merchant key is legitimate - it is public, not secret'
+    );
+
+    process.env.PAYU_MERCHANT_KEY = '';
+    assert.throws(
+      () => require('../config/payu').assertSigningConfigured(),
+      /PAYU_MERCHANT_KEY/,
+      'but an ABSENT one is still a misconfiguration'
+    );
+  } finally {
+    process.env.PAYU_MERCHANT_KEY = realKey;
+  }
 });
