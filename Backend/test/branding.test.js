@@ -26,6 +26,19 @@ process.env.ADMIN_CREATION_KEY = process.env.ADMIN_CREATION_KEY || 'test-admin-k
 process.env.PAYU_MERCHANT_KEY = 'TESTMERCHANTKEY';
 process.env.PAYU_MERCHANT_SALT = 'TESTMERCHANTSALT0000000000000000';
 
+// The HTTP upload tests write through services/logoStorage.js, which fixes its
+// root at LOAD from UPLOADS_DIR, defaulting to /var/lib/kindledger/uploads.
+// The Dockerfile creates and owns that directory inside the api container;
+// anywhere else it is missing or not writable and every upload is a 500 (found
+// on the first CI run, CM1). So, like logo-upload.test.js, this suite uses a
+// scratch directory unless one is supplied, and removes only the one it made.
+if (!process.env.UPLOADS_DIR) {
+  const fsSync = require('node:fs');
+  const scratch = fsSync.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'kl-branding-'));
+  process.env.UPLOADS_DIR = scratch;
+  process.on('exit', () => fsSync.rmSync(scratch, { recursive: true, force: true }));
+}
+
 const sharp = require('sharp');
 const users = require('../repositories/users');
 const branding = require('../repositories/branding');
