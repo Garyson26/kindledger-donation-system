@@ -2853,7 +2853,9 @@ ADR-028 is on `docs/incident-j1-j6` and arrives in `main` before this one.
 ### What changed
 
 Gary is deleting both Vercel projects and creating new ones after Phase 4c
-(CB3 step 5). Until then, **nothing deploys on merge**, which removes three
+(CB3 step 5). *[Corrected by CE5: the new backend goes live at the END of 4b,
+inside the freeze. 4c is cleanup afterwards. And by CD1: the old projects are
+kept. See the amendment below.]* Until then, **nothing deploys on merge**, which removes three
 blockers at once:
 
 - the `Resource provisioning failed` errors on PR #5 (both projects, under a

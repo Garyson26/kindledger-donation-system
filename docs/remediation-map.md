@@ -5547,7 +5547,7 @@ and **keeping** the old ones, rather than deleting them. Applied in
 | CD2a | **Two live backends.** Donations split between MongoDB and MySQL, and anything the old one takes after the ETL never reaches MySQL | **High** | §3.4 pause inside the freeze. §6a.1 re-confirm before reopening. §6 rollback order never passes through "both serving" |
 | CD2b | **The old projects serve `58bdadf` until they are turned off** | **High** (SEC-03) | §3.4 (backend), §6a.4 (frontend). Confirmed by request, before and after |
 | CD2c | **Credentials crossing over.** MySQL credential on the old backend, MongoDB credential on the new | **High** | §1.6, by name, both projects, including the Atlas integration. Repeated at §6a.2 |
-| CD2d | **The old projects are still Git-connected.** Production deploys on every push to `main`. Only `Resource provisioning failed` is stopping them | **High once provisioning works.** The frontend fix's CSP change would break the old frontend, and MySQL-era backend code would break the old backend | §1.7: disconnect Git from both old projects **before the frontend fix merges**, or record that Gary accepts the risk. **Not in the CD brief; found while checking the projects** |
+| CD2d | **The old projects are still Git-connected.** Production deploys on every push to `main`. Only `Resource provisioning failed` is stopping them | **High once provisioning works.** Post-F's CSP change would break the old frontend, and MySQL-era backend code would break the old backend | **Accepted (CE4).** §1.7: disconnect Git from both old projects **after PR 1 merges, before PR 2**. **Not in the CD brief; found while checking the projects** |
 | CD2e | **A copied host variable reproduces CD2a through configuration.** A copied `NOTIFY_URL`/`SUCCESS_URL` sends PayU's confirmations to the old backend. A copied `VITE_API_URL` sends everything | **High**, silent | Env doc §6: **REWRITE** action (8 names). Runbook §6a.3 |
 
 **A correction to CD2a's wording.** "Two backends pointed at the same Atlas
@@ -5564,6 +5564,71 @@ actions became five. **REWRITE** is CD2e. **DO NOT SET** covers the
 
 **Checked, not assumed:** the old projects' variable NAMES were re-read for
 this (21 on the backend, 2 on the frontend). Values were not decrypted.
+
+## ENV-03 (HIGH) - A CORRECT VALUE IN THE WRONG PLACE
+
+**Recorded as a finding in its own right (CE4).** It started as CD2e.
+
+Copy `NOTIFY_URL` from the old backend to the new one and nothing is wrong with
+the value. It is a well-formed URL, it answers, and the endpoint behind it
+verifies PayU's hash correctly. **It is the old backend's endpoint.** PayU's
+server-to-server confirmation goes there. While the old backend is up, it
+accepts the confirmation and records the donation as Paid **in MongoDB**. MySQL
+keeps it Pending. Neither side errors. Nothing in either log looks wrong.
+`SUCCESS_URL`, `FAILURE_URL` and `CANCEL_URL` do the same through the donor's
+browser. `VITE_API_URL` does it for every request the new frontend makes.
+
+**Beside ENV-02, because the pair is the class.** ENV-02 was a valid value from
+the wrong environment (sandbox). ENV-03 is a valid value from the wrong
+deployment. In both, the code has no way to tell. Every check it could run
+passes.
+
+| | |
+|---|---|
+| Names affected | 8: `ALLOWED_ORIGINS`, `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL`, `FRONTEND_SUCCESS_URL`, `FRONTEND_FAILURE_URL`, `VITE_API_URL` |
+| Fails | **SILENT** while the old backend serves. Loud once it is paused, except that a donation confirmed during the gap is already in the wrong store |
+| Why the copy is likely | The env list said "copy from the old project" for its neighbours. A person setting 21 variables by hand copies in runs |
+| Control | Env doc §6 gives these a separate action, **REWRITE**, so no row says COPY. Runbook §6a.3 checks them by host before donations reopen. Pausing the old backend at §3.4 turns the failure loud |
+| Not a control | The application. It cannot know which deployment it is |
+
+## CE5 - THE DEPLOY SEQUENCE, SETTLED
+
+Env doc §8 said production serves `58bdadf` "through 4b and 4c". ADR-062 said
+the new projects come "after Phase 4c". The runbook assumed donations land in
+MySQL at the end of 4b. **The runbook was right.** The new backend goes live at
+the **end of 4b, inside the freeze**, before donations reopen. 4c is cleanup
+afterwards.
+
+Fixed: env doc §8 (rewritten around the sequence), ADR-062 (annotated in
+place), and the runbook. The runbook verified through the application (§5.5)
+but never deployed it, so a §4a now deploys it. AL3 grep for other statements
+of the sequence (`4b and 4c`, `after Phase 4c`, `step 5`, `nothing deploys`,
+`first deploy`, `4c`): the remediation map's 4c/4d table and the runbook's §8
+already say 4c is cleanup after 4b. Nothing else stated the order. The same
+pass caught runbook §7a. It still said "the stack refuses to start" without
+`PAYU_BASE_URL`, which is the compose-only claim CB2 corrected. Fixed.
+
+## BRAND-01 (LOW) - THE BRANDING PUT CAN WRITE THE STORAGE FIELDS
+
+Found by an automated review while preparing PR F. **Confirmed by reading the
+code. Not yet fixed.**
+
+`PUT /api/admin/branding` copies every field in `branding.WRITABLE`
+(`repositories/branding.js`), and that list includes `logoPath`, `logoMime`
+and `faviconPath`. Those were meant to be set only by the logo upload.
+
+| | |
+|---|---|
+| `logoMime` | Sent verbatim as `Content-Type` by the public `GET /api/branding/logo`. An admin can set `text/html`. `nosniff` is set and the file body is a re-encoded image, so getting script out of it is hard. It is still the wrong place to trust input |
+| `logoPath` | `resolveWithin()` confines it to the uploads directory, at serve and at delete. So the reach is "any file in uploads". The next upload then **deletes** the file it names as the previous logo |
+| Who | Admins only. A compromised admin account is the case |
+| Why LOW | Contained to the uploads directory, admin-only, and logo upload does not work on Vercel at all (CB2-6) |
+
+**Fix, proposed and not yet made:** a route-level allowlist for the PUT that
+excludes the three storage fields. Map `logoMime` against the upload's accepted
+types when serving. Require `logoPath` to match the shape the upload generates
+before resolving it. It needs the branding suite, which needs the compose
+stack. **Unpinned: Gary's call whether it rides in post-F or a follow-up.**
 
 
 ## Counts

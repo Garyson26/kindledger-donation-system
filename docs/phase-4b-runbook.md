@@ -161,18 +161,20 @@ PR #5 (`17b30a1`). **That deploy failed with `Resource provisioning failed`,
 and that failure is the only thing that has stopped every later merge from
 reaching the old projects.** If provisioning starts working:
 
-- a merge of the frontend fix (new backend host in the CSP) deploys to the
-  **old** frontend, whose CSP then blocks its own backend. Production breaks
-  loudly;
-- a merge of any MySQL-era backend code deploys to the **old** backend, which
-  has no `DATABASE_URL` (§1.6), so it refuses every request. Production breaks
-  loudly.
+- a merge of any MySQL-era backend code (PR B onwards) deploys to the **old**
+  backend, which has no `DATABASE_URL` (§1.6), so it refuses every request.
+  Production breaks loudly;
+- a merge of post-F (new backend host in the CSP) deploys to the **old**
+  frontend, whose CSP then blocks its own backend. Production breaks loudly.
 
-**Action, before the frontend fix merges:** disconnect the Git repository from
-both old projects, or confirm in writing that Gary accepts relying on the
-provisioning failure. Disconnecting costs one option from SEC-03's list
-(deploying the hotfix to the old project through Git). A manual CLI deploy is
-still possible afterwards.
+**Action (accepted, CE4): disconnect the Git repository from both old
+projects after PR 1 (the hotfix) merges and before PR 2 (the frontend install
+fix) merges.** Disconnecting after PR 1 keeps one chance open. The hotfix's own
+merge tries a production deploy to the old backend. If provisioning works,
+that closes SEC-03 early. **Confirm `READY` on that deployment, not the merge.**
+Before PR 2 is the latest safe point, because nothing after it can usefully
+reach the old projects. **Record that it was done, and when.** A manual CLI
+deploy is still possible after disconnecting.
 
 ---
 
@@ -318,6 +320,29 @@ nothing.**
 
 ---
 
+## 4a. Deploy the new backend, still inside the freeze (CE5)
+
+**This is where the new backend goes live: at the end of 4b, inside the
+freeze, before donations reopen.** The new projects were created and
+configured before the freeze (deployment-environment §6 and §8). 4c is cleanup
+afterwards and changes nothing here.
+
+1. **The old backend is paused** (§3.4). Do not deploy the new one until §3.4's
+   second request has been recorded. Otherwise CD2a happens at this step.
+2. Deploy the new backend against production MySQL. **Confirm `READY` on the
+   deployment itself, and check for `BLOCKED`** (ADR-062). A merge or a
+   triggered deploy is not a deployed backend.
+3. Deploy the new frontend, **but keep it away from donors until §6a.** Keep
+   Vercel's deployment protection on it, or leave the public domain unassigned.
+   Donations are closed by the freeze. The new frontend does not know that.
+4. **Read the boot log for `[rateLimiters]`.** It must say redis
+   (deployment-environment §1.3).
+
+§5 verifies through this deployment (§5.5). Nothing in §5 runs earlier because
+of it. §5.1 still runs first.
+
+---
+
 ## 5. Verification — inside the freeze, all of it
 
 > Everything here must pass **before donations reopen**, because after that the
@@ -393,8 +418,8 @@ outcome, not a failure, and it is available only while §7 has not happened.
 
 **Rolling back, in this order (CD2a):**
 
-1. **Pause the new backend first**, if it has been deployed, and confirm by
-   request as in §3.4.
+1. **Pause the new backend first** (deployed at §4a), and confirm by request
+   as in §3.4.
 2. **Then** un-pause the old backend, and confirm by request that it answers
    as it did in §3.4 step 1.
 3. Reopen donations on the old frontend.
@@ -417,9 +442,10 @@ was observed.**
 2. **Credential separation, again.** Repeat §1.6 steps 1 and 2 on both backend
    projects, by name. Any MongoDB name on the new backend, or MySQL name on the
    old, is a stop.
-3. **The new frontend and new backend are live**, with `VITE_API_URL` and the
-   seven REWRITE variables naming the **new** hosts (deployment-environment
-   §6). Check `NOTIFY_URL` and `SUCCESS_URL` on the new backend by name and
+3. **The new frontend and new backend, deployed at §4a, name each other.**
+   `VITE_API_URL` and the seven REWRITE variables must name the **new** hosts
+   (deployment-environment §6). Then open the new frontend to donors: remove the
+   protection or assign the public domain. Check `NOTIFY_URL` and `SUCCESS_URL` on the new backend by name and
    host. A copied old value sends PayU's confirmations to the paused backend,
    and the donation stays Pending in MySQL.
 4. **Pause the old frontend project, and confirm it.** As in §3.4: record the
@@ -457,9 +483,11 @@ verify.**
 
 **Before announcing that the cutover is complete.**
 
-`PAYU_BASE_URL` must name production (`https://secure.payu.in`). The stack
-refuses to start without the variable, but **it cannot tell the sandbox from
-production** - both are valid hosts, both answer, both sign correctly (ENV-02).
+`PAYU_BASE_URL` must name production (`https://secure.payu.in`). On Vercel a
+missing value fails at the first donation (there is no compose `:?` guard
+there, deployment-environment §1.1). Either way, **nothing can tell the sandbox
+from production**: both are valid hosts, both answer, both sign correctly
+(ENV-02).
 
 So the first real donation after the cutover is reconciled against the **bank**,
 not the dashboard. A sandbox configuration produces a donation that appears in

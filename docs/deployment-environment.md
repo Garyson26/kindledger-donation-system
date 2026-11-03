@@ -294,7 +294,8 @@ stay unset.
 | **NEW** | Not on the old project. Added since it was created |
 | **DO NOT SET** | Leave it off the project. §4 and §5 say why |
 
-> **REWRITE is not in the CD3 brief, and it is there on purpose.** Eight names
+> **REWRITE exists because of ENV-03** (remediation map): a correct value in the
+> wrong place, failing silently. Eight names
 > are on the old projects but cannot be copied. A copied `SUCCESS_URL` or
 > `NOTIFY_URL` sends PayU's confirmations to the **old** backend. While that
 > backend is up, it accepts them and records a paid donation **in MongoDB**, so
@@ -386,29 +387,41 @@ What it adds. The 4b runbook carries each of these as a step, not a note:
 | **CD2a** | **Two live backends.** If the old one is still serving when the new one goes live, donations split between MongoDB and MySQL. Anything the old one takes after the ETL is missing from MySQL | §3.4 pauses the old backend inside the freeze. §6a confirms it is still paused before donations reopen |
 | **CD2b** | **The old projects keep serving vulnerable code** (`58bdadf`, SEC-03) until somebody turns them off. Keeping them makes "off" a deliberate act | §3.4 (backend) and §6a.4 (frontend): pause, then **confirm by request**, not by the dashboard alone |
 | **CD2c** | **Credentials crossing over.** The old backend must never hold the MySQL credential, and the new one must never hold MongoDB's | §1.6, checked by name on both projects, and checked again at §6a.2 |
-| **CD2d** | **The old projects are still Git-connected.** A merge to `main` starts a production deploy on them. Today that fails with `Resource provisioning failed`, **and that failure is the only thing stopping it** | §1.7. See also ADR-062's CD1 amendment |
+| **CD2d** | **The old projects are still Git-connected.** A merge to `main` starts a production deploy on them. Today that fails with `Resource provisioning failed`, **and that failure is the only thing stopping it** | §1.7: disconnect both after PR 1 merges, before PR 2. See also ADR-062's CD1 amendment |
 
 ---
 
-## 8. What CB3's order means for SEC-03
+## 8. The sequence, and what it means for SEC-03
 
-The hotfix merges first, but **nothing deploys until step 5.** On the old
-project, production serves `58bdadf`, **which has the unauthenticated
-authentication bypass**, and it keeps serving it through 4b and 4c. **Merging the
-hotfix does not change production.** CA's rule applies: a merged PR is not a
-deployed fix.
+**The sequence (CE5, settled):**
 
-So the window is open from now until the old backend stops serving. **Since CD1
-that has a fixed latest point: the 4b runbook pauses it at §3.4.** Standing up
-the new backend does not close the window by itself, because the old one keeps
-serving until it is paused. The options that close it sooner are Gary's to
-weigh. **I am not recommending one, because each costs something:**
+1. The new projects are created and configured (§6) **before 4b starts.** They
+   have no production traffic and are not given the public domains yet.
+2. **The new backend goes live at the end of 4b, inside the freeze**, before
+   donations reopen. The runbook deploys it after the ETL load (§4a), verifies
+   through it (§5.5), and opens it to donors at §6a.
+3. **4c is cleanup afterwards**: `etl/`, `models/`, `mongoose`, the legacy
+   compose override. It changes nothing a donor touches.
+
+The hotfix merges first, but **merging changes nothing in production.** On the
+old project, production serves `58bdadf`, **which has the unauthenticated
+authentication bypass**, and keeps serving it **until the 4b freeze** pauses
+it (runbook §3.4). CA's rule applies: a merged PR is not a deployed fix.
+
+So the window is open from now until §3.4. Standing up the new backend does not
+close it by itself, because the old one keeps serving until it is paused.
+**The repository is public, and has been since it was created.** The hotfix
+branch and this map describe the bypass to anyone who reads them. That does not
+change the options below. It does change what accepting the window means.
+
+The options that close it sooner are Gary's to weigh. **I am not recommending
+one, because each costs something:**
 
 | Option | Closes the window | Cost |
 |---|---|---|
-| Pause the old **backend** project now | Yes, immediately | The site's API is down until step 5 |
+| Pause the old **backend** project now | Yes, immediately | The site's API is down until the end of 4b |
 | Deploy the hotfix to the old project once, manually | Only if provisioning works. The last two attempts failed with "Resource provisioning failed" | May not work. ADR-028's authorship block may apply |
-| Accept the window | No | The bypass stays live through 4b and 4c |
+| Accept the window | No | The bypass stays live until the 4b freeze |
 
 The first deploy of the new project gets the same rule: **confirm `READY` and
 check the behaviour, not just the merge.**
