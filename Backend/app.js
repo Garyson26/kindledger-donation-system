@@ -16,6 +16,12 @@ const adminRoutes = require("./routes/admin");
 const userRoutes = require("./routes/users");
 const paymentRoutes = require("./routes/payment");
 
+// Phase 2 data layer and runtime (SPEC-2). Additive: config/db.js and the
+// Mongoose models are untouched and still serve every existing consumer.
+const healthRoutes = require("./routes/health");
+const { registerShutdownHandlers } = require("./config/prisma");
+const { initializeScheduler } = require("./services/scheduler");
+
 const app = express();
 
 // SEC-04: trust exactly one proxy hop. Without this, `req.ip` behind Vercel
@@ -77,6 +83,11 @@ const restrictiveCors = cors({
 const openCors = cors();
 
 // Routes
+// Health first. No CORS wrapper: the compose healthcheck and any external
+// monitor are not browsers and send no Origin, and restrictiveCors would
+// otherwise be one more thing between the platform and a liveness answer.
+app.use("/api/health", healthRoutes);
+
 app.use("/api/auth", restrictiveCors, authRoutes);
 app.use("/api/categories", restrictiveCors, categoryRoutes);
 app.use("/api/donations", restrictiveCors, donationRoutes);
@@ -87,8 +98,18 @@ app.use("/api/payment", openCors, paymentRoutes);
 // Connect Database
 connectDB();
 
-// Do NOT initialize node-cron scheduler on Vercel (BE-MED-02) — use Vercel Cron Jobs instead
-// initializeCleanupScheduler() is intentionally omitted for serverless environments
+// The legacy node-cron scheduler in services/dataCleanupService.js is still
+// deliberately NOT initialised: it targets MongoDB and Vercel recycles
+// instances (BE-MED-02).
+//
+// The Phase 2 scheduler targets MySQL, is guarded by SCHEDULER_ENABLED, and
+// is inert until Phase 4 loads data (SPEC-2 section 7.2).
+initializeScheduler();
+
+// Close the Prisma pool on SIGTERM/SIGINT. Registered here rather than on
+// import so that requiring config/prisma.js from a test does not install
+// signal handlers.
+registerShutdownHandlers();
 
 // Generic error handler — never expose raw error messages to clients (BE-MED-08)
 app.use((err, req, res, next) => {

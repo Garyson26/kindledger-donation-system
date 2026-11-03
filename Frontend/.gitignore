@@ -24,3 +24,7 @@ dist-ssr
 *.sw?
 
 .env
+
+# package-lock.json is COMMITTED (SEC-12). Builds must be reproducible,
+# and npm audit cannot run without it - the alerts were the only signal
+# this project had.

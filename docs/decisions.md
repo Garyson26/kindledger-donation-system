@@ -185,6 +185,30 @@ the full schema applied, but no API container runs. Phase 3 must remove the
 TCP connect probe against port 5000 — with a real `/api/health` request once
 that endpoint exists.
 
+**Amended by SPEC-2 section 0.2 (Phase 2). The gating is removed.** Both
+`profiles: ["app"]` keys are gone from `docker-compose.yml` and the api
+healthcheck is now a real request:
+`curl --fail --silent http://127.0.0.1:5000/api/health`.
+
+The three reasons the gate existed have each been answered, and it is worth
+being precise about which, because two of them were answered and one was
+side-stepped:
+
+| Reason for the gate | What changed |
+|---|---|
+| `config/db.js` exits on an unreachable database | **Answered.** `config/prisma.js` reports failure through a return value instead (ADR-039). `config/db.js` is untouched and still exits — see the consequence below. |
+| `/api/health` does not exist | **Answered.** `Backend/routes/health.js` (ADR-038). |
+| Section 1 forbids touching routes or middleware | **Side-stepped, deliberately and narrowly.** SPEC-2 keeps the fence and names one exception: a new route file that imports no Mongoose. Nothing under `Backend/middleware/` was touched at all. |
+
+**Consequence, and it is the one to carry into Phase 3.** `MONGODB_URI` is still
+passed to the api container, because the additive model leaves Mongoose serving
+every existing route. So the container starts on its own merits *only while that
+variable is present and valid*: `config/db.js:process.exit(1)` is still there,
+still reachable, and still the reason a bad Mongo credential produces an exited
+container rather than an unhealthy one. Acceptance criterion 1 is now met for
+real, but by supplying Mongo rather than by no longer needing it. Phase 3 closes
+this properly when it deletes `config/db.js`.
+
 ---
 
 ## ADR-007 — Where the Phase 1a artefacts live
@@ -1549,3 +1573,668 @@ never fixing it.
 revalidating the build once is cheaper than twice. Bring it forward if
 `vite dev` starts being run on a machine with domain credentials that matter,
 or if the dev server is ever bound to a non-loopback interface.
+
+---
+
+# Phase 2 (SPEC-2) — additive MySQL data layer
+
+Everything below was decided while executing SPEC-2. ADR-028 to ADR-037 are on
+the `docs/incident-j1-j6` branch and are not yet merged, so this file currently
+reads 027 then 038. **That gap is a merge-order dependency, not a numbering
+error** — see ADR-046.
+
+---
+
+## ADR-038 — `routes/health.js` is the named exception to the routes fence, and it uses a shared secret rather than `adminAuth`
+
+**Status** Accepted
+
+SPEC-2 section 1 forbids modifying files under `Backend/routes/`. Section 2
+names one exception: a new file, `Backend/routes/health.js`. It is added.
+
+**Why the exception is not a hole in the fence.** The fence exists to stop
+Phase 2 editing the six route files that consume Mongoose, because an additive
+phase that quietly rewires a live route stops being additive. A *new* file that
+imports only the new data layer creates none of that coupling. The property the
+fence protects is "no existing route changed behaviour", and this file cannot
+change any existing route's behaviour because nothing routes to it yet except
+the compose healthcheck.
+
+**Why a shared secret and not `adminAuth`.** SPEC-2 section 5 permits either.
+`adminAuth` does `User.findById(...)` on a Mongoose model. Importing it into
+`routes/health.js` would pull the old data layer into the one file whose purpose
+is to demonstrate the new one works — and would mean a Mongo outage made the
+MySQL health check unauthenticatable. The secret is compared with
+`crypto.timingSafeEqual` and refused outright if it is shorter than 16
+characters, so an unset or placeholder `HEALTH_DIAGNOSTIC_SECRET` fails closed
+to the unauthenticated form rather than opening the diagnostics.
+
+**The unauthenticated response carries a status string and nothing else.** Not
+the error, not the latency, not whether Redis is configured, not the pool size.
+An open endpoint that reports connection state tells an attacker exactly when
+the database is down, which is when everything else is most likely to fail open.
+`200`/`503` is all a load balancer needs.
+
+**Consequences** Phase 3 may replace the secret with `adminAuth` once
+`adminAuth` no longer touches Mongoose. Until then, whoever operates the stack
+has one more secret to manage. The diagnostic form also reports `req.ip` and the
+`X-Forwarded-For` it received, which is what makes the trust-proxy test in
+ADR-043 observable end to end; that pair is behind the secret because together
+they disclose the deployment's proxy-hop count.
+
+---
+
+## ADR-039 — Infrastructure failure is reported through a return value; the data layer never calls `process.exit`
+
+**Status** Accepted
+
+`Backend/config/prisma.js` has no `process.exit` anywhere in it, and says so in
+a comment so the omission does not read as an oversight. `checkDatabase()`
+returns `{ok, error, latencyMs}`. An unreachable database produces a `503` from
+`/api/health` and an unhealthy container.
+
+**Why.** `Backend/config/db.js` calls `process.exit(1)` when Mongo is
+unreachable. On Vercel that is the direct cause of the
+`FUNCTION_INVOCATION_FAILED` shape production has been in: the process dies
+before it can answer, so every route returns a platform error with no
+application log line, and the failure is indistinguishable from a code fault. In
+a container it is worse, because `restart: unless-stopped` turns it into a
+crash loop that buries the original error in restart noise.
+
+A process that stays up and reports "the database is unreachable" is
+diagnosable. A process that exited is a guess.
+
+**This is a deliberate asymmetry, not consistency for its own sake.** The two
+files now behave differently on the same class of failure, and that is the
+intended state for the duration of the additive phase. `config/db.js` was not
+touched: SPEC-2 section 1 fences it, and changing Mongo's startup behaviour
+mid-migration would alter live production semantics for no Phase 2 benefit.
+
+**Consequences** Anything added to this layer later inherits the rule. The tests
+enforce it rather than trusting it: `data-layer.test.js` runs `checkDatabase()`
+against a dead port **in a child process** and asserts the child exits `0`
+having printed a verdict. If someone reintroduces the exit, that test fails
+rather than the runner dying silently. The same reasoning drives the Redis
+`'error'` handler in ADR-042 — an unhandled `'error'` event is `process.exit`
+by another name.
+
+---
+
+## ADR-040 — Money and identifiers cross the repository boundary as plain JavaScript values, and the conversion refuses rather than rounds
+
+**Status** Accepted
+
+Every value a repository returns is a plain JS value. `BIGINT` columns come back
+as `Number` via `fromBigInt()`; the external identifier is the `CHAR(36)` uuid,
+exposed as `id`. The internal `BIGINT` primary key is never returned, and
+`toMinorUnits()` is the only place a decimal string becomes minor units.
+
+**Why not just return what Prisma returns.** Prisma maps `BIGINT` to `BigInt`,
+which `JSON.stringify` throws on. Every route would need its own conversion, and
+the first one that forgot would produce a `500` on a page that renders an amount
+— discovered in production, on the receipt.
+
+**Why `fromBigInt` throws instead of clamping.** Beyond
+`Number.MAX_SAFE_INTEGER` a silent conversion loses the low digits of an amount.
+A `RangeError` on a value that large is the correct outcome: it cannot be a real
+donation, so it is either corruption or an attack, and both deserve a stack
+trace rather than a plausible-looking number.
+
+**Why `toMinorUnits` returns `null` for malformed input rather than `0`.** It
+parses digit-wise from the string rather than multiplying a float, because
+`1500.07 * 100` is `150006.99999999999`. Inputs it will not accept — more than
+two decimal places, exponent notation, negatives, empty — return `null`. A
+caller that treats `null` as `0` accepts a payment of nothing, which is at least
+loud; returning `0` directly would make that silent. Phase 3 route code must
+check.
+
+**Why the internal key stays hidden.** Exposing a sequential `BIGINT` in an API
+is an enumeration primitive: donation `#4102` implies `#4101` exists. The uuid
+carries no such information, and `legacy_id` keeps the old ObjectIds resolvable
+for receipts issued before the migration.
+
+**Consequences** This is the seam. Phase 3 imports `Backend/repositories/` and
+not `@prisma/client`, so a later ORM change stays behind this boundary. Calling
+`getPrisma()` from a route defeats the point; it is exported for the health check
+and the scheduler only, and labelled as such.
+
+---
+
+## ADR-041 — `distinct()` keeps DATA semantics, not enum semantics
+
+**Status** Accepted
+
+`donations.listPaymentStatusesInUse()` and `listStatusesInUse()` issue a
+`distinct` query against the table. They do **not** return the ENUM's member
+list.
+
+**Why this needs writing down.** Returning the enum members is the obvious
+implementation once the column is an ENUM: it is a compile-time constant, needs
+no query, and produces a superset of the right answer. It is wrong. Mongoose's
+`Donation.distinct('paymentStatus')` answered "which statuses exist in your
+data". The enum answers "which statuses are theoretically possible". The values
+feeding the admin filter dropdown would change from the first to the second, and
+the filter would stop being able to show that, for instance, nothing has been
+Cancelled all year — every option would always be present, and every option
+would be selectable into an empty result.
+
+That is a visible behaviour change in the admin UI, produced by a data-layer
+refactor, with no line of route code altered. Exactly the class of regression an
+additive phase is supposed to make impossible.
+
+**Consequences** Two queries where a constant would do, on an indexed column.
+Accepted. The test asserts the data semantics by construction: the fixtures
+create only `Pending` and `Paid` rows, so a result containing all four members
+would mean the enum was being read.
+
+---
+
+## ADR-042 — The Redis rate-limit store is built but not wired, so SEC-04 is NOT closed by this phase
+
+**Status** Open — SEC-04 remains open
+
+`Backend/config/rateLimiters.js` provides a Redis-backed limiter factory with
+`authLimiter` at the same 5-per-minute budget as the live one. **Nothing imports
+it.** The limiters actually in force are still the ones declared in
+`Backend/routes/auth.js`, which SPEC-2 section 1 fences off.
+
+**So SEC-04 is not closed.** The store existing and the store being used are
+different claims, and only the second one closes the finding. Recorded
+explicitly because "Redis rate limiting added" is how this would otherwise be
+summarised in a changelog, and the next person to read that summary would
+reasonably believe the finding was fixed. It closes when Phase 3 swaps the
+import in `routes/auth.js`.
+
+**Why parity on the numbers matters.** The new `authLimiter` is 5 per minute
+because the old one is. A phase that silently tightened the limit would be
+indistinguishable, from the outside, from a phase that broke something.
+
+**Why the memory fallback is deliberate.** With `REDIS_URL` unset the limiters
+use `express-rate-limit`'s memory store and announce
+`[rateLimiters] store=memory (single replica only)` at boot. A self-hosting NGO
+running one container should not be required to operate Redis, and one
+long-lived process with a memory store already fixes most of what was broken on
+Vercel — where each concurrent function instance had its own counter and a
+cold start reset it, so an attacker with concurrency got five attempts *per
+instance*. The memory store is correct for one replica and wrong the moment
+there are two, which is why it warns rather than staying quiet.
+
+**The `'error'` handler is load-bearing.** `node-redis` emits `'error'` on a
+failed connection; unhandled, that is an uncaught exception and the process
+dies, reintroducing precisely the behaviour ADR-039 exists to remove. The
+handler logs, and the limiter degrades instead.
+
+---
+
+## ADR-043 — Nginx overwrites `X-Forwarded-For` with `$remote_addr`, and the `set_real_ip_from` block is removed
+
+**Status** Accepted — **fixes a spoofing hole found during this phase**
+
+Two changes in `docker/nginx/`:
+
+1. `kindledger-proxy.conf` now sets
+   `proxy_set_header X-Forwarded-For $remote_addr;` — previously
+   `$proxy_add_x_forwarded_for`.
+2. The `set_real_ip_from` / `real_ip_header` / `real_ip_recursive` block in
+   `nginx.conf` is deleted, left commented for a future CDN deployment.
+
+**The hole.** The removed block trusted `172.16.0.0/12`. The Docker bridge
+gateway address sits inside that range. `real_ip_header X-Forwarded-For` with a
+trusted source means Nginx *replaces* `$remote_addr` with the client-supplied
+header value — so any request whose source address fell in the bridge range
+could name its own client IP, and Nginx would believe it and pass it upstream as
+authoritative. That covers host-local and inter-container traffic, and on a host
+whose Docker network is reachable it is a straightforward rate-limit and
+audit-log bypass: pick a fresh `X-Forwarded-For` per request and the `limit_req`
+zone, keyed on `$binary_remote_addr`, never sees the same client twice.
+
+**Why overwrite rather than append.** `$proxy_add_x_forwarded_for` appends to
+whatever the client sent, so a request carrying `X-Forwarded-For: 1.2.3.4`
+reaches Express as `1.2.3.4, <real>`. With `trust proxy: 1` Express takes the
+last entry, which *is* correct — but correct by arithmetic. It stops being
+correct the moment the hop count and the header disagree, and the hop count is a
+deployment property that changes the day someone puts a CDN in front.
+`$remote_addr` discards the client value outright, so `trust proxy: 1` is right
+for a structural reason instead of a numerical one.
+
+**How it is proved, and why the previous proof was not one.** Package A's test
+set `X-Forwarded-For` directly on a request to Express with no proxy in front.
+That shows Express *reads* the header; it cannot show Express reads it *safely*,
+because the test passes identically whether the deployment discards a
+client-supplied value or trusts it. `Backend/test/trust-proxy.test.js` therefore
+issues its requests from throwaway containers on the compose network, through
+the real Nginx, and asserts both halves: the spoofed value is absent from what
+the app resolves *and* from the header it received, and two concurrently running
+containers resolve to two distinct addresses. The second assertion is what makes
+the first meaningful — if every client collapsed to the proxy's own address
+the spoof would also be discarded, and five bad logins from anywhere would lock
+out the world.
+
+**Consequences** If a CDN or a second proxy is ever placed in front of Nginx,
+both the commented block and `app.set('trust proxy', 1)` must be revisited
+together. Uncommenting one without the other silently restores this hole.
+
+---
+
+## ADR-044 — The scheduler is double-guarded, and is deliberately not pointed at MongoDB
+
+**Status** Accepted
+
+`Backend/services/scheduler.js` registers two jobs — the ten-year retention
+purge (BUG-04) and the hourly pending-signup expiry sweep, which replaces
+MongoDB's TTL index. Registration requires `SCHEDULER_ENABLED=true`, and the
+default is off.
+
+**Why they are not pointed at MongoDB.** They are inert until Phase 4 loads
+data, and that is correct rather than a limitation. Live data is still in Mongo,
+so these jobs run against empty MySQL tables and delete nothing. Writing Mongo
+versions would produce code thrown away at cutover, and would put a
+*destructive* scheduled job against live production data into a phase whose
+entire premise is that it does not touch live production data.
+
+**Why the flag.** Without it, a Phase 3 deployment that shipped before the Phase
+4 migration would begin deleting rows from a partially populated database on its
+first 02:00 tick. An operator turns it on once, deliberately, after cutover.
+
+**Why the purge takes `dryRun`.** BUG-04 means the retention purge has *never
+executed*: it was declared as a Vercel cron against
+`POST /api/admin/cleanup/trigger`, which sits behind `adminAuth`, so the cron
+received a `401` every day. The first real run will therefore delete a decade of
+accumulated rows in a single pass, and nobody currently knows how many that is.
+The first post-migration run must be `dryRun: true`.
+
+**Why the sweep is hourly and the purge daily.** The TTL index being replaced
+was continuous. A daily sweep would let a pending signup — a row holding a
+name, an email and a bcrypt hash — outlive its stated 24-hour lifetime by up
+to a further day, which is a retention problem rather than a tidiness one.
+
+**Consequences** Both jobs wrap their body in `try`/`catch`: a failed scheduled
+job logs and the process survives, per ADR-039. Timezone is `Asia/Kolkata`,
+matching the original `dataCleanupService.js` declaration.
+
+---
+
+## ADR-045 — `Backend/controllers/authController.js` is deleted — recorded as a finding, not as housekeeping
+
+**Status** Accepted
+
+The file is removed. A grep for `authController` across the repository returns no
+importers; the result is stated in the Phase 2 report.
+
+**Why this is a finding rather than a tidy-up.** It was not an unused stub. It
+held a parallel implementation of signup and login — its own bcrypt hashing,
+its own token issuance — sitting beside the live one in
+`Backend/routes/auth.js`, unreferenced and unmaintained. And the copy was not
+merely stale, it was **vulnerable**:
+
+1. **Privilege escalation by mass assignment.** Its signup handler read
+   `const { name, email, password, role } = req.body` and passed `role`
+   straight into `new User(...)`. Any client could have registered itself as
+   `admin` by adding one field to the request body. This is the substantive
+   finding; the rest follows from it.
+2. **No verification gate and a weaker hash.** It issued a usable account with
+   no OTP step — bypassing the `PendingSignup` flow entirely — and hashed
+   at bcrypt cost 10 against the live path's 12.
+3. **It is a plausible target for a future wiring mistake.** A file named
+   `authController.js` in a `controllers/` directory looks like the canonical
+   place auth lives. Someone adding a route reasonably reaches for it, and gets
+   that posture rather than the live one. None of the Package A hardening
+   (SEC-01, SEC-02, SEC-04) was ever applied to it.
+4. **It cost the security review real effort.** Every audit of the auth surface
+   had to establish, again, that this copy was unreachable before it could
+   discount the escalation path.
+
+**It was not exploitable as it stood.** Nothing routed to it, so the escalation
+required someone to wire it up first. That is what made it a latent defect
+rather than an incident, and it is also exactly why deleting it is the fix:
+leaving it with a warning comment relies on the next reader trusting the comment
+more than the code.
+
+`for_ocean_security_review.md` had already called for its deletion. Phase 2 is
+simply the first work package with a legitimate reason to touch the file.
+
+**Consequences** None at runtime — nothing imported it, and the
+`Backend/controllers/` directory is now empty and removed with it. Recorded here
+so the deletion is not mistaken for scope creep in the Phase 2 diff, and so the
+reason survives beyond the commit message.
+
+---
+
+## ADR-046 — Phase 2 is branched from `chore/dependency-cleanup`, not from `main`, and the ADR numbering records a merge-order dependency
+
+**Status** Accepted — **deviation from SPEC-2's stated baseline**
+
+SPEC-2 states the baseline is `main`. The `phase-2-data-layer` branch is based
+on `chore/dependency-cleanup` (`74d6c33`), which is itself based on `main`
+(`58bdadf`).
+
+**Why.** This phase must add `rate-limit-redis`, which means committing a
+regenerated lockfile. Generating one on `main` would bake in the five unused
+packages that `chore/dependency-cleanup` deletes, and the next merge of that
+branch would then conflict on the lockfile in the least tractable way. Basing
+Phase 2 on the cleanup produces one coherent lockfile instead of two competing
+ones.
+
+**Consequence: merging Phase 2 carries the dependency cleanup with it.** That is
+not hidden, but it does mean the Phase 2 pull request is larger than its title
+suggests, and the cleanup gets whatever review Phase 2 gets.
+
+**Second consequence: this file has a ten-ADR gap.** ADR-028 to ADR-037 exist
+only on `docs/incident-j1-j6`, which is unmerged. Phase 2 code cites two of them
+— `repositories/pendingSignups.js` cites ADR-033 (duplicate index
+declarations) and `repositories/users.js` cites ADR-034 (a correct reset code
+must not clear the attempt counter). Those citations are dangling on this branch.
+
+**So the merge order is: `docs/incident-j1-j6` first, then
+`phase-2-data-layer`.** Reversed, `docs/decisions.md` ships reading 027 then
+038, with two citations pointing at records that do not exist yet. Numbering
+Phase 2 from 028 instead would have been worse: it would produce ten genuine
+duplicate ADR numbers the moment both branches landed.
+
+---
+
+## ADR-047 — MongoDB is still required to boot, and it is supplied by a named override rather than by the deployment topology
+
+**Status** Accepted — **transitional; delete at the Phase 3 cutover**
+
+`docker-compose.legacy-mongo.yml` adds a throwaway `mongo:7` service and points
+the api container at it. It is layered explicitly:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml up
+```
+
+**Why it is needed at all.** ADR-006's amendment removed the profile gating on
+the strength of three things being fixed. Two were fixed properly. The third was
+not: `Backend/config/db.js` still calls `process.exit(1)` when it cannot reach
+Mongo, and SPEC-2 section 1 fences that file. Because the migration is additive,
+Mongoose still serves every existing route, so `connectDB()` still runs at boot.
+
+The consequence is precise and worth stating plainly: **an absent or invalid
+`MONGODB_URI` produces an EXITED api container, not an unhealthy one.** The
+healthcheck never gets a chance to answer, so the failure looks like the
+`FUNCTION_INVOCATION_FAILED` shape rather than like a database being down. That
+is the exact behaviour ADR-039 removes from the new layer, still present in the
+old one, and not fixable inside this phase's fence.
+
+So SPEC-2's acceptance criterion — four services up, healthcheck passing —
+is satisfiable only with a reachable MongoDB. Requiring production Atlas
+credentials to watch the stack come up would be wrong on its own terms, and
+those credentials are in any case currently rejected (`bad auth`).
+
+**Why it is not in `docker-compose.yml`.** That file is the deployment topology,
+and MongoDB is the thing this migration exists to remove. A `mongo` service in
+it would put the source database permanently into the architecture diagram, and
+the next reader would reasonably conclude the target system runs both. An
+override that has to be named on the command line cannot be mistaken for the
+target state.
+
+**The container is deliberately austere.** No credentials, no volume, no
+persistence. Each of those would imply the data is worth keeping, and under the
+additive model nothing in Phase 2 writes to Mongo at all — it exists so that
+`connectDB()` returns.
+
+**Consequences** Anyone running the plain `docker compose up` without a
+`MONGODB_URI` gets an exited api container, which is why `.env.example` now
+carries the warning at the top rather than buried in a variable comment.
+
+---
+
+**AMENDMENT (AA2, accepted). SPEC-2 section 9 is amended at source.**
+
+The conflict was in the spec, not in the implementation: section 1 fenced
+`config/db.js`, section 9 required four healthy services, and `config/db.js`
+exits without Mongo. Those cannot both hold. Same shape as the SPEC-1A
+contradiction ADR-006 handled.
+
+Section 9's acceptance criterion now reads:
+
+> Four healthy services **with `docker-compose.legacy-mongo.yml` applied**:
+>
+> ```
+> docker compose -f docker-compose.yml -f docker-compose.legacy-mongo.yml up
+> ```
+
+**DELETING `docker-compose.legacy-mongo.yml` IS A PHASE 3 EXIT CRITERION, NOT A
+CLEANUP ITEM.** Phase 3 is not complete while it exists. It is not a tidiness
+task to be carried into Phase 4 with the other leftovers, and it must not
+quietly persist past cutover.
+
+The distinction matters because a cleanup item that survives is untidy, whereas
+this file surviving means something specific and testable is still true: that
+`Backend/config/db.js` still runs, still exits on an unreachable Mongo, and
+therefore that some route is still being served by Mongoose. The file is not a
+convenience that outlived its purpose {D} it is an *observable* that reports
+whether the cutover actually happened. Left in place after Phase 3 it would go
+on supplying a Mongo the application no longer needs, so nothing would fail and
+the leftover coupling would be invisible.
+
+Phase 3 exit therefore requires all four of:
+
+1. `docker-compose.legacy-mongo.yml` deleted.
+2. `Backend/config/db.js` deleted, and with it the last `process.exit` on an
+   infrastructure failure.
+3. `MONGODB_URI` removed from `docker-compose.yml`, `.env.example` and the
+   `trust-proxy` CI job.
+4. `docker compose up` {D} plain, no override {D} bringing four services healthy.
+
+Item 4 is the one that proves the other three, which is why the amended
+criterion is worth restating rather than simply dropping.
+
+---
+
+## ADR-048 — Two security fixes that carried their own defects, and a test that passed for the wrong reason
+
+**Status** Accepted — recorded as a finding in its own right (AA3)
+
+Three related errors, all made during Phase 2, all in code whose entire purpose
+was to close a security finding. Recorded together because the pattern is the
+point: **the most dangerous place to introduce a vulnerability is inside the fix
+for one.** Review attention has already been spent by the time the fix is
+written, the surrounding commentary says the right things, and the tests are
+written by the same person who made the error.
+
+### 1. The limiter keyed IPv6 clients on the raw address
+
+`config/rateLimiters.js` was written with:
+
+```js
+keyGenerator: (req) => `${name}:${req.ip}`,
+```
+
+**The effect.** Every IPv4 client is limited correctly. Every IPv6 client gets an
+unlimited budget. A residential IPv6 allocation is a /64 or shorter, so one
+client holds upwards of 18 quintillion addresses and can present a fresh one per
+request; each lands in its own bucket, and the 5-per-minute auth limit never
+engages. SEC-02's brute-force path reopens for anyone on IPv6.
+
+**Why it is worse than having no limiter at all.** With no limiter, the exposure
+is known and the dashboards say nothing reassuring. With this one, the counters
+increment, the 429s fire for the IPv4 majority, and every metric reads healthy
+while the control is absent for a class of client that is not small and is
+growing. A control that reports success while not functioning is worse than an
+acknowledged gap, because it ends the search.
+
+**The fix.** `ipKeyGenerator(req.ip)` collapses IPv6 to its /56 network and
+leaves IPv4 untouched, so the bucket is the allocation rather than the address.
+
+**How it was caught, which is the uncomfortable part.** Not in review, not by
+reasoning about the design — by `express-rate-limit` v8 emitting
+`ERR_ERL_KEY_GEN_IPV6` during the SPEC-2 section 8 test run. The library's own
+authors anticipated this mistake well enough to ship a detector for it. Without
+that warning the code would have shipped: the surrounding comment block
+discussed keying at length, and discussed the wrong risk.
+
+### 2. The test for the fix passed for the wrong reason
+
+The regression test written alongside the fix asserted that two addresses in one
+allocation share a bucket and that two different networks do not. For the second
+half it used `2001:db8:abcd:0012::1` against `2001:db8:abcd:0099::1`.
+
+Those are the same /56. The prefix boundary falls INSIDE the fourth group —
+only its high byte is in the prefix — so both collapse to
+`2001:db8:abcd::/56`. The assertion was `notEqual` on two values that are equal
+by construction, and it failed, which is the only reason it was noticed.
+
+**Had it been written as `assert.equal`, it would have passed and asserted
+nothing.** That is the instructive case, and it is more instructive than the
+original bug:
+
+- A wrong test that FAILS costs an hour and is self-announcing.
+- A wrong test that PASSES is indistinguishable from a working control, forever.
+  It occupies the slot where the real check was supposed to go, it is counted in
+  the pass total, and it makes the next reader confident.
+
+**A test that passes for the wrong reason is a control that is not there** —
+with the additional cost that its presence discourages anyone from adding the
+one that would have worked.
+
+The corrected test pins the literal expected key (`auth:2001:db8:abcd::/56`) as
+well as the relational assertions, so the boundary is stated rather than
+implied, and it asserts the `:0099:` case as SAME-bucket, which is what it
+actually is.
+
+### 3. The Nginx fix for a spoofing gap contained a spoofing hole
+
+SPEC-2 section 7.3 asked for `X-Forwarded-For` handling to be made correct. The
+configuration written for it kept this block:
+
+```
+set_real_ip_from  172.16.0.0/12;
+real_ip_header    X-Forwarded-For;
+real_ip_recursive on;
+```
+
+`172.16.0.0/12` contains the Docker bridge gateway. `real_ip_header` with a
+trusted source means Nginx REPLACES `$remote_addr` with the client-supplied
+header value — so any request whose source address fell in the bridge range
+could name its own client IP and be believed, then passed upstream as
+authoritative. Host-local and inter-container traffic qualified. On a host whose
+Docker network is reachable, it is a direct rate-limit and audit-log bypass: a
+fresh `X-Forwarded-For` per request, and the `limit_req` zone keyed on
+`$binary_remote_addr` never sees the same client twice.
+
+A spoofing hole, inside the fix for a spoofing gap. Removed entirely (ADR-043),
+and `X-Forwarded-For` is now overwritten with `$remote_addr` rather than
+appended.
+
+### The pattern, and what to do about it
+
+**This is the second time in this project a security fix has carried its own
+defect** (AA3). Two earlier episodes fit that description, and they fit it
+differently, which is worth separating rather than collapsing:
+
+- **ADR-012, superseded by ADR-026 — the closest match.** SPEC-1A section 5.6
+  stated that the `UNIQUE` index on `donation_payment_details.mihpayid` was the
+  SEC-01 replay defence. It is not: `mihpayid` is an UNSIGNED field in the PayU
+  callback, so an attacker controls it and can vary it freely. The index is a
+  data-integrity control and nothing more. The defect here was not in the
+  mechanism but in the claim attached to it — and a fix documented as
+  providing a protection it does not provide is worse than an absent one,
+  because it closes the question. This was Gary's correction, not a finding of
+  mine; ADR-012 repeated the error before ADR-026 fixed it.
+- **ADR-034 — the same shape, caught one step earlier.** The natural
+  implementation of the SEC-02 attempt cap, clearing the counter on a correct
+  code at `/verify`, would have handed a lucky guesser a fresh budget of five at
+  `/reset` and let them alternate endpoints to stay topped up. The distinction
+  worth keeping is that the code was already correct: this was a gap in the
+  SPECIFICATION that the obvious tidy-up during Phase 3 would have turned into a
+  defect, not a defect that shipped. It is a near miss, recorded so the tidy-up
+  does not happen.
+
+If the intended precedent was a third episode, this list is wrong and should be
+corrected here rather than reconciled in conversation.
+
+What the three have in common is not carelessness. It is that each was written
+while thinking about the attack the fix was FOR, and each defect lived in a
+dimension the fix was not thinking about — address family, prefix arithmetic,
+the trust source rather than the header. The mitigations that actually worked
+here were mechanical, not attentional:
+
+1. **Run the thing.** All three were found by execution — a library warning,
+   an assertion failure, a request issued through the real proxy. None was found
+   by reading.
+2. **Test through the real topology.** Package A's `trust proxy` test set the
+   header directly on Express with no proxy in front, which cannot distinguish a
+   deployment that discards a client-supplied value from one that trusts it.
+   The `set_real_ip_from` hole survived that test and could not survive
+   `trust-proxy.test.js`.
+3. **Pin literals, not just relations.** `notEqual(a, c)` encodes an assumption
+   about IPv6 prefix arithmetic. `equal(a, 'auth:2001:db8:abcd::/56')` states
+   the arithmetic, so being wrong about it is visible.
+
+**Consequences** Both gates are now in CI (`app-tests.yml`, jobs `data-layer`
+and `trust-proxy`) rather than local-only, because every one of these findings
+depended on someone choosing to run a suite by hand.
+
+---
+
+## ADR-049 — The api image was built from the developer's `node_modules`; `Backend/.dockerignore` closes it
+
+**Status** Accepted — **defect found while wiring the CI gates (AA1)**
+
+`docker/api.Dockerfile` does:
+
+```dockerfile
+COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node . .
+```
+
+There was no `.dockerignore`. The second `COPY` therefore brought the whole
+build context — including the developer's own `node_modules` — and Docker
+merged it OVER the tree the `deps` stage had just built from the lockfile,
+overwriting every file present in both.
+
+**So the image did not contain the dependencies the lockfile describes. It
+contained the developer's, layered on top of them.**
+
+**How it surfaced, and why that is the interesting part.** It did not surface as
+a build error. It surfaced as `503` from `/api/health` with
+`@prisma/client did not initialize yet` — three weeks and one accepted phase
+after it was introduced — the moment `npm ci` was run on the host while
+verifying the new CI install step. `npm ci` replaces the GENERATED Prisma client
+with the ungenerated stub, and the stub then overwrote the client the `deps`
+stage had correctly generated for Linux.
+
+Every earlier build worked purely because the host had at some point run
+`prisma generate`. That is not a property of the repository. It is a property of
+one machine, and it was the thing holding up the acceptance evidence for Phase
+2.
+
+**What was actually wrong, in ascending order of seriousness:**
+
+1. **Not reproducible.** Two people building the same commit get different
+   images, and neither matches what CI builds. The lockfile that
+   `chore/dependency-cleanup` committed to make the dependency set exact was
+   being overwritten at the last step.
+2. **Wrong-platform binaries.** Prisma ships one query engine per platform
+   (`query_engine-windows.dll.node` against
+   `libquery_engine-debian-openssl-3.0.x.so.node`). Building on Windows put
+   both in a Linux image. Because the filenames differ, nothing collided and
+   nothing complained — which is precisely why it went unnoticed.
+3. **A secret-leak path that happened not to be taken.** There is no
+   `Backend/.env` today. Had there been, it would have been copied into the
+   image and into every registry that image was pushed to. The absence of the
+   file was the only control.
+
+The image also shrank from 1.08GB to 695MB, which is the least important
+consequence and the only visible one.
+
+**Why CI would not have caught it.** A runner checks out a clean tree, so there
+is no host `node_modules` for the second `COPY` to pick up and the image builds
+correctly. This defect is invisible to CI BY CONSTRUCTION and only ever appears
+on a developer machine — the inverse of the usual "works on my machine",
+where the local build is the one that is wrong and CI is right. It was found by
+building locally, which the new `trust-proxy` job does in CI and which nothing
+had previously forced anyone to do.
+
+**Consequences** `Backend/.dockerignore` now excludes `node_modules`, `.env*`,
+`.git` and build debris, and carries the explanation inline so that deleting it
+requires reading why it exists. `test/` is deliberately NOT excluded: the
+container is where the data-layer and schema suites run against real MySQL.
+
+Worth stating plainly against the Phase 2 report: the acceptance evidence given
+for Phase 2 — `docker compose up`, api healthy — was obtained from an image
+built this way. The application code was correct and all the suites genuinely
+passed, but the image they passed in was not the image the Dockerfile
+describes. The re-run recorded in AA1 was done on a clean image.

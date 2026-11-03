@@ -5,9 +5,11 @@
 #
 #   docker build -f docker/api.Dockerfile ./Backend
 #
-# NOTE: this image cannot usefully run until Phase 3. Backend/config/db.js
-# still requires MONGODB_URI and calls process.exit(1) without it. The image
-# is correct and ready; the application inside it is not yet.
+# NOTE: this image runs as of Phase 2 - it serves /api/health and the MySQL
+# data layer. It still needs MONGODB_URI, because the migration is additive and
+# Mongoose keeps serving every existing route until Phase 3; Backend/config/db.js
+# calls process.exit(1) without it, so an absent value means an EXITED container
+# rather than an unhealthy one. See docker-compose.legacy-mongo.yml (ADR-047).
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -26,8 +28,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests first so the layer cache survives source-only changes.
-# package-lock.json is optional today because neither project commits one
-# (SEC-12). Once it is committed, change this to `npm ci` for reproducibility.
+#
+# The lockfile IS now committed (SEC-12 closed on chore/dependency-cleanup), so
+# the branch below takes `npm ci` in practice. The glob and the conditional are
+# kept rather than hard-coding `npm ci`: this Dockerfile is also the one a
+# self-hoster builds from a source tarball, and a tarball without the lockfile
+# should still build.
 COPY package.json package-lock.json* ./
 
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
@@ -46,7 +52,7 @@ RUN npm prune --omit=dev
 FROM node:20-bookworm-slim AS runtime
 
 # openssl again - Prisma needs it at runtime, not just to generate.
-# curl is here for the Phase 3 /api/health probe.
+# curl is here for the /api/health probe in docker-compose.yml.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssl ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -70,6 +76,7 @@ USER node
 EXPOSE 5000
 
 # dumb-init is deliberately not used: Node 20 handles SIGTERM correctly as PID
-# 1 provided the application installs a handler, which is Phase 3's job for
-# graceful shutdown of the connection pool.
+# 1 provided the application installs a handler. It now does -
+# config/prisma.js registerShutdownHandlers(), wired in app.js, closes the pool
+# and then re-raises the signal so the default disposition still applies.
 CMD ["node", "app.js"]

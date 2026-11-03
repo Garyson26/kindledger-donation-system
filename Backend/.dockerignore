@@ -1,0 +1,71 @@
+# =============================================================================
+# Build context exclusions for docker/api.Dockerfile
+# =============================================================================
+# THIS FILE IS LOAD-BEARING. Without it the image was silently broken, and it
+# is worth writing down exactly how, because it failed in a way that looked
+# like success for weeks.
+#
+# The Dockerfile does:
+#
+#     COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+#     COPY --chown=node:node . .
+#
+# The second COPY brings in the whole build context. With no .dockerignore that
+# includes the DEVELOPER'S OWN node_modules, which Docker merges on top of the
+# tree the deps stage just built - overwriting any file present in both.
+#
+# So the published image did not contain the dependencies the lockfile
+# describes. It contained the developer's, layered over them. Consequences, in
+# ascending order of seriousness:
+#
+#   1. The image is not reproducible. Two people building the same commit get
+#      different images, and neither matches what CI builds.
+#   2. Native binaries for the wrong platform get baked into a Linux image.
+#      Prisma's query engine is one file per platform
+#      (query_engine-windows.dll.node vs libquery_engine-debian-*.so.node), so
+#      building on Windows shipped both and it happened to keep working.
+#   3. It hid a real break until it did not. `npm ci` on the host replaces the
+#      GENERATED Prisma client with the ungenerated stub, so the stub
+#      overwrote the client the deps stage had generated and the container
+#      started answering 503 with "@prisma/client did not initialize yet".
+#      That is what surfaced this.
+#
+# The build only ever worked because the host happened to have run
+# `prisma generate`. That is not a property of the repository, it is a property
+# of one machine.
+# =============================================================================
+
+# The reason this file exists. Dependencies come from the deps stage, which
+# installs them from the lockfile and runs `prisma generate` against a Linux
+# target.
+node_modules
+
+# Secrets. There is no Backend/.env today, but the whole point of an ignore
+# file is that it holds when someone creates one.
+.env
+.env.*
+!.env.example
+
+# Version control and editor state - large, and meaningless inside an image.
+.git
+.gitignore
+.vscode
+.idea
+
+# Platform config for the deployment this migration is leaving.
+.vercelignore
+vercel.json
+
+# Build and test debris.
+npm-debug.log*
+*.log
+coverage
+.nyc_output
+
+# Runtime upload target. The image creates it and the compose volume mounts
+# over it; anything committed here would be shadowed anyway.
+uploads
+
+# Docker's own files, when built from the repository root rather than ./Backend.
+Dockerfile*
+.dockerignore
