@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node app.js",
+    "vercel-build": "prisma generate",
     "dev": "nodemon app.js",
     "seed": "node scripts/seedDatabase.js",
     "db:generate": "prisma generate",
@@ -82,6 +83,7 @@
     "deepmerge-ts": "^8.0.0"
   },
   "//scripts": {
+    "vercel-build": "Vercel only: @vercel/node runs it after install, so the Prisma client is regenerated on every deploy rather than served stale from the dependency cache (CB2-3). Deliberately not postinstall: docker/api.Dockerfile runs npm ci before it copies prisma/, so a postinstall generate would fail the image build.",
     "seed": "LEGACY MongoDB seeder. Still the production path until the Phase 4 cutover; do not repoint it at MySQL.",
     "db:seed": "MySQL demo seeder. Destructive - requires --i-understand-this-drops-the-database.",
     "db:migrate": "Always migrate deploy, never migrate dev. Runs the server compatibility guard first.",

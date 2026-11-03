@@ -227,10 +227,11 @@ use it once, and delete it.
 |---|---|---|---|
 | **3.1** | **The frontend CSP hardcodes the old backend hostname.** `Frontend/vercel.json`: `connect-src 'self' https://for-ocean-foudation-donation-system-one.vercel.app …` | The browser refuses every API call to any other host. **The new frontend loads and nothing works.** `vercel.json` is static, so no variable can change it | Put the new backend host there. That needs the host known in advance: **either a custom domain chosen now, or a project name whose `*.vercel.app` name is confirmed free.** Gary's choice |
 | **3.2** | **`Frontend/.env` is tracked and names the old backend** | §1.2. Wrong rather than dangerous since CD1: the fallback reaches the old backend, which is still ours. It is also already in Phase 6's scrub scope "for the shape" | Remove the value, so a missing `VITE_API_URL` fails loud (`localhost:5000`) instead of silently reaching the old backend |
-| **3.3** | **No `prisma generate` in the backend build.** No `postinstall`, no `vercel-build` | Vercel caches `node_modules`. Prisma documents that a cached client goes stale and throws at runtime on Vercel. The first deploy will work and a later schema change will not. **I have not reproduced this, because Vercel's cache cannot be simulated locally** | `"postinstall": "prisma generate"` in `Backend/package.json` |
+| **3.3** | **No `prisma generate` in the backend build.** No `postinstall`, no `vercel-build` | Vercel caches `node_modules`. Prisma documents that a cached client goes stale and throws at runtime on Vercel. The first deploy will work and a later schema change will not. **I have not reproduced this, because Vercel's cache cannot be simulated locally** | **Done in post-F, as `"vercel-build": "prisma generate"`, not `postinstall`.** `docker/api.Dockerfile` runs `npm ci` before it copies `prisma/`, so a postinstall generate would fail the image build. Vercel's Node runtime runs `vercel-build` under `@vercel/node`; Docker and CI never call it. **Unverified until the first deploy: check the build log shows `prisma generate`** |
 
-I propose one small PR after F carrying all three, once Gary has chosen the
-hostnames. It cannot be written before that, because 3.1 needs the name.
+**Post-F (PR 10) carries 3.2 and 3.3. 3.1 waits for the new backend's
+hostname**, so that PR is open as a draft until the name is chosen. No new
+projects exist in the team yet (checked when it was opened).
 
 ---
 
