@@ -2120,30 +2120,36 @@ appended.
 
 ### The pattern, and what to do about it
 
-**This is the second time in this project a security fix has carried its own
-defect** (AA3). Two earlier episodes fit that description, and they fit it
-differently, which is worth separating rather than collapsing:
+**The line that matters is CAUGHT BEFORE MERGE versus SHIPPED, and by that line
+there has been exactly one** (AB1). An earlier draft of this record said "the
+second time a security fix has carried its own defect" and then listed
+candidates. Both halves of that were wrong: the count, and the idea that a count
+is the useful measurement.
 
-- **ADR-012, superseded by ADR-026 — the closest match.** SPEC-1A section 5.6
-  stated that the `UNIQUE` index on `donation_payment_details.mihpayid` was the
-  SEC-01 replay defence. It is not: `mihpayid` is an UNSIGNED field in the PayU
-  callback, so an attacker controls it and can vary it freely. The index is a
-  data-integrity control and nothing more. The defect here was not in the
-  mechanism but in the claim attached to it — and a fix documented as
-  providing a protection it does not provide is worse than an absent one,
-  because it closes the question. This was Gary's correction, not a finding of
-  mine; ADR-012 repeated the error before ADR-026 fixed it.
-- **ADR-034 — the same shape, caught one step earlier.** The natural
-  implementation of the SEC-02 attempt cap, clearing the counter on a correct
-  code at `/verify`, would have handed a lucky guesser a fresh budget of five at
-  `/reset` and let them alternate endpoints to stay topped up. The distinction
-  worth keeping is that the code was already correct: this was a gap in the
-  SPECIFICATION that the obvious tidy-up during Phase 3 would have turned into a
-  defect, not a defect that shipped. It is a near miss, recorded so the tidy-up
-  does not happen.
+**Shipped: one.** ADR-012, superseded by ADR-026. SPEC-1A section 5.6 stated
+that the `UNIQUE` index on `donation_payment_details.mihpayid` was the SEC-01
+replay defence. It is not — `mihpayid` is an UNSIGNED field in the PayU
+callback, so an attacker controls it and can vary it freely. The index is a
+data-integrity control and nothing more. The defect was not in the mechanism but
+in the RATIONALE attached to it, written into `db/schema.sql` where the next
+reader would find it, and **a protection that is documented but absent is worse
+than one that is simply absent, because it closes the question.** Anyone looking
+for the replay defence would have found the comment and stopped looking. That is
+the only one of these that reached a merged branch.
 
-If the intended precedent was a third episode, this list is wrong and should be
-corrected here rather than reconciled in conversation.
+**Caught before merge: three, and this is the ordinary case rather than the
+remarkable one.** The IPv6 keying and the `set_real_ip_from` hole above; the
+observability change that nearly broke the failed-payment webhook path; and, one
+step further back still, ADR-034, where the code was already correct and it was
+the SPECIFICATION that left room for the defect.
+
+Keeping the distinction and dropping the count is the point. A tally of
+"security fixes that carried defects" measures how often it happens, which is
+roughly always — every one of these was written by someone thinking hard about
+the attack the fix was for. What is worth measuring is how many got past the
+gates, and the answer to that is one, in the artefact class with the fewest gates
+on it: a rationale comment in a DDL file, which no test asserts and no reviewer
+can falsify by running anything.
 
 What the three have in common is not carelessness. It is that each was written
 while thinking about the attack the fix was FOR, and each defect lived in a
@@ -2228,6 +2234,14 @@ where the local build is the one that is wrong and CI is right. It was found by
 building locally, which the new `trust-proxy` job does in CI and which nothing
 had previously forced anyone to do.
 
+**So this class of defect only ever appears locally, and only when someone
+looks** (AB2). There is no gate that can be added to catch it, because the
+condition that produces it — a populated `node_modules` in the build context
+— cannot exist on the machine running the gate. The control is the
+`.dockerignore` itself, and the check on the control is that someone
+occasionally builds and runs the image by hand rather than trusting that a green
+pipeline means the artefact is right.
+
 **Consequences** `Backend/.dockerignore` now excludes `node_modules`, `.env*`,
 `.git` and build debris, and carries the explanation inline so that deleting it
 requires reading why it exists. `test/` is deliberately NOT excluded: the
@@ -2238,3 +2252,415 @@ for Phase 2 — `docker compose up`, api healthy — was obtained from an image
 built this way. The application code was correct and all the suites genuinely
 passed, but the image they passed in was not the image the Dockerfile
 describes. The re-run recorded in AA1 was done on a clean image.
+
+---
+
+# Phase 3 (SPEC-3) — route migration and finding remediation
+
+---
+
+## ADR-050 — `categories.js` cannot be migrated in isolation: it is the most widely READ collection in the system
+
+**Status** RESOLVED — **Option D taken (AD1). Package 3.1 is complete.**
+
+SPEC-3 section 2 sequences `categories.js` first, on the reasoning that it is
+the "smallest surface, simplest queries" and so a cheap place to prove the
+repository pattern. Its **write** surface is indeed the smallest in the project:
+five handlers, no aggregation, no `populate`, no `distinct`.
+
+Its **read** surface is the largest. `Category` is read by three route files
+that SPEC-3 does not migrate until packages 3.2, 3.3 and 3.5:
+
+| Reader | Site | What it does |
+|---|---|---|
+| `routes/payment.js:116` | `Category.findById(category)` | **Prices the donation.** `dbCategory.donationAmount * qty` at :123 is the server-side amount calculation |
+| `routes/donations.js` | `.populate("category")` at :118, :226, :265, :342 | Every donation listing and the receipt |
+| `routes/admin.js:19` | `Category.countDocuments()` | The dashboard tile |
+
+**Two independent failures, either of which is sufficient.**
+
+**1. The data splits.** Migrating the write path means an admin creating a
+category writes it to MySQL and nowhere else. `/api/payment/initiate` then looks
+it up in MongoDB, does not find it, and returns `400 Invalid category`. **No
+donation can be made against any category created after the cutover.** Existing
+categories keep working, so this does not fail at deploy — it fails the first
+time an admin adds a category, which is the kind of delay that makes the cause
+hard to find.
+
+**2. The identifier format changes.** A category created in MySQL has a
+`CHAR(36)` uuid as its external id and no ObjectId at all — `legacy_id` exists
+for migrated rows, not for new ones. `payment.js:116` calls
+`Category.findById(<uuid>)`, which raises a `CastError` before it can reach the
+not-found branch. So the failure is not even the 400 above; it is an
+unhandled 500, which is the SEC-14 shape again.
+
+**Why this was not visible from the spec.** The sequencing reasoning is about
+the size of the file being changed. The risk is in the files NOT being changed.
+`categories.js` is small precisely because it only writes; everything that reads
+categories lives somewhere else.
+
+### Options
+
+**A. Dual-write during 3.1.** `categories.js` writes to both stores, reads from
+MySQL. Preserves every reader.
+*Cost:* Mongoose stays in the migrated file, which directly violates SPEC-3
+section 5's "No Mongoose reference remains in the migrated file". Adds a
+consistency failure mode with no transaction spanning the two stores. Does not
+solve failure 2 — the id handed back to the frontend still has to be one of
+the two formats, and whichever is chosen, one side breaks.
+
+**B. Widen 3.1 to include the four read sites.** Migrate `categories.js` plus
+the `Category` lookups in `payment.js`, `donations.js` and `admin.js`, leaving
+everything else in those files untouched.
+*Cost:* touches three files before their characterisation tests exist, which is
+the rule SPEC-3 section 1 exists to enforce. Mitigated for `payment.js`, which
+has 17 tests covering `/initiate` pricing already; not mitigated for
+`donations.js` or `admin.js`. Also requires the payment suite's category fixture
+to switch stores — a fourth seam function, against SPEC-2 section 4.1's
+expectation of five for the whole phase.
+
+**C. Resequence: do categories LAST, not first.** Migrate the readers first,
+against a `Category` still in MongoDB, then migrate categories once nothing
+reads it from Mongo.
+*Cost:* the readers cannot be migrated while the thing they read is in the other
+store either — `donations.js` populating a Mongo category from a MySQL
+donation has the same split. This option only works if "migrate the readers"
+means migrating donations AND their category lookups together, which is option
+B with a different name and a worse order.
+
+**D. Accept a compatibility shim for the duration of Phase 3.** `categories.js`
+migrates fully; a small read-through helper resolves a category id from MySQL
+first and falls back to Mongo, and the three readers call it instead of
+`Category.findById`. One shared function, deleted in 3.6.
+*Cost:* three one-line edits in unmigrated files, and a shim to remember to
+remove. It does solve failure 2, because the helper can accept either id format.
+
+### Recommendation
+
+**D**, with B as the fallback if a shim is judged worse than widening the
+package. D is the smallest change that keeps the donation flow working, keeps
+Mongoose out of `categories.js`, and does not require characterisation tests for
+two files that are not otherwise being touched. Its real cost is that it creates
+a temporary abstraction, and those survive — which is why it should be added
+to Phase 3's exit criteria (section 7) rather than left to be noticed.
+
+**Not a decision I should take alone.** All four options trade one of SPEC-3's
+own rules against another, and B in particular would breach the coverage rule
+that AC5 and section 1 exist to protect.
+
+### Resolution (AD1): Option D, with three requirements on the helper
+
+`Backend/services/categoryBridge.js`. `categories.js` is fully migrated and
+imports no Mongoose; the bridge resolves a category from MySQL first and falls
+back to MongoDB, and is called from the six read sites. Deleting it is a Phase 3
+exit criterion.
+
+Three requirements were attached, and each closes a specific way a bridge goes
+wrong:
+
+**a. The fallback is never silent.** Every MongoDB hit logs a warning naming the
+id, and `fallbackCount()` counts them. This is what makes deletion provable
+rather than assumed: once `donations.js`, `admin.js` and `payment.js` are
+migrated, a count of zero over a real run is EVIDENCE that nothing depends on
+the fallback. A temporary abstraction that cannot report whether it is still
+load-bearing is one nobody can argue for removing, which is how they become
+permanent. **Recorded as the section 7 exit condition.**
+
+**b. The id shape is validated before dispatch.** `Category.findById(<uuid>)`
+raises a `CastError`, which a route turns into a 500 where a 400 belongs — the
+SEC-14 shape, and it would have sat on the PRICING path, where one junk form
+field would 500 the donation endpoint. The bridge classifies the id
+(`objectid` / `uuid` / `invalid`) and returns null for anything it cannot place.
+A uuid is never sent to MongoDB at all, because a uuid can only have come from
+MySQL and there is nothing to fall back to.
+
+**c. It has its own tests.** `Backend/test/category-bridge.test.js`, 11
+scenarios: both resolution paths, the archived-category case, MySQL winning when
+a row exists in both stores, batch resolution, and twelve malformed inputs each
+asserted to return null rather than throw. It is temporary, and it is on the
+pricing path; those are not in tension.
+
+**What the readers cost.** Six edits, all confined to the category lookup:
+`payment.js` x2, `admin.js` x1, `donations.js` x4 (two of which are in the same
+handler pair). Each `.populate("category")` became a post-query
+`attachCategories` call, because populate CANNOT work any more: a category
+created after 3.1 has no MongoDB row, so populate resolves it to null and the
+donation appears to have no category at all.
+
+**One incidental behaviour change, recorded rather than hidden.**
+`donations.js:265` used `.populate("category", "name description price")`.
+`description` and `price` are not fields on the Category schema — they are
+`sortDescription` and `donationAmount` — so that populate only ever returned
+`name` and `_id`. The bridge returns the whole category, which is a superset. No
+client can break on a field appearing, but it is a difference and 3.2 should not
+be surprised by it.
+
+**What was already done and was unaffected by the choice:**
+`Backend/test/categories-characterisation.test.js`, 22 scenarios, green against
+the Mongoose implementation BEFORE the migration and green against the MySQL one
+after it, with ten assertions changed deliberately and marked `CHANGED IN 3.1`.
+Twelve passed untouched, which is the evidence that behaviour was preserved
+everywhere it was meant to be.
+
+---
+
+## ADR-051 — A category's external identifier stays a 24-hex ObjectId for the rest of Phase 3
+
+**Status** Accepted — transitional, reversed in Phase 4
+
+From package 3.1 the categories table is the source of truth, but the id the API
+returns as `_id` is **not** the uuid. It is `legacy_id`: the real MongoDB
+ObjectId for migrated rows, and a freshly minted ObjectId-shaped value for rows
+created after 3.1.
+
+**Why, and it is not a preference.** `Donation.category` is
+
+```js
+{ type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true }
+```
+
+Donations do not migrate until package 3.2. Handing a uuid to the donation write
+path raises a `CastError` on save, so **no donation could be made against any
+category created after package 3.1**. Not a degraded experience — a hard
+failure on the revenue path, appearing the first time an admin adds a category
+rather than at deploy.
+
+The alternatives were worse. Writing a shadow MongoDB row for every category
+would keep Mongoose in the migrated file and create a second source of truth
+with no transaction spanning the two stores. Changing `Donation.category` to a
+string would be a Mongo schema change to a collection holding live production
+data, in a phase forbidden from touching schemas.
+
+**The uuid is not hidden.** It is returned alongside as `uuid`, and it is the
+identifier the repositories use internally. Only the wire format is pinned.
+
+**Consequences, and one deserves flagging for Phase 4.** `legacy_id` is
+populated for rows that were never in MongoDB. The ETL must NOT assume
+`legacy_id IS NULL` means "created after cutover" — it means nothing of the
+kind, and any reconciliation keyed on that assumption will silently mis-classify
+every category created during Phase 3. Minting uses the documented ObjectId
+layout (4-byte seconds, 5-byte random, 3-byte counter) and
+`uq_categories_legacy_id` enforces uniqueness, so a collision is a constraint
+violation rather than a silent overwrite.
+
+Phase 4 switches the wire format to the uuid once `Donation` is a MySQL row with
+a `BIGINT` foreign key and the ObjectId is no longer load-bearing.
+
+### AE1(a) — the ordering constraint, and it is a HARD one
+
+**A minted `legacy_id` is distinguishable from a real one ONLY while MongoDB
+still exists.** The test is exact: look the value up in the `categories`
+collection. A row means it is genuine; no row means it was minted here. That
+oracle is destroyed the moment Mongo is deleted, and it is destroyed
+PERMANENTLY — there is no way to recover the distinction afterwards.
+
+Get the order wrong and minted values become indistinguishable from genuine
+ones forever. A fresh open-source install would then carry fabricated ObjectIds
+in a column whose `COMMENT` says it holds real MongoDB identifiers, and every
+future reconciliation, support query and data-provenance question would be
+answered wrongly with complete confidence.
+
+**PACKAGE 3.6 EXIT CRITERIA, IN THIS ORDER. The order is the whole control:**
+
+1. For every category with a non-NULL `legacy_id`, look it up in MongoDB.
+   **If absent, set `legacy_id` to NULL.**
+2. **Only then** delete MongoDB.
+
+**Do not use ObjectId timestamp heuristics to decide which is which.** The
+first four bytes are a timestamp, so it is tempting to treat "created after the
+3.1 merge" as minted. That is a guess dressed as a fact: a genuine category
+created in the same window would be NULLed, and a minted one whose clock was
+skewed would survive. The lookup is a fact. The heuristic is a plausible story,
+and the difference only becomes visible long after the evidence is gone.
+
+### AE1(b) — stop minting when `donations.js` migrates
+
+Minting exists for exactly one reason: `Donation.category` is an ObjectId ref.
+**The moment `donations.js` migrates and that column becomes a `BIGINT` foreign
+key, the reason is gone.** Every value minted after that point is avoidable
+cleanup — more rows for step 1 above to visit and NULL, created for no benefit.
+
+Recorded as a task on whichever package migrates `donations.js`: remove
+`mintObjectId()` from `routes/categories.js` and let `legacy_id` stay NULL for
+new rows, which is what SPEC-1A section 4.1 says it means.
+
+### AE1(c) — SPEC-1A section 4.1 is temporarily false, and is corrected here
+
+SPEC-1A section 4.1 states that `legacy_id` is NULL for rows created after
+cutover, so that a non-NULL value identifies a migrated row.
+
+**That invariant does not hold during the Phase 3 window.** From package 3.1
+until `donations.js` migrates, categories created through the API carry a minted
+`legacy_id` and were never in MongoDB. Anything relying on the invariant in that
+window — an ETL reconciliation, a provenance report, a "which rows came from
+the old system" query — gets the wrong answer with no error.
+
+The exception is bounded and self-correcting: AE1(b) stops new ones being
+created, and AE1(a) step 1 removes the ones that exist. **After package 3.6 the
+SPEC-1A invariant is true again**, and it is true because it was restored
+deliberately rather than because it was never broken.
+
+---
+
+## ADR-052 — Bridges return requested fields only; the fallback exit check, defined
+
+**Status** Accepted — AE2 and AE3. Applies from package 3.2.
+
+### AE2 — narrow the return rule
+
+Package 3.1's write-up said of the category bridge returning the whole record
+rather than the three fields `donations.js` asked for: "a superset, so nothing
+can break on it". **That is true for Category and wrong as a general rule**, and
+the generalisation is the dangerous part because the next two packages bridge
+`User` and `Donation`.
+
+A superset can break a caller three ways, none hypothetical here:
+
+1. **Anything that iterates keys.** A frontend rendering `Object.entries`, a CSV
+   exporter building its header row from the first record, a PDF table. Each
+   gains a column nobody asked for, and the CSV case silently changes the shape
+   of an export an NGO may be reconciling against.
+2. **Anything that serialises the record onward.** A receipt, an email
+   template, a webhook payload.
+3. **Disclosure.** `Category` has nothing sensitive. `User` has
+   `passwordHash`, `resetPasswordCode`, `loginOTP` and `resetPasswordAttempts`;
+   `Donation` has donor name, email and phone. A bridge that returns "the whole
+   record" on those is an information leak wearing the clothes of a
+   compatibility shim — and it would be introduced by a package whose stated
+   purpose is to change nothing.
+
+**The rule, from 3.2 onwards: a bridge returns the fields the caller requested,
+not the whole record** — unless the record has been explicitly checked for
+fields that must not cross the boundary, and that check is written down.
+
+For the `User` bridge specifically, the three existing call sites all request
+`"name email"`. The bridge returns those two and nothing else, and the field
+list is an allowlist rather than a denylist, because a denylist is wrong the
+first time a column is added.
+
+The Category bridge is left as it is. Its superset is already relied upon by
+the corrected `donations.js` behaviour, it carries nothing sensitive, and
+changing it now would be a second behaviour change to a package already
+verified — recorded as a known exception rather than silently excluded.
+
+### AE3 — the fallback exit check, made checkable
+
+`fallbackCount()` returning zero "over a real run" is not yet a condition anyone
+can verify, and a vague exit condition on a deletion is how a bridge survives.
+The failure mode is specific: someone runs the unit tests, sees zero, and
+deletes a bridge that was never exercised on the path that needed it.
+
+**The condition, both parts required:**
+
+1. **Zero fallbacks across the FULL test suite** — every suite, not the one
+   that looks relevant. Asserted, not eyeballed: the package that removes a
+   bridge adds a check that reads `fallbackCount()` after the suite and fails
+   if it is non-zero.
+2. **Zero fallbacks across a manual exercise of every migrated route**, against
+   a database holding BOTH migrated and post-3.1 records. The second half of
+   that sentence is the point. A database containing only records created after
+   the migration cannot take the fallback path at all, so it proves nothing; the
+   fixture has to contain rows of both provenances for the check to mean
+   anything.
+
+Part 1 without part 2 is the trap. Part 2 without part 1 misses the paths no
+human thinks to click.
+
+### AD2 — the corrected package order, re-derived by read dependency
+
+SPEC-3 section 2 sequenced by the size of the file being changed.
+**The corrected principle: sequence by READ DEPENDENCY.** A file is safe to
+migrate when everything reading its data has already moved, or when a bridge
+exists. The risk lives in the files that are NOT being changed.
+
+**The dependency map, built from source after package 3.1:**
+
+| Collection | Written by | Read by |
+|---|---|---|
+| `Category` | `categories.js` **(migrated)** | `payment.js`, `donations.js`, `admin.js` **(all bridged)** |
+| `PendingSignup` | `auth.js` | `auth.js`, `dataCleanupService` |
+| `Donation` | `donations.js`, `payment.js`, `dataCleanupService` | + `admin.js` |
+| `User` | `auth.js`, `users.js`, `admin.js`, `dataCleanupService` | + `authMiddleware`, `adminAuth`, `donations.js`, `payment.js` |
+
+`BrandingSettings` has no MongoDB model and no consumer; it is a Phase 2 MySQL
+table waiting for Phase 5. Nothing to sequence.
+
+**`dataCleanupService` is live-reachable and had been treated as dead.**
+`routes/admin.js:13` imports `triggerManualCleanup`, `cleanupOldDonations` and
+`cleanupInactiveUsers`. BUG-04 means the *cron* never fires, which is what made
+it look inert — but an admin can still invoke it by hand, and it DELETES
+donations and users. It is therefore a reader and a writer of three collections,
+and it was not in the sequencing picture at all.
+
+**Retiring it is the single largest simplification available.** Phase 2's
+`services/scheduler.js` already reimplements its work against MySQL, so
+repointing `admin.js`'s three endpoints and deleting the legacy service removes
+a reader of `Donation`, `User` AND `PendingSignup` in one change — and takes
+`PendingSignup` down to a single reader (`auth.js`), so **`PendingSignup` needs
+no bridge at all.**
+
+**Why `User` cannot avoid a bridge.** Its readers are `auth.js`, `users.js`,
+`admin.js`, both middlewares, `donations.js` and `payment.js` — effectively
+the whole application, because every authenticated request passes through
+`authMiddleware`. Avoiding a bridge would mean migrating all of them in one
+package, which abandons the incremental model and the coverage rule together.
+
+**Why `Donation` cannot avoid one either.** It is written by `donations.js` and
+`payment.js` and read by both plus `admin.js`. The split appears the moment the
+FIRST writer migrates, so avoiding a bridge means one package containing the
+three largest files in the project.
+
+**The corrected order:**
+
+| Pkg | File(s) | Introduces | Retires |
+|---|---|---|---|
+| **3.2** | `donations.js`, and retire `dataCleanupService` | `Donation` bridge, `User` bridge | `dataCleanupService`; `PendingSignup`'s second reader |
+| **3.3** | `auth.js` + `users.js` + `middleware/` | — | stop minting `legacy_id` (AE1b) once 3.2 lands |
+| **3.4** | `payment.js` | — | — |
+| **3.5** | `admin.js` | — | **`Category`, `Donation` and `User` bridges all deleted** |
+| **3.6** | Mongoose removal | — | AE1(a) step 1, then MongoDB |
+
+**What changed from SPEC-3, and why.**
+
+- `admin.js` moves from third to **last**. Under "size of the file" it was
+  third; under read dependency it is the LAST READER of all three bridged
+  collections, so putting it last is what allows every bridge to die in one
+  package instead of lingering.
+- `auth.js` + `middleware` moves from fourth to **second**. It is the largest
+  concentration of open security findings — SEC-03, SEC-04's wiring, SEC-05,
+  SEC-08, SEC-10, SEC-13 — and nothing in the read graph requires it to wait.
+  Sequencing by dependency happens to fix the security findings sooner, which is
+  a bonus rather than the reason.
+- `payment.js` stays late. Highest risk, best coverage, and by then the pattern
+  is proven. That reasoning survives the re-derivation intact.
+
+**Bridge count: two new, three alive at peak.**
+
+Two NEW bridges (`User`, `Donation`), which is the threshold. The third is
+`Category`, already built. All three are alive together from 3.2 until they are
+all deleted in 3.5.
+
+**They are three INSTANCES OF ONE MECHANISM, not three bespoke components**, and
+that distinction is what makes three acceptable where three unrelated shims
+would not be. Each is: validate the id shape, try MySQL, fall back to MongoDB,
+log and count. The recommendation is to generalise `categoryBridge.js` into one
+parameterised module in 3.2 rather than copy it twice — one place where the
+CastError guard lives, one `fallbackCount()` covering all three, and one file to
+delete in 3.5.
+
+**If that generalisation turns out not to fit** — if `User` or `Donation`
+needs materially different resolution logic rather than different parameters
+— that is the signal to stop and reconsider the shape of the middle of this
+phase, rather than to write a second and third bespoke bridge.
+
+### A note for 3.2's characterisation tests
+
+`donations.js:265` requested `populate("category", "name description price")`.
+Two of those three are not fields on the Category schema, so that call only ever
+returned `name` and `_id`. **Audited: it was the only one.** The three remaining
+populate calls all request `"name email"` on `User`, and both fields exist.
+
+The lesson stands regardless of the count: **3.2's characterisation tests must
+pin what the endpoint ACTUALLY returned, not what the code appears to ask for.**
+Reading the field list in a `populate()` call is reading an intention; only
+running it shows what the client received.

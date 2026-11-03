@@ -3,6 +3,11 @@ const router = express.Router();
 const User = require("../models/User");
 const Donation = require("../models/Donation");
 const Category = require("../models/Category");
+// TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
+// this file is not migrated until a later package, so category reads go through
+// the bridge, which tries MySQL first and falls back to MongoDB with a warning.
+const categoryBridge = require("../services/categoryBridge");
+
 const adminAuth = require("../middleware/adminAuth");
 const bcrypt = require("bcryptjs");
 const { triggerManualCleanup, cleanupOldDonations, cleanupInactiveUsers } = require("../services/dataCleanupService");
@@ -16,7 +21,10 @@ const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 router.get("/stats", async (req, res) => {
   const users = await User.countDocuments();
   const donations = await Donation.countDocuments();
-  const categories = await Category.countDocuments();
+  // Via the bridge (ADR-050). Note this now counts ACTIVE categories only,
+  // because ADR-004 made deletion a soft delete - an archived category is gone
+  // as far as an admin is concerned, which is what this tile reports.
+  const categories = await categoryBridge.countCategories();
   const approved = await Donation.countDocuments({ status: "approved" });
   res.json({ users, donations, categories, approved });
 });

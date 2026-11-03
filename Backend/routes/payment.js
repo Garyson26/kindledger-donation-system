@@ -4,6 +4,11 @@ const crypto = require('crypto');
 const payuConfig = require('../config/payu');
 const Donation = require('../models/Donation');
 const Category = require('../models/Category');
+// TEMPORARY (ADR-050, deleted in package 3.6). `Category` now lives in MySQL;
+// this file is not migrated until a later package, so category reads go through
+// the bridge, which tries MySQL first and falls back to MongoDB with a warning.
+const categoryBridge = require('../services/categoryBridge');
+
 
 // Helper function to generate PayU hash
 function generateHash(data) {
@@ -113,7 +118,13 @@ router.post('/initiate', async (req, res) => {
     }
 
     // Server-side amount calculation — never trust client-supplied amount (BE-CRIT-01)
-    const dbCategory = await Category.findById(category);
+    //
+    // Via the bridge (ADR-050): categories moved to MySQL in package 3.1 and
+    // this file does not migrate until 3.5. resolveCategory NEVER THROWS on a
+    // malformed id - the previous Category.findById raised a CastError, so a
+    // junk category id produced a 500 here rather than the 400 below. That is
+    // the SEC-14 shape on the pricing path.
+    const dbCategory = await categoryBridge.resolveCategory(category);
     if (!dbCategory) {
       return res.status(400).json({ error: 'Invalid category' });
     }
@@ -603,9 +614,12 @@ router.get('/status/:txnid', async (req, res) => {
     const { txnid } = req.params;
 
     // Find donation by transaction ID
-    const donation = await Donation.findOne({ transactionId: txnid })
-      .populate('category')
+    const donationDoc = await Donation.findOne({ transactionId: txnid })
       .populate('userId', 'name email');
+    // populate('category') removed: a category created after package 3.1 has no
+    // MongoDB row, so populate would resolve it to null and the receipt would
+    // show no category at all.
+    const donation = donationDoc ? await categoryBridge.attachCategories(donationDoc) : null;
 
     if (!donation) {
       return res.status(404).json({
