@@ -5529,7 +5529,7 @@ findings rather than configuration.
 | CB2-7 | **A MongoDB credential was set on the FRONTEND project** (Atlas Marketplace integration, production). Vite only bundles `VITE_*`, so it was not shipped to browsers | Low | Not carried over |
 | CB2-8 | **Four secrets were stored as readable, not Sensitive.** Vercel flagged `MONGODB_URI`, `JWT_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` as `readable-secret` | Low | New project: create all as Sensitive |
 | CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **UNPINNED.** Queue for a follow-up: read from branding |
-| CB2-10 | **`npm run test:bridge` points at a test deleted in 3.6** | Trivial. Fails loud | **UNPINNED.** Remove the script line |
+| CB2-10 | **`npm run test:bridge` points at a test deleted in 3.6** | Trivial. Fails loud | **CLOSED in E (#31), CM1.** The script and its CI step were removed with the bridge. CI found it the first time the PayU job could start |
 
 **And one correction to how ENV-02 had been described.** "The stack refuses to
 start without `PAYU_BASE_URL`" is true of **compose only**. Vercel has no
@@ -5661,6 +5661,25 @@ E (#31), where the test first exists.
 | PR 1 (#24) | server-guard, schema, drift gate (twice) | 14/14, 30/30, clean |
 | B (#28) | data-layer (with the Redis store assertion) | 26/26 |
 | B (#28) | payment-callbacks, auth-reset, trust-proxy | 17/17, 6/6, 4/4 |
+
+### What the first full CI run found (CM1)
+
+Fixing CI-01 let every step run for the first time. Five things surfaced that
+local and in-container runs could not see. Each was fixed in the PR whose range
+introduced it, and each PR was re-run until green:
+
+| Where | Finding | Fix |
+|---|---|---|
+| D (#30) | **A vacuous test.** `payment-characterisation`'s "QUIRK (SEC-19)" asserted `details: error.message` was present. 3.4 removed the leak and left a comment saying so, and the test's regex matched the comment. It passed while unable to tell fixed from broken | Flipped to "SEC-19 CLOSED: no payment handler returns err.message to the client", on comment-stripped source with a non-vacuity check. Checked both ways: clean on the branch, both of `main`'s leaks caught |
+| E (#31) | CB2-10: the bridge test's CI step and script outlived the bridge | Removed |
+| E (#31), F (#32) | **The whole-suite runners hard-coded MongoDB at `mongo:27017`**, the compose hostname, so on a runner every MongoDB suite failed there while passing in its own step | The server comes from `TEST_MONGODB_URI`; the database name stays derived per suite; an Atlas host is refused. E also gets F's `null-minted` database exception, which it lacked |
+| E (#31) | **`signup-timing` and `password-timing` never set `JWT_SECRET`**, so `config/jwt.js` threw before either measured anything | Both set the same test-only value as every other suite |
+| F (#32) | **`branding.test.js` uploads into `/var/lib/kindledger/uploads`**, which only the api container's Dockerfile creates. Two upload tests got a 500 | A scratch directory unless `UPLOADS_DIR` is supplied, as `logo-upload.test.js` already did |
+
+**The class:** three of the five passed only inside the api container, whose
+environment and filesystem supplied what the suite assumed. "Every suite green"
+before CM1 meant "green in one environment". The runners now print the
+failing assertions under a FAIL, so the next one of these explains itself.
 
 Every count above reports 0 skipped and 0 todo. The PR descriptions carry
 the counts for every branch.
