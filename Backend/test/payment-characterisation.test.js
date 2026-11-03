@@ -707,18 +707,29 @@ test('/status 404s an unknown transaction, and does not 500 on a strange one', a
   assert.equal(weird.status, 404);
 });
 
-test('QUIRK (SEC-19): the webhook and cancel handlers return err.message', async () => {
-  // `details: error.message` at payment.js:443,475. Pinned by reading the
-  // shape the handlers produce rather than by forcing an internal error, which
-  // would assert the error and not the disclosure.
-  const src = require('node:fs').readFileSync(
+test('SEC-19 CLOSED: no payment handler returns err.message to the client (CHANGED IN 3.4)', async () => {
+  // WAS: a QUIRK test asserting `details: error.message` was present. Package
+  // 3.4 removed it and left a comment saying so, and the test's regex then
+  // matched the COMMENT - so it kept passing while asserting a disclosure that
+  // no longer existed. A vacuous test (BH3's class), found in CM1.
+  //
+  // Read with comments stripped, so prose can neither satisfy nor break it.
+  // Pinned by reading the source rather than by forcing an internal error,
+  // which would assert the error and not the disclosure. The one legitimate
+  // use of the message is server-side logging.
+  const raw = require('node:fs').readFileSync(
     require('node:path').join(__dirname, '..', 'routes', 'payment.js'),
     'utf8'
   );
-  assert.ok(
-    /details:\s*error\.message/.test(src),
-    'CURRENT: at least one handler returns the internal error text to the client'
-  );
+  const code = raw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((l) => !/^\s*\/\//.test(l));
+  // Not vacuous: stripping must leave the route handlers behind.
+  assert.ok(code.some((l) => /router\.(post|get)\(/.test(l)), 'stripping removed the code itself');
+
+  const leaks = code.filter((l) => /\b(err|error)\.message\b/.test(l) && !/console\.(error|warn|log)\(/.test(l));
+  assert.deepEqual(leaks, [], 'a handler sends internal error text to the client');
 });
 
 // =============================================================================
