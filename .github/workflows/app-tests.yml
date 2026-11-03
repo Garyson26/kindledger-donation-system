@@ -43,6 +43,30 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # 0. No committed credentials (BJ4, CH5)
+  # ---------------------------------------------------------------------------
+  # Its own job, with no services, on every push to every branch. The
+  # repository is public, so a commit is public the moment it lands, and this
+  # stopped being a Phase 6 gate. It used to be a step inside the PayU job
+  # below, which has a MySQL service and so never started (CI-01). That means
+  # it never actually ran. It needs only node and git. Do not give this job a
+  # service, a matrix entry or a `needs:`: anything that can stop it starting
+  # silently turns the check off again.
+  no-secrets:
+    name: No committed credentials
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: No committed credentials (BJ4)
+        working-directory: Backend
+        run: npm run test:no-secrets
+
+  # ---------------------------------------------------------------------------
   # 1. PayU callbacks and reset controls (MongoDB data layer)
   # ---------------------------------------------------------------------------
   app-tests:
@@ -264,12 +288,9 @@ jobs:
         working-directory: Backend
         run: npm run test:password-timing
 
-      # BJ4. No tracked file a self-hoster deploys may carry a working
-      # credential. `.env.example` being clean is one file staying
-      # well-written; this is the control. Needs no services.
-      - name: No committed credentials (BJ4)
-        working-directory: Backend
-        run: npm run test:no-secrets
+      # BJ4's no-committed-credentials check moved to its own job, no-secrets,
+      # at the top of this file (CH5). It needs no services, and here it sat
+      # behind a MySQL container that never starts (CI-01).
 
       # SPEC-5 5.2. The branding singleton had zero callers from Phase 1a until
       # now (AS4), so these tests establish the shape rather than defend it -
