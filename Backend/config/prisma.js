@@ -40,17 +40,37 @@ const { PrismaClient } = require('@prisma/client');
 // rather than passed as an option.
 const DEFAULT_CONNECTION_LIMIT = 10;
 
+// -----------------------------------------------------------------------------
+// Idle lifetime (CX1) - LONG, not short, on a host that caps connections PER HOUR
+// -----------------------------------------------------------------------------
+// Hostinger's shared MySQL counts every new connection against an hourly
+// allowance. A pooled connection that Prisma retires after a quiet spell is
+// re-opened by the next request, and that re-open is billed. Measured against
+// mariadb:11.8 with connection_limit=1: an idle lifetime of 3 s turned one
+// connection into two across a 5 s pause; 3600 s kept it at one. Request count
+// did not matter at all - 200 queries, sequential or 50 at a time, used one.
+//
+// So the setting that saves connections is the LONGEST the server tolerates:
+// just under its wait_timeout, after which the server closes the socket itself
+// and a reconnect is unavoidable. A short idle timeout is the right answer to a
+// cap on SIMULTANEOUS connections and the wrong one here (CY1-4).
+//
+// No default: the right number is the host's wait_timeout, which is a fact
+// about one installation (BV2). Unset means Prisma's own default.
+function appendParam(url, name, value) {
+  if (value === undefined || value === '') return url;
+  // Do not override a value already written into the URL.
+  if (new RegExp(`[?&]${name}=`).test(url)) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}${name}=${value}`;
+}
+
 function buildDatabaseUrl() {
   const raw = process.env.DATABASE_URL;
   if (!raw) return undefined;
 
-  const limit = process.env.PRISMA_CONNECTION_LIMIT || String(DEFAULT_CONNECTION_LIMIT);
-
-  // Do not override an explicit connection_limit already in the URL.
-  if (/[?&]connection_limit=/.test(raw)) return raw;
-
-  const sep = raw.includes('?') ? '&' : '?';
-  return `${raw}${sep}connection_limit=${limit}`;
+  let url = appendParam(raw, 'connection_limit', process.env.PRISMA_CONNECTION_LIMIT || String(DEFAULT_CONNECTION_LIMIT));
+  url = appendParam(url, 'max_idle_connection_lifetime', process.env.PRISMA_MAX_IDLE_CONNECTION_LIFETIME);
+  return url;
 }
 
 // -----------------------------------------------------------------------------
