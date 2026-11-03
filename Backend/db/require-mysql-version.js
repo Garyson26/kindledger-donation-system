@@ -25,7 +25,7 @@
  *   back to a different collation. A fallback to a case-SENSITIVE collation
  *   silently reopens the duplicate-account gap the unique index exists to
  *   close; a fallback to an accent-INSENSITIVE one silently merges
- *   jose@x.com with josé@x.com. Both are data-integrity failures that present
+ *   jose@x.com with its e-with-acute variant. Both are data-integrity
  *   as ordinary application bugs months later.
  *
  * Once this repository is public, NGOs will run it against whatever their host
