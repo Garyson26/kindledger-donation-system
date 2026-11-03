@@ -19,7 +19,8 @@
     "migrate:dev": "node db/no-migrate-dev.js",
     "prisma:migrate:dev": "node db/no-migrate-dev.js",
     "db:check-drift": "node db/check-drift.js",
-    "test:guard": "node --test test/server-guard.test.js"
+    "test:guard": "node --test test/server-guard.test.js",
+    "test:sec03": "node --test test/sec-03-injection.test.js"
   },
   "keywords": [],
   "author": "",
