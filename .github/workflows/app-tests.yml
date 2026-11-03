@@ -479,7 +479,18 @@ jobs:
       # would measure the DECLARATION; this measures the BEHAVIOUR - the stack
       # will not start. It runs BEFORE the .env is written, which is the only
       # moment the variable is genuinely absent.
+      #
+      # Every OTHER required variable is supplied here. Compose reports only the
+      # first one it finds missing, and with nothing set that is DATABASE_URL,
+      # so without these the step tested the wrong guard and failed on a clean
+      # runner. It passed locally only because the checkout had a .env.
       - name: The stack REFUSES to start without PAYU_BASE_URL
+        env:
+          MYSQL_ROOT_PASSWORD: ci-only
+          MYSQL_PASSWORD: ci-only
+          DATABASE_URL: mysql://ci:ci@mysql:3306/ci
+          JWT_SECRET: ci-only-placeholder-not-a-secret-32chars
+          ADMIN_CREATION_KEY: ci-only
         run: |
           if docker compose config >/dev/null 2>&1; then
             echo "FAILED: compose accepted a configuration with no PAYU_BASE_URL."
