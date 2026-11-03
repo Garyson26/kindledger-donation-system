@@ -2648,10 +2648,37 @@ parameterised module in 3.2 rather than copy it twice — one place where the
 CastError guard lives, one `fallbackCount()` covering all three, and one file to
 delete in 3.5.
 
-**If that generalisation turns out not to fit** — if `User` or `Donation`
-needs materially different resolution logic rather than different parameters
-— that is the signal to stop and reconsider the shape of the middle of this
-phase, rather than to write a second and third bespoke bridge.
+**If that generalisation turns out not to fit**, stop rather than adding a flag.
+AF2 sharpened the trigger, because "materially different logic" is a judgement
+call and judgement calls under delivery pressure resolve towards one more
+parameter. The line is now explicit:
+
+**These are PARAMETERS. Add them.**
+
+- different field allowlists per entity
+- different id shapes (ObjectId, uuid, a compound key)
+- different table or collection names
+- different fallback behaviour when the id is absent
+
+**These are a SECOND MECHANISM. Stop and report before implementing.**
+
+- **any entity needing to consult BOTH stores and MERGE the results.** The
+  current bridge is first-match-wins: MySQL answers, or Mongo does. Merging
+  means reconciling two versions of one record, which is a conflict-resolution
+  policy, not a lookup.
+- **any entity needing a WRITE path through the bridge.** A read-through bridge
+  has no consistency problem, because the worst case is a stale read from a
+  store that is about to be deleted. A write-through bridge has to decide what
+  happens when one store accepts and the other refuses, and there is no
+  transaction spanning MySQL and MongoDB to make that decision safe.
+- **any entity needing ordering or consistency guarantees ACROSS the stores.**
+  "Newest wins", "this must be visible before that", or any read-your-writes
+  expectation spanning both. None of those can be provided by a helper that
+  looks in one store and then the other.
+
+Each of those three is a distributed-systems problem wearing the costume of a
+lookup helper. The bridge is acceptable precisely because it has none of them:
+it is a read, first-match-wins, with a store that is going away.
 
 ### A note for 3.2's characterisation tests
 
@@ -2664,3 +2691,435 @@ The lesson stands regardless of the count: **3.2's characterisation tests must
 pin what the endpoint ACTUALLY returned, not what the code appears to ask for.**
 Reading the field list in a `populate()` call is reading an intention; only
 running it shows what the client received.
+
+---
+
+## ADR-053 — "The scheduler does not run" was allowed to stand for "the code does not execute"
+
+**Status** Accepted — AF4. A reasoning failure, recorded because the fix is
+cheap and the pattern is not.
+
+`services/dataCleanupService.js` was treated as dead code for several rounds by
+everyone involved, on the strength of BUG-04.
+
+**BUG-04 says the CRON never fires.** `vercel.json` points a scheduled job at
+`POST /api/admin/cleanup/trigger`, that route sits behind `adminAuth`, and
+Vercel's cron sends no `Authorization` header — so the scheduled invocation
+gets a 401 every day and the retention purge has never run. All true.
+
+**None of it says the code cannot execute.** `routes/admin.js:13` imports
+`triggerManualCleanup`, `cleanupOldDonations` and `cleanupInactiveUsers`, and
+`POST /api/admin/cleanup/trigger` calls the first of them. An authenticated
+admin reaches it through the API today. The function deletes donations and
+users.
+
+**The two claims and why one was read as the other.** "The scheduler does not
+run" is a statement about ONE CALLER. "The code does not execute" is a statement
+about ALL CALLERS. The first was established with evidence and the second was
+inherited from it without anyone noticing the step — including in this
+project's own analysis, repeatedly, across several packages.
+
+What made it durable is that the inference is usually right. A cron-driven
+service whose cron is broken normally IS dead, so the conclusion looked like it
+had been checked. It survived a security review, a phase-2 readiness note and a
+finding map before a read-dependency analysis — which enumerates CALLERS
+rather than reasoning about purpose — turned it up mechanically.
+
+**The generalisable form: a bug that disables one entry point does not
+establish that a module is unreachable.** Establishing that requires
+enumerating importers, which is a grep, not an argument. The same shape would
+hide a live path to any destructive operation behind any unrelated defect.
+
+**Consequences** `dataCleanupService.js` is retired in package 3.2 rather than
+deferred to 3.6: `services/scheduler.js` already reimplements its work against
+MySQL, so the retirement is a repoint of three admin endpoints, and it removes a
+reader of `Donation`, `User` and `PendingSignup` at once. The reachability
+finding it concealed is recorded as BUG-10 in the remediation map.
+
+---
+
+## ADR-054 — The retention purge keys on `donated_at`, not `created_at`
+
+**Status** RESOLVED — AH2. Changed, not carried into Phase 4 unresolved.
+
+**The decision: a ten-year retention policy on donation records means ten years
+from the DONATION.** `purgeOldDonations` now keys on `donated_at`, which is
+also the column every report and admin filter already uses. Stated here as a
+deliberate change rather than left to read as inherited behaviour.
+
+**And it removes a failure mode rather than mitigating one.** This is the
+sharper half. `created_at` is `DEFAULT CURRENT_TIMESTAMP(3)`, so an ETL that
+does not set it explicitly stamps every migrated donation with the import date.
+A purge keyed on `created_at` would then find nothing until 2036 — **silently,
+because "no rows older than ten years" is exactly what a healthy system
+reports.** A control that cannot be observed failing is worse than one that
+fails loudly: there is no symptom to notice, no alert to fire, and the first
+evidence would be a data-retention question nobody could answer. Keying on
+`donated_at` means the ETL cannot produce that state at all, which is a better
+answer than a check that would have caught it.
+
+`repositories/donations.create` keeps its `createdAt` support regardless — the
+ETL still needs to preserve row timestamps and should not reach past the data
+layer to do it.
+
+The original analysis follows, kept because it records what was weighed.
+
+---
+
+**Status of the original entry** Open — AG1b. Superseded by the decision
+above.
+
+The purge deletes rows where **`created_at`** is older than ten years. That
+matches the legacy `dataCleanupService` it replaces and is deliberately
+unchanged, but two things follow that are not obvious.
+
+**1. `created_at` is not `donated_at`.** The schema carries both:
+`donated_at` is commented "Mongo `date`. The field all reports filter on", and
+every admin filter and chart uses it. The retention policy therefore keys on
+when the ROW WAS WRITTEN while every report keys on when the DONATION
+HAPPENED. For rows created through the application those are minutes apart and
+the distinction never shows. For migrated rows they can differ by years.
+
+Which one a ten-year retention policy *should* use is a real question and not
+mine to settle: "we keep donation records for ten years" reads as being about
+the donation. Left as `created_at` for now because changing it silently would
+be worse than either answer.
+
+**2. If the ETL stamps `created_at` at import time, this job becomes a no-op
+for a decade.** `created_at` is `DEFAULT CURRENT_TIMESTAMP(3)`, so an ETL that
+does not set it explicitly gives every migrated donation today's date. The
+purge then finds nothing until 2036 — silently, because "no rows older than
+ten years" is exactly what a healthy system reports. `repositories/donations.create`
+now accepts `createdAt` so the ETL has no reason to reach past the data layer.
+
+**Phase 4 verification harness must assert:** no migrated row has `created_at`
+or `donated_at` outside a sane range, and **report** any it finds rather than
+correcting them (AG1b). A date that cannot be right is evidence about the
+migration, and a harness that quietly repairs it destroys the only signal that
+something went wrong.
+
+**Already built (AG1a):** `purgeOldDonations` bounds the window at BOTH ends
+against `PLAUSIBLE_FLOOR` (2000-01-01), counts rows outside it as
+`implausible`, refuses to delete them, and warns. Tested with a zero-epoch row
+and a future-dated row, both asserted to survive a real purge.
+
+---
+
+## ADR-055 — Read dependency is not the only ordering constraint: FOREIGN KEY DIRECTION is the other, and it reverses packages 3.2 and 3.3
+
+**Status** Open — **blocks package 3.2 as sequenced. Needs approval to swap.**
+
+AD2 re-derived the package order by READ dependency and that analysis stands.
+It is also **incomplete**, and package 3.2 hit the gap on its first real
+attempt.
+
+**The constraint AD2 missed.** `donations.user_id` is
+`BIGINT UNSIGNED NULL` with `CONSTRAINT fk_donations_user FOREIGN KEY (user_id)
+REFERENCES users (id)`. Users do not migrate until 3.3. So **a donation by a
+registered user cannot be written to MySQL in 3.2** — the referenced row does
+not exist and InnoDB refuses the insert. Guest donations (`user_id NULL`) are
+fine; every registered donation is not.
+
+This is not a read problem, so no amount of read-dependency analysis finds it.
+Reads can be bridged — that is what a read-through bridge IS. **A foreign key
+cannot be bridged**, because the constraint is enforced inside one database
+against rows that are in another.
+
+**The three ways out, and two are closed.**
+
+- **Store `user_id` as NULL during 3.2 and backfill in 3.3.** Every donation
+  made in that window loses its attribution, and donor attribution is the
+  substance of the record. Refused.
+- **Shadow-create a MySQL user row whenever a donation references one.** This
+  is **exactly the AF2 stop trigger**: "any entity needing a WRITE path through
+  the bridge". It also needs a consistency guarantee across the two stores, the
+  third trigger. Two of the three. Refused, and reported rather than
+  implemented, which is what AF2 asked for.
+- **Swap 3.2 and 3.3.** Migrate `auth.js` + `users.js` + `middleware/` first,
+  so `users` is populated before anything references it.
+
+**Recommended order:**
+
+| Pkg | File(s) | Was |
+|---|---|---|
+| 3.2 | `auth.js` + `users.js` + `middleware/` | 3.3 |
+| 3.3 | `donations.js`, and retire `dataCleanupService` | 3.2 |
+| 3.4 | `payment.js` | unchanged |
+| 3.5 | `admin.js` | unchanged |
+| 3.6 | Mongoose removal | unchanged |
+
+Nothing else moves, and the read-dependency reasoning is untouched — the swap
+is compatible with it, because neither file reads data the other writes in a
+way that a bridge cannot cover. The `User` bridge is now introduced in 3.2 as
+part of the user package rather than by the donations package, which is also
+where it more naturally belongs.
+
+**The corrected principle, stated in full:**
+
+> Sequence by READ DEPENDENCY, subject to FOREIGN KEY DIRECTION. A table cannot
+> migrate before the tables it references. Reads can be bridged; references
+> cannot.
+
+The FK order in this schema is: `categories` and `users` first (neither
+references anything), then `donations` (references both), then
+`donation_payment_details` (references `donations`). Package 3.1 migrated
+`categories`, which is why it worked. `users` is the other root and should
+therefore have been second on this criterion as well as on the security one.
+
+**How it was found, which is the argument for the coverage rule.** Not by
+reading the schema — it had been read several times — but by attempting the
+migration and asking what a `Donation` row would actually contain. The
+characterisation baseline for 3.2 was already written and green, so the cost of
+discovering this was one analysis rather than a broken package.
+
+**What is already done and survives the swap:** the 24-scenario donations
+characterisation baseline (it pins the CURRENT Mongoose behaviour, which the
+swap does not change), AG1a's purge floor, and the `createdAt` support in
+`repositories/donations.create`.
+
+---
+
+## ADR-056 — A read-through bridge does not make a route migration additive. Package 3.1 would empty the donation form.
+
+**Status** Open — **CRITICAL. Blocks package 3.2, and package 3.1 must not be
+deployed as it stands.**
+
+### What was found
+
+Probed directly against the running stack: a category that exists ONLY in
+MongoDB — which is **every category in production**, because no ETL has run:
+
+```
+GET    /api/categories       ->  []                        it is not listed at all
+PUT    /api/categories/:id   ->  404 Category not found
+DELETE /api/categories/:id   ->  404 Category not found
+```
+
+**Deployed as it stands, package 3.1 empties the donation form.** Not a subtle
+regression — the list endpoint that drives the public donation page returns an
+empty array, so no donation can be started for anything. Every admin edit and
+delete answers 404 for categories that plainly exist.
+
+The same defect then appeared immediately in package 3.2: `PUT
+/api/users/profile` answered 500, because `repositories/users.updateProfile`
+addresses a MySQL row for a user who is still in MongoDB.
+
+### The reasoning error
+
+**The bridge covers the wrong direction.** It was built to let UNMIGRATED
+readers resolve a record by id after its entity migrated — `payment.js`
+pricing a donation, `donations.js` populating a listing. It does that correctly.
+
+It does nothing for the MIGRATED ROUTE'S OWN paths:
+
+| Path | Covered by the bridge? |
+|---|---|
+| Another file resolving one record by id | **Yes.** This is what it was built for |
+| The migrated route's LIST endpoint | **No.** It queries MySQL; Mongo rows are invisible |
+| The migrated route's UPDATE / DELETE | **No.** It addresses a MySQL row that does not exist |
+| The migrated route's CREATE | Works, but only creates records the old readers then need the bridge for |
+
+"Additive" was taken to mean "the new layer is added alongside the old one".
+What it has to mean is "**every existing record still behaves as it did**", and
+a route whose reads and writes address only the new store cannot satisfy that
+while the records are in the old one.
+
+### Why the tests did not catch it, which is the more important half
+
+Every fixture in `categories-characterisation.test.js` is created through
+`store.createCategoryDirect`, which after the seam switch writes to **MySQL**.
+So the suite migrated its own data along with the route and then asserted the
+route works on it.
+
+**22 scenarios, green before and after, and not one of them exercised a record
+that predated the migration.** The coverage rule was followed to the letter and
+still missed the defect, because the rule says to pin the endpoint's behaviour
+and says nothing about the PROVENANCE of the data it is pinned against.
+
+This is the same shape as AE3's requirement for the fallback check — "a
+database of only new records cannot take the fallback path, so it proves
+nothing" — which was written about the bridge's exit criteria and applies with
+equal force to every characterisation suite. It was not generalised at the time,
+and this is the cost.
+
+### The constraint
+
+> A route's LIST and WRITE paths cannot migrate before that entity's DATA has
+> migrated. Reads of a single record by id can be bridged. Lists, updates and
+> deletes cannot, because they address a store rather than a record.
+
+This sits alongside the two already recorded:
+
+1. Read dependency (AD2).
+2. Foreign key direction (ADR-055).
+3. **Data location (this ADR).** The strictest of the three, and the one that
+   actually governs.
+
+### Options
+
+**A. Per-entity ETL inside each package.** Before switching a route, copy that
+entity's rows from MongoDB to MySQL, preserving ids in `legacy_id`. Phase 4 work
+pulled forward, one entity at a time.
+*Cost:* each package grows an ETL step, and rows written to MongoDB after the
+copy but before the switch are lost unless the switch is a deployment event with
+a freeze. That is a cutover, per entity, five times.
+
+**B. Dual-read in the migrated route.** The route lists from both stores and
+merges; updates locate the record in whichever store holds it.
+*Cost:* **this is the AF2 stop condition, twice** — merging results from both
+stores, and a write path that must choose a store. Refused on the same grounds
+as before, and reported rather than implemented.
+
+**C. One cutover for all entities, at the start of Phase 3.** Run the full ETL
+once, then migrate routes against data that is already in MySQL. The bridge
+still covers unmigrated readers resolving by id.
+*Cost:* Phase 4 moves before Phase 3, which is a re-plan of the remaining
+project rather than a package decision. It also makes the ETL rehearsal a
+prerequisite, which is currently blocked on production Mongo credentials (J3).
+
+**D. Revert the route migrations; keep the data layer, the bridges and every
+test.** Phase 3 becomes finding remediation on the Mongoose stack, and the
+route switch happens after the Phase 4 cutover.
+*Cost:* 3.1's migration is undone. Its findings (SEC-19, BUG-08, BUG-09, the
+falsy-amount check, ADR-004) would need reapplying to the Mongoose handler.
+Everything else built so far survives.
+
+### Recommendation
+
+**C**, with the ordering re-derived: the ETL is the thing every route migration
+depends on, and it is currently scheduled after all of them. That is the same
+error as sequencing by file size — the dependency runs the other way from the
+plan.
+
+**C is not a package decision and I am not taking it.** It reorders two phases
+and makes a blocked dependency (J3, production Mongo credentials) critical-path.
+
+### Immediate status
+
+- **Package 3.1 is merged into `phase-2-data-layer` and MUST NOT reach
+  production** in its current form. The branch has never been deployed, so
+  nothing is broken in production today.
+- **Package 3.2 is stopped** at the same wall, one file in.
+- The data layer, both bridges, the repositories and all 150+ tests are
+  unaffected by whichever option is taken. Only the three migrated route files
+  are in question.
+
+---
+
+## ADR-057 — An entity whose WRITER and READERS are in different packages cannot be migrated by either package alone
+
+**Status** Accepted (package 3.3). **Supersedes nothing; it is ADR-056 taken one
+step further.**
+
+### Context
+
+ADR-056 established that a read-through bridge does not make a route migration
+additive, because a bridge covers reads BY ID and not LIST or WRITE paths. That
+was found on categories, where the same file both read and wrote the entity, so
+migrating the file kept reads and writes together and the constraint reduced to
+"migrate the data first".
+
+**Donations do not have that property.** The entity is written by
+`routes/payment.js` (3.4) and read by `routes/donations.js` (3.3) and
+`routes/admin.js` (3.5). Whichever migrates first, the store holding new rows
+and the store being read are different ones for as long as the gap is open.
+
+It is symmetric, and that is the part worth stating, because the instinct on
+finding it is to reorder:
+
+- **Readers first** (the 3.3 order): the ETL's history is in MySQL, today's
+  donations are in MongoDB, the admin console shows history and nothing else.
+- **Writer first**: MySQL has everything, `donations.js` reads MongoDB, the
+  admin console shows a subset that stops growing.
+
+Neither is better. A bridge fixes neither, for ADR-056's reason: the admin
+console is a LIST.
+
+### Decision
+
+**Packages that split one entity's writer from its readers MUST reach `main`
+together.** The work stays split for review; the merge does not.
+
+The precedent already exists: package 3.2 shipped `auth.js`, `users.js` and both
+middlewares as one unit, for this reason, before the reason had been named.
+
+### Consequences
+
+- 3.3 and 3.4 merge as a unit. 3.5 (`admin.js`) is a READER only, and its
+  donation reads are counts on a dashboard, so it does not join the unit - but
+  its dashboard tile is stale in the same way until it migrates, which is
+  BUG-03's existing territory rather than a new finding.
+- The smallest alternative considered and NOT taken: move `payment.js`'s
+  donation write path into 3.3 and leave the rest of the file in 3.4. It is
+  correct and it splits a file across packages, which the sequence has avoided
+  so far because a package boundary that does not match a file boundary makes
+  "what did this package change" unanswerable from `git show`.
+- **The ordering constraints in AK2 gain a fourth, below the other three:**
+  where an entity's writer and readers are in different packages, those packages
+  are one merge. It sits below the three because it does not change the ORDER,
+  it changes the GRANULARITY.
+
+### What this does not say
+
+It does not say the migration is riskier than assessed. It says one specific
+window - donations taken and not shown - must not be opened on production, and
+the cost of closing it is holding one branch for one more package.
+
+---
+
+## ADR-058 — A pre-flight finding the loader will also refuse must not be overridable
+
+**Status** Accepted (package 3.3). Amends the Phase 4a ETL.
+
+### Context
+
+The ETL's pre-flight classifies findings as FATAL (not overridable), BLOCKING
+(overridable with `--i-have-reviewed-the-preflight`) and RECORD. The override
+exists so an operator can knowingly accept a finding and proceed.
+
+Running the loader for real against donation data - the first time a BLOCKING
+finding had actually been overridden - produced this:
+
+    [BLOCKING] implausible-dates ... 1 donation(s)
+    (override supplied)
+    loaded: 2 categories, 1 user, 4 of 5 donations
+    ETL FAILED: donation ...: implausible date "1970-01-01T00:00:00.000Z"
+
+**MySQL was left part-populated.** `migrate.js` refuses an implausible date
+rather than inventing one, which is correct and deliberate (ADR-054), but a
+`throw` fails the RUN, not the ROW. The comment at that line said "the row still
+fails here", which is what the author intended and is not what the code does.
+
+Checked rather than assumed: **every BLOCKING finding is one the loader also
+refuses.** Implausible dates throw; an orphaned category reference throws; two
+case-variant emails collapse onto `uq_users_email` and the second insert throws.
+There is currently no BLOCKING finding the loader would accept.
+
+So overriding a BLOCKING finding could never load the rows it was overriding. It
+could only convert a clean refusal, with nothing written, into a partial load -
+strictly worse, in every case the check can produce. **The flag was offering a
+choice that did not exist.**
+
+### Decision
+
+A finding declares `loaderRefuses`. Findings carrying it are **refused before
+anything is written**, and the override does not apply to them. The report says
+so explicitly, names them, and directs the operator at the SOURCE data.
+
+The override is KEPT rather than deleted, because a BLOCKING-but-loadable
+finding is a coherent thing that may be added later. Today it correctly applies
+to none.
+
+### Consequences
+
+- The remedy is to fix the source data and re-run. The load is idempotent by
+  `legacy_id`, so a re-run resumes rather than duplicates - which is what makes
+  "refuse and re-run" cheap enough to be the only path.
+- **This does not make the loader transactional, and should not be read as
+  doing so.** An unexpected error mid-load still leaves partial state; the
+  recovery is the same re-run. Wrapping a multi-entity load of a production-sized
+  dataset in one transaction is not practical, and idempotency was chosen over it
+  deliberately in 4a.
+- It belongs to the class in AP4: a control that is correct - refusing to guess
+  a date - producing a symptom somewhere else, here a half-migrated database
+  that reads like a loader bug.

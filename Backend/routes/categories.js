@@ -63,26 +63,44 @@ function parsePaging(query) {
 }
 
 /**
- * The external identifier (ADR-051).
+ * `mintObjectId()` IS GONE (AE1-b, fired by package 3.4).
  *
- * A newly minted ObjectId, generated here rather than by Mongoose so that this
- * file imports no Mongoose. The layout is the documented one: 4-byte seconds,
- * 5-byte random, 3-byte counter. Uniqueness is additionally guaranteed by
- * `uq_categories_legacy_id`.
+ * This file minted a 24-hex external identifier for every new category, for one
+ * reason: `Donation.category` was a Mongoose ObjectId REF, and a category with
+ * only a uuid could not be referenced by one. A category created here after
+ * package 3.1 would otherwise have been unusable by the live donation write
+ * path.
+ *
+ * THE TRIGGER WAS THE DONATION WRITE PATH, NOT THIS FILE, AND THAT DISTINCTION
+ * COST A PACKAGE. It was recorded as "remove it once donations.js has migrated"
+ * - right concept, wrong file. `donations.js` never successfully wrote a
+ * donation (BUG-01); `routes/payment.js` did, and it migrated in 3.4. Removing
+ * the minter at 3.3 would have broken the money path on the first category
+ * created afterwards. It is the fifth of the inherited claims, and it had
+ * already been revised once without its reasoning being re-read.
+ *
+ * A category created from here now has `legacy_id` NULL and is addressed by its
+ * uuid. `present()` below HAD TO BE CHANGED for that to work - it returned
+ * `_id: category.legacyId` alone, so a new category's `_id` was null. See the
+ * note there; asserting the fix in this comment before making it is the tenth
+ * inherited claim and the first one AU2's rule caught in the same session.
  */
-let objectIdCounter = crypto.randomBytes(3).readUIntBE(0, 3);
-function mintObjectId() {
-  const seconds = Math.floor(Date.now() / 1000).toString(16).padStart(8, "0");
-  const random = crypto.randomBytes(5).toString("hex");
-  objectIdCounter = (objectIdCounter + 1) % 0xffffff;
-  return seconds + random + objectIdCounter.toString(16).padStart(6, "0");
-}
 
 /** The wire shape. Unchanged from the Mongoose version apart from `uuid`. */
 function present(category) {
   if (!category) return null;
   return {
-    _id: category.legacyId,
+    // `legacyId || id` (CHANGED IN 3.4). A category created since AE1-b's
+    // trigger fired has NO legacy id, and this returned `_id: null` for it -
+    // which the frontend then sent back as the identifier.
+    //
+    // I ASSERTED THE OPPOSITE IN A COMMENT ABOVE while removing the minter -
+    // "present() below already returns legacyId || id" - without checking. It
+    // is the tenth inherited claim, it is mine, and it is the shape AU2's
+    // citation rule names exactly: a sentence written in passing to justify a
+    // change, inside a commit about something else. Four assertions caught it
+    // within minutes, because AU1 required the tests be run.
+    _id: category.legacyId || category.id,
     uuid: category.id,
     name: category.name,
     sortDescription: category.shortDescription,
@@ -149,7 +167,6 @@ router.post("/", adminAuth, async (req, res) => {
 
     const created = await categories.create({
       name,
-      legacyId: mintObjectId(),
       shortDescription: sortDescription,
       donationAmountMinor: amountMinor,
       displayOrder: await categories.nextDisplayOrder(),

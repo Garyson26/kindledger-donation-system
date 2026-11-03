@@ -48,6 +48,19 @@ for_ocean_security_review.md
 # fixed. The exposure exists only while items are open.
 !docs/remediation-map.md
 
+# The entity ownership audit IS tracked, for the same reason and with the same
+# trade-off. AR1 made it a per-package gate: it must be re-run at the end of
+# every package that moves an entity, and a gate cannot be enforced on an
+# untracked file. The map references it, and a tracked document pointing at an
+# untracked one is a dangling reference of exactly the kind this project keeps
+# finding.
+#
+# IT CARRIES THE SAME EXPOSURE. It names open findings with file and line -
+# payment.js:141 as the donation writer, admin.js:234 as the password writer -
+# which is a map of where the seams are. THE PHASE 6 PUBLICATION GATE COVERS
+# THIS FILE TOO: zero open findings, or redacted of file and line.
+!docs/entity-ownership-audit.md
+
 # =============================================================================
 # Node
 # =============================================================================

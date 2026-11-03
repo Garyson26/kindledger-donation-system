@@ -61,15 +61,46 @@ function buildStore() {
     console.error('[rateLimiters] redis error:', err && err.message ? err.message : err);
   });
 
-  redisClient.connect().catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error('[rateLimiters] redis connect failed, limiters degrade:', err && err.message);
-  });
+  redisClient
+    .connect()
+    .then(() => {
+      // UNREF, so this connection does not by itself keep the process alive.
+      //
+      // Without it, ANY process that imports app.js never exits - a test
+      // runner, a migration script, a one-off maintenance task. Package 3.2
+      // hit exactly that: wiring the limiter into routes/auth.js made the
+      // auth suites hang AFTER passing, which reads as a broken test rather
+      // than as a held socket.
+      //
+      // In production the HTTP server is what keeps the process alive; a rate
+      // limiter has no business doing it. Same reasoning as making the store
+      // lazy in the first place (ADR-042): infrastructure a module happens to
+      // open should not change the lifetime of the process that imported it.
+      if (typeof redisClient.unref === 'function') redisClient.unref();
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[rateLimiters] redis connect failed, limiters degrade:', err && err.message);
+    });
 
   storeKind = 'redis';
   return new RedisStore({
     sendCommand: (...args) => redisClient.sendCommand(args),
-    prefix: 'kl:rl:',
+    // THE PREFIX IS OVERRIDABLE, AND THAT IS NOT A TEST CONVENIENCE.
+    //
+    // Wiring the Redis store in package 3.2 made the limiter SHARED and
+    // PERSISTENT, which is the entire point in production and a problem
+    // everywhere else. The MemoryStore it replaced reset with the process, so a
+    // suite could be re-run immediately; Redis remembers for the full window,
+    // and the SEC-02 regression suite started failing with 429 on its FIRST
+    // request when run twice inside a minute. The code was correct and the
+    // symptom looked like a broken test.
+    //
+    // It matters beyond tests: two DEPLOYMENTS sharing one Redis - a blue/green
+    // pair, or a staging environment pointed at the wrong instance - would
+    // share rate-limit buckets and throttle each other, which is very hard to
+    // diagnose from either side.
+    prefix: process.env.RATE_LIMIT_PREFIX || 'kl:rl:',
   });
 }
 

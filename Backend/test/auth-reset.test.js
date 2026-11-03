@@ -43,7 +43,13 @@ process.env.FRONTEND_FAILURE_URL = 'http://frontend.test/payment-failure';
 
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const User = require('../models/User');
+// SPEC-2 section 4.1: THE SEAM SWITCHES WITH THE ROUTES IT SETS UP DATA FOR.
+// Package 3.2 migrated auth.js to MySQL, so these three function bodies move
+// with it. THE SIX SCENARIOS BELOW ARE UNTOUCHED - that is the whole point of
+// having written them against a seam, and if any of them had needed an edit the
+// additive model would have been breached (SPEC-3 section 4.1).
+const users = require('../repositories/users');
+const prismaModule = require('../config/prisma');
 
 const ORIGINAL_PASSWORD = 'OriginalPass123!';
 const EMAIL_PREFIX = 'zzz-auth-test';
@@ -57,35 +63,45 @@ let base;
 // -----------------------------------------------------------------------------
 const store = {
   async reset() {
-    await User.deleteMany({ email: new RegExp('^' + EMAIL_PREFIX) });
+    await users.deleteByEmailPrefix(EMAIL_PREFIX);
   },
 
   /** A verified user holding a live reset code. */
   async createUserWithResetCode(tag, attempts = 0) {
     const email = `${EMAIL_PREFIX}-${tag}@invalid.test`;
-    await User.deleteOne({ email });
-    const doc = await User.create({
+    await users.deleteByEmailPrefix(email);
+
+    const created = await users.create({
       name: 'ZZZ Auth Test',
       email,
-      password: await bcrypt.hash(ORIGINAL_PASSWORD, 10),
+      password: ORIGINAL_PASSWORD,
       isVerified: true,
-      resetPasswordCode: VALID_CODE,
-      resetPasswordExpires: new Date(Date.now() + 15 * 60 * 1000),
-      resetPasswordAttempts: attempts,
     });
-    return { id: doc._id.toString(), email };
+    await users.setResetCode(created.id, VALID_CODE, Date.now() + 15 * 60 * 1000);
+
+    // Seeded by INCREMENTING rather than by writing the column, so the fixture
+    // goes through the same path the route does. A fixture that sets a security
+    // counter directly can drift from the mechanism it is meant to exercise.
+    for (let i = 0; i < attempts; i += 1) {
+      await users.incrementResetAttempts(created.id);
+    }
+
+    return { id: created.legacyId || created.id, email };
   },
 
   /** Plain normalised view; no storage types leak past here. */
   async readUser(email) {
-    const u = await User.findOne({ email });
+    const u = await users.findByEmail(email);
     if (!u) return null;
     return {
       email: u.email,
-      resetAttempts: u.resetPasswordAttempts ?? 0,
-      hasResetCode: Boolean(u.resetPasswordCode),
-      passwordIsOriginal: await bcrypt.compare(ORIGINAL_PASSWORD, u.password),
-      passwordMatches: (candidate) => bcrypt.compare(candidate, u.password),
+      resetAttempts: u.resetCodeAttempts ?? 0,
+      // The repository never returns the hash (SEC-13), so presence is read
+      // from the expiry, which `setResetCode` and `setPassword` write and clear
+      // together.
+      hasResetCode: Boolean(u.resetCodeExpiresAt),
+      passwordIsOriginal: await users.verifyPassword(u.id, ORIGINAL_PASSWORD),
+      passwordMatches: (candidate) => users.verifyPassword(u.id, candidate),
     };
   },
 };
@@ -153,6 +169,7 @@ after(async () => {
   } finally {
     if (server) server.close();
     await mongoose.connection.close();
+    await prismaModule.disconnect();
   }
 });
 
