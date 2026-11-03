@@ -4,7 +4,7 @@
 
 **MySQL 8.0.16 or later, or MariaDB 11.4.5 or later.**
 
-The server must also run in **strict SQL mode** (`STRICT_TRANS_TABLES`).
+Every application connection must be in **strict SQL mode** (`STRICT_TRANS_TABLES`). `config/prisma.js` sets it on connect, so a server whose own default is not strict is accepted with a warning (DB1). **Anything that writes must use `getPrisma()`**; a test fails if a source file builds its own `PrismaClient`.
 
 All of it is enforced, not merely requested. `npm run db:migrate` and
 `npm run db:seed` run `Backend/db/require-mysql-version.js` first and refuse to

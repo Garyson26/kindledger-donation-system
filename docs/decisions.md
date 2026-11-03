@@ -3506,6 +3506,31 @@ for a server SPELLING: MariaDB reports `bigint(20) unsigned` (CY1-3).
 - **Strict mode is now the hosting decision.** On shared hosting only the
   provider can set `sql_mode`. If Hostinger's is not strict, the guard refuses
   and there is no configuration answer; see the remediation map's CY3 entry.
+  *[Superseded by the amendment below: Hostinger is not strict, and the
+  application now sets it per session.]*
 - **A UCA version difference remains** (14.0 vs 9.0). The tested pairs are
   Latin-script; a script whose weights changed between Unicode 9 and 14 could
   compare differently.
+
+### Amendment (DB1, DB4, 3 Nov 2026): the application sets strict mode itself, and requires TLS
+
+**Hostinger's GLOBAL `sql_mode` is not strict.** Gary accepted that as a risk
+(remediation map DB1, open), and before any workaround was built, DB1 asked
+whether the application could set it per session. It can: `config/prisma.js`
+now builds Prisma on the MariaDB driver adapter, whose `initSql` runs MySQL
+8.4's default `sql_mode` and UTC on every connection the pool opens - proved
+on first connect, after a KILL and after `wait_timeout`, with an invalid ENUM
+refused each time. This also amends **ADR-019**: SESSION strictness is still a
+hard requirement, GLOBAL is a warning.
+
+**Consequences:**
+
+- **One driver for the whole data layer changed.** Every suite passes on it,
+  on both servers. The adapter must stay at the client's exact version; a test
+  fails if they diverge.
+- **Every writer must use `getPrisma()`.** A test fails if any source file
+  builds its own `PrismaClient` (the read-only drift gate excepted).
+- **TLS is required to any non-private host (DB4).** Hostinger offers TLS and
+  does not require it; the guard reads `Ssl_cipher` and refuses plaintext.
+- **No idle-lifetime setting.** The driver's pool holds a connection until the
+  server closes it, which is what an hourly cap wants (CY1-4).

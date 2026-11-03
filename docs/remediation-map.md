@@ -5990,7 +5990,7 @@ was measured against `mariadb:11.8.9` with `mysql:8.4.13` as the reference.
 | Email collation (c) | `utf8mb4_0900_as_ci` is an alias of `utf8mb4_uca1400_nopad_as_ci`. **22 pairs identical** on both servers, under both collations and through a unique index: jose@/josé@ distinct, case folded, trailing space distinct, Cyrillic homoglyph distinct. Config, not schema |
 | CHECK (d) | **One schema change:** MariaDB has no `REGEXP_LIKE()`, so `branding_settings` could not be created. Now the `REGEXP` operator. All 10 CHECK probes then enforce identically. errno differs (3819/4025), read by nothing |
 | ENUM, `ON UPDATE`, nullable UNIQUE (d) | Identical |
-| Strict mode (d) | Identical except **MariaDB's default admits zero dates**. Accepted (CY1-2): Prisma cannot write one |
+| Strict mode (d) | Identical except **MariaDB's default admits zero dates**. Accepted (CY1-2), then **closed by DB1**: every application session now runs MySQL 8.4's default `sql_mode`, which includes `NO_ZERO_DATE` |
 | Time zone | Not a dependency. Prisma supplies `now()` itself; with the server at +05:30 both stored UTC |
 | Schema suite (e) | **30/30 on both.** One assertion changed for a server SPELLING, `bigint(20) unsigned` (CY1-3) |
 | Every other suite | **All pass on MariaDB 11.8**, run locally through `npm run test:all` |
@@ -6009,8 +6009,10 @@ settings.
 Measured with `connection_limit=1` against mariadb:11.8: 200 queries,
 sequential or 50 at a time, used **one** connection; an idle lifetime of 3 s
 became **two** across a 5 s pause; 3600 s stayed at one. So:
-`PRISMA_CONNECTION_LIMIT=1`, and the new `PRISMA_MAX_IDLE_CONNECTION_LIFETIME`
-set just under Hostinger's `wait_timeout`.
+`PRISMA_CONNECTION_LIMIT=1`, and connections held as long as the server allows.
+**DB1 made the second half automatic:** the MariaDB driver's pool keeps a
+connection until the server closes it and replaces it before the next query, so
+the `PRISMA_MAX_IDLE_CONNECTION_LIFETIME` variable CX1 added was removed again.
 
 ### CY3 - STRICT MODE IS THE GO/NO-GO, AND WHAT EACH ANSWER MEANS
 
@@ -6045,6 +6047,81 @@ configuration:**
    accept it, adding length and range validation for every column the
    application writes, and accepting that hand-written SQL can recreate BUG-02.
    That is a decision, not a fix, and it would need recording as one.
+
+**OUTCOME: Hostinger is not strict, Gary chose 3 - and DB1 found a fourth
+option that makes most of 3 unnecessary.** See DB1 below.
+
+---
+
+## DB1 - ACCEPTED RISK, OPEN: HOSTINGER'S GLOBAL `sql_mode` IS NOT STRICT
+
+| | |
+|---|---|
+| **Accepted by** | Gary, 3 Nov 2026 |
+| **Reason** | Hostinger shared hosting is the only host available, and only the provider can set `sql_mode` there |
+| **Status** | **OPEN.** Accepted, not closed |
+| **Removed by** | The roadmap item "move off shared hosting" (`docs/roadmap.md`), planned for next year |
+
+### Before building workarounds, the question DB1 asked: can the application set it per session?
+
+**Yes, and it was proved by behaviour** against a mariadb:11.8 whose GLOBAL
+`sql_mode` was `''`:
+
+| Mechanism | Result |
+|---|---|
+| A `sql_mode` in the connection string - four spellings | **Ignored.** Prisma's own engine runs no SQL on connect |
+| Prisma's MariaDB driver adapter, `initSql` on every new connection | **Works.** Session strict on the first connection, on the one replacing a KILLed connection, and on the one replacing a connection the server closed at `wait_timeout`. A hand-written `payment_status='banana'` was **refused (1265)** each time, with no failed query across the reconnects |
+
+So `config/prisma.js` now builds the client on that adapter, and every
+connection it opens runs MySQL 8.4's default `sql_mode` and UTC. **DB2's
+boundary validation was not built**: the database itself now refuses, for every
+write the application makes, which is stronger than a re-statement of the
+schema's limits in route code that could drift from them.
+
+**Proved again in CI** (`refuse-unsupported`): on a non-strict 11.8,
+`db:migrate` proceeds with the warning, and the application's own invalid write
+is refused.
+
+### What the guard does now
+
+- Unsupported version or missing collations: **still REFUSES.**
+- The application's own SESSION not strict: **still REFUSES** - it would mean
+  `initSql` did not take, and every write would be exposed.
+- The server's GLOBAL not strict: **WARNING** on every cold start, naming what is
+  not enforced. Downgraded only because Gary accepted it.
+
+### DB3 - WHAT IS STILL UNPROTECTED, PLAINLY
+
+| Writer | Covered? | How it is held |
+|---|---|---|
+| The API, every route | **Yes** | strict session; CI proves the refusal |
+| The ETL (`npm run etl`, `etl:null-minted`) | **Yes** - it uses `getPrisma()` | `server-guard.test.js` "DB3": fails if any source file builds its own `PrismaClient` |
+| `npm run db:seed` | **Yes** - moved onto `getPrisma()` in DB1 | same test |
+| A future admin import, if it uses `getPrisma()` | Yes | same test, which fails if it does not |
+| **phpMyAdmin, a hand-run SQL session, any tool with its own connection** | **NO** | **Pinned in CI:** an outside client's `'banana'` is stored as `''` on the non-strict server, and the job asserts it. If Hostinger ever becomes strict, that step fails and this row can close |
+
+The last row is the residual, and it is the BUG-02 shape exactly: a donation in
+the table and in no report. The mitigation is procedural - **write nothing by
+hand**, and if a correction must be made, `SET SESSION sql_mode =
+'STRICT_TRANS_TABLES';` first in the same SQL tab (deployment-environment §1.5).
+
+---
+
+## DB4 - TLS WAS AVAILABLE AND OPTIONAL. THE APPLICATION NOW REQUIRES IT
+
+Hostinger reports `have_ssl = YES` and `require_secure_transport = 0`: TLS
+works, and the server accepts plaintext too. CX1 measured that a
+`DATABASE_URL` without an SSL parameter connects **in plaintext**, and only
+documented it. **DB4 enforces it:** the guard reads `Ssl_cipher` on the
+application's own connection and refuses if it is empty, for any host that is
+not loopback, RFC 1918, IPv6-local or a single-label service name. A dotted name
+counts as public even if it resolves privately - fail closed.
+
+Measured from a host the guard treats as public: no parameter **refused**;
+`sslaccept=strict` encrypted (and accepted MariaDB 11.8's own self-signed
+certificate - MariaDB 11.4+ clients can verify it against the account's
+password; **interception was not tested**); `accept_invalid_certs` encrypted
+without verification.
 
 ---
 

@@ -228,13 +228,15 @@ DATABASE_URL='<same>' npm run db:check-drift
 1. **`npm run db:migrate`, never `npx prisma migrate deploy`.** The guard runs
    first and refuses before any DDL; bare `migrate deploy` skips it, and a
    migration that stops partway cannot be rolled back (MIG-01).
-2. **Record the guard's line in the cutover log:** `Database server OK: MariaDB
-   11.8.x (CHECK constraints enforced, strict sql_mode, 0900 collations
-   behave)`. **If it refuses on strict mode, stop:** there is no configuration
-   fix on shared hosting (remediation map, CY3).
+2. **Record the guard's lines in the cutover log:** `Database server OK:
+   MariaDB 11.8.x (CHECK constraints enforced, strict session, 0900 collations
+   behave)`, and the `WARNING: GLOBAL sql_mode is not strict` line above it.
+   The warning is the accepted risk (remediation map DB1) and is expected. **A
+   refusal is not:** stop and read it.
 3. **The drift gate must say `No drift.`**
-4. **TLS:** from the same machine, `SHOW SESSION STATUS LIKE 'Ssl_cipher'` over
-   the same URL must not be empty (deployment-environment §1.4).
+4. **TLS** is checked by the guard: it refuses a plaintext connection to
+   Hostinger (DB4). If it says `NOT ENCRYPTED`, the URL is missing
+   `?sslaccept=strict`.
 
 If any step fails partway, see deployment-environment §1.4 for the recovery:
 drop every table including `_prisma_migrations`, then run it again.
