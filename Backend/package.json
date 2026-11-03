@@ -24,7 +24,8 @@
     "test:trust-proxy": "node --test test/trust-proxy.test.js",
     "test:payment": "node --test test/payment-callbacks.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
-    "test:charset": "node db/check-charset.js"
+    "test:charset": "node db/check-charset.js",
+    "test:sec03": "node --test test/sec-03-injection.test.js"
   },
   "keywords": [],
   "author": "",
