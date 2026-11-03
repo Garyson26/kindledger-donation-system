@@ -5520,7 +5520,7 @@ findings rather than configuration.
 
 | # | Finding | Severity | Disposition |
 |---|---|---|---|
-| CB2-1 | **Frontend CSP `connect-src` hardcodes the old backend hostname** (`Frontend/vercel.json`). Any new backend host is blocked by the browser | **Blocks step 5** | PR after F, once hostnames are chosen |
+| CB2-1 | **Frontend CSP `connect-src` hardcodes the old backend hostname** (`Frontend/vercel.json`). Any new backend host is blocked by the browser | **Blocks step 5** | **CLOSED in post-F (#33), CX2.** `https://kindledger-api.vercel.app`; the old host removed |
 | CB2-2 | **Tracked `Frontend/.env` names the old backend.** If `VITE_API_URL` is unset on the new project, the build falls back to a hostname that will have no owner once the old project is deleted. **The CSP also allows that host.** Whether `*.vercel.app` names are re-claimable is UNVERIFIED | **High if claimable** | Same PR: remove the value so the fallback is `localhost` (fails loud) |
 | CB2-3 | **No `prisma generate` in the backend build.** Prisma documents stale-client failures on Vercel's dependency cache. Not reproduced: the cache cannot be simulated locally | Medium. The first deploy works | **Post-F: `"vercel-build": "prisma generate"`.** Not postinstall, which would have broken the Docker build: the Dockerfile runs `npm ci` before copying `prisma/`. Found while making the change |
 | CB2-4 | **`REDIS_URL` absent means per-instance in-memory rate limits on serverless.** Fails silent | **High on Vercel** | Required in the list. Check the boot log after first deploy |
@@ -5895,6 +5895,50 @@ types when serving. Require `logoPath` to match the shape the upload generates
 before resolving it. It needs the branding suite, which needs the compose
 stack. **Unpinned: Gary's call whether it rides in post-F or a follow-up.**
 
+
+## CX2 - THE BACKEND HOSTNAME IS CHOSEN: `kindledger-api.vercel.app`
+
+CB2-1 closes. `Frontend/vercel.json`'s `connect-src` names the new backend and
+**no longer names the old one**. Keeping both would have let a frontend built
+with the old `VITE_API_URL` keep working against MongoDB, which is the silent
+misrouting deployment-environment §1.2 describes.
+
+**What is verified and what is not.** On 3 Nov 2026 the name answered
+`404 DEPLOYMENT_NOT_FOUND`. That proves nothing is deployed there. It does not
+prove the project name is free: Vercel only settles that when the project is
+created, and a taken name gets a suffix. **The confirmation is the first step of
+creating the backend project, and it comes before the frontend deploys.**
+
+**SEC-15 is not helped by this choice** and was not meant to be: two
+`*.vercel.app` names are two sites. Package 4e's `/api` rewrite keeps this host
+as the rewrite target, so 4e does not have to start by undoing it.
+
+---
+
+## CQ1 - AUTO-DELETE HEAD BRANCHES CLOSED A STACKED PR UNMERGED
+
+**What happened.** #31 merged into `main` at 10:40:15 on 3 Nov 2026. The
+repository deletes head branches on merge, so `stack/e-request-path-leaves-mongo`
+was deleted - and it was #32's base. #32 closed, unmerged, at 10:40:18. `main`
+was then missing all 62 files of the whitelabel work, and #33 targeted a branch
+whose PR was closed.
+
+**The cause was advice, not a mistake at the keyboard.** Turning auto-delete on
+before merging #24 was my recommendation. Stacked PRs were the one case where
+it does harm, and the stack was exactly what was being merged.
+
+**Repair (CQ1).** `stack/e` restored at `f07435b`, #32 reopened and retargeted
+to `main` (62 files, unchanged), #33 retargeted to `main` before #32 merged.
+**No rebase was needed or done:** `f07435b` is in #32's history and `main`'s
+tree is byte-identical to it, so the retarget alone produces the same diff a
+rebase would, without rewriting the commits #33 is built on.
+
+**The rule.** While any open PR targets a branch other than `main`, auto-delete
+stays OFF, or every dependent PR is retargeted to `main` before its base merges.
+After a merge run, check that no PR ended closed-unmerged. Auto-delete is OFF
+now and goes back ON once #33 has merged.
+
+---
 
 ## Counts
 

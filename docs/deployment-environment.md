@@ -57,9 +57,9 @@ That is §7a of the 4b runbook and §5.3 of the Phase 6 checklist.
 | | |
 |---|---|
 | Required | **Yes** |
-| Format | `https://<new-backend-host>`, no trailing slash, no `/api` |
+| Format | `https://kindledger-api.vercel.app`, no trailing slash, no `/api` (CX2) |
 | Source | The new backend project's production domain |
-| **If missing** | **FAILS SILENT until the old backend is paused, then FAILS LOUD.** Vite falls back to the TRACKED `Frontend/.env`, which still says `https://for-ocean-foudation-donation-system-one.vercel.app` |
+| **If missing** | **FAILS SILENT until the old backend is paused, then FAILS LOUD.** Vite falls back to the TRACKED `Frontend/.env`. **Since post-F (#33) that is empty**, so the build falls back to `http://localhost:5000` and fails at the first request |
 | **If copied** | **Same as missing.** The old frontend's value names the old backend. Do not copy it (§6) |
 
 **The hostname-claiming risk is gone (CD1).** It depended on the old backend
@@ -70,8 +70,8 @@ kept, so the name stays with it.
 serving, a new frontend built with the old host works. Donors sign in,
 donations go through, and every request lands on the **old** backend: MongoDB,
 and the SEC-03 bypass. Nothing on screen shows it. Once the old backend is
-paused, the same build fails at the first request. **The frontend's CSP allows
-that hostname too** (§3.1), so the browser does not block it either.
+paused, the same build fails at the first request. **The frontend's CSP no
+longer allows that hostname** (§3.1, CX2), so the browser now blocks it as well.
 
 `VITE_API_URL` is read **at build time**. Changing it requires a redeploy.
 
@@ -193,7 +193,7 @@ The **Action** column is defined in §6.
 
 | Variable | Action | Req | If missing | Source | Format |
 |---|---|---|---|---|---|
-| `VITE_API_URL` | **REWRITE** | **Yes** | **FAILS SILENT** while the old backend serves (§1.2) | New backend domain | `https://<backend>`. Read at BUILD time |
+| `VITE_API_URL` | **REWRITE** | **Yes** | **FAILS SILENT** while the old backend serves (§1.2) | New backend domain | `https://kindledger-api.vercel.app`. Read at BUILD time |
 
 That is the only variable the frontend reads. **Nothing else belongs on the
 frontend project** (§4).
@@ -230,13 +230,15 @@ use it once, and delete it.
 
 | # | What | Why it blocks | Change |
 |---|---|---|---|
-| **3.1** | **The frontend CSP hardcodes the old backend hostname.** `Frontend/vercel.json`: `connect-src 'self' https://for-ocean-foudation-donation-system-one.vercel.app …` | The browser refuses every API call to any other host. **The new frontend loads and nothing works.** `vercel.json` is static, so no variable can change it | Put the new backend host there. That needs the host known in advance: **either a custom domain chosen now, or a project name whose `*.vercel.app` name is confirmed free.** Gary's choice |
+| **3.1** | **The frontend CSP hardcodes the old backend hostname.** `Frontend/vercel.json`: `connect-src 'self' https://for-ocean-foudation-donation-system-one.vercel.app …` | The browser refuses every API call to any other host. **The new frontend loads and nothing works.** `vercel.json` is static, so no variable can change it | **DONE (CX2): `https://kindledger-api.vercel.app`.** The old host is removed, not kept alongside. **One check remains before the frontend deploys:** create the backend project as `kindledger-api` and confirm its production domain is EXACTLY `kindledger-api.vercel.app`. On 3 Nov 2026 that name answered `404 DEPLOYMENT_NOT_FOUND`, which shows nothing is deployed there, not that the name is free. If Vercel assigns a suffixed name, this line must change first |
 | **3.2** | **`Frontend/.env` is tracked and names the old backend** | §1.2. Wrong rather than dangerous since CD1: the fallback reaches the old backend, which is still ours. It is also already in Phase 6's scrub scope "for the shape" | Remove the value, so a missing `VITE_API_URL` fails loud (`localhost:5000`) instead of silently reaching the old backend |
 | **3.3** | **No `prisma generate` in the backend build.** No `postinstall`, no `vercel-build` | Vercel caches `node_modules`. Prisma documents that a cached client goes stale and throws at runtime on Vercel. The first deploy will work and a later schema change will not. **I have not reproduced this, because Vercel's cache cannot be simulated locally** | **Done in post-F, as `"vercel-build": "prisma generate"`, not `postinstall`.** `docker/api.Dockerfile` runs `npm ci` before it copies `prisma/`, so a postinstall generate would fail the image build. Vercel's Node runtime runs `vercel-build` under `@vercel/node`; Docker and CI never call it. **Unverified until the first deploy: check the build log shows `prisma generate`** |
 
-**Post-F (PR 10) carries 3.2 and 3.3. 3.1 waits for the new backend's
-hostname**, so that PR is open as a draft until the name is chosen. No new
-projects exist in the team yet (checked when it was opened).
+**Post-F (#33) carries all three.** 3.1 was the reason it stayed a draft; the
+hostname was chosen as `kindledger-api.vercel.app` (CX2). **It is a
+`*.vercel.app` name, so SEC-15 (package 4e) is not helped by it:** the frontend
+and backend are still different sites. 4e's `/api` rewrite option keeps this
+host as the rewrite target, so the choice does not have to be undone.
 
 ---
 
