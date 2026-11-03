@@ -64,9 +64,9 @@ This section used to say the GPL commit `4f3b7ec` was made **while the
 repository was private, so no public GPL grant exists** (ADR-061). **That no
 longer holds.** `main` publishes `LICENSE` with the **GNU GPL v3 text** today,
 beside `"license": "ISC"` in `Backend/package.json`: ADR-029's contradiction,
-now public. Apache-2.0 arrives in PR E (#22). **Whether a GPL grant was made
-for the versions published under that LICENSE, and what that means, is a
-licensing question for Gary.** This checklist cannot answer it.
+now public. Apache-2.0 arrives in PR E (#22). **Anyone cloning `main` today
+receives GPL v3 text.** What that does and does not mean, as questions for an
+adviser rather than answers, is in ADR-061's CH4 amendment.
 
 ### 1.3 Method: rotate, then record
 

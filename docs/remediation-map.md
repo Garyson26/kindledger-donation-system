@@ -3449,8 +3449,9 @@ specific.
 | **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
 | **4c** | Terminal cleanup: `etl/`, `models/`, the `mongoose` dependency, `scripts/seedDatabase.js`, `docker-compose.legacy-mongo.yml` | 4b complete, rollback boundary closed |
 | **4d** | The Prisma advisory bump (U-6) - its own package because it regenerates the client the data layer sits on | after 4c, so a failure in either cannot be attributed to the other |
+| **4e** | **SEC-15: the session moves from `localStorage` to an httpOnly cookie** (CH3). Not small; see "SEC-15 - OPEN" | 4b complete, **and frontend and backend served from the same site** |
 | **5** | Frontend | Phase 4 complete |
-| **6** | Release: licence, history scrub, publication gate | Phase 5 complete |
+| **6** | Release: licence, rotation (no history scrub, CG1), publication gate (bypassed, Phase 6 checklist §0) | Phase 5 complete |
 
 **4a moving ahead does not reorder the phases** - it splits one. 4b stays last
 and is stronger for it: the ETL will have been exercised by five route packages
@@ -5772,6 +5773,57 @@ Recorded consequence: the hotfix's merge will not deploy either (runbook
 public repository. Apache-2.0 arrives in E (#22). **What the published GPL text
 means for the versions under it is a licensing question for Gary.** Recorded,
 not answered.
+
+## SEC-15 (MEDIUM) - OPEN, AND NOT FIXED ANYWHERE (CH3)
+
+**Status, stated plainly: OPEN in production, OPEN on every branch, and until
+now in no package.** None of the ten PRs touches it. Earlier maps carried it
+as "R", which read like a deferral. It was a gap. It is also named, with its
+locations, in the old review that is permanently public (CG1). **Assigned to
+package 4e.**
+
+**What it is:** the login token is a bearer JWT kept in `localStorage`, and
+every authenticated call sends it in an `Authorization` header. Any script
+running on the frontend's origin can read it. The CSP narrows how such a
+script could arrive. It does nothing once one has, and then the token is
+stolen outright, valid for its full lifetime (1 hour), from anywhere.
+
+**What fixing it takes.** The fix is to keep the token where script cannot
+reach it: an httpOnly, Secure cookie set by the backend. **That changes the
+auth flow, and it is not small:**
+
+| Area | What changes | Size, measured at the stack tip |
+|---|---|---|
+| Backend: issuing | The login-OTP and signup-OTP completions set the cookie instead of returning the token in the body | the auth routes that issue tokens |
+| Backend: reading | `authMiddleware`, `adminAuth` and the auth check in `payment.js` read the cookie | 3 readers. `cookie-parser` and `credentials: true` are already in `app.js` |
+| Backend: logout | **New endpoint.** Logout is client-side today (delete from storage). An httpOnly cookie can only be cleared by the server | 1 route |
+| **CSRF** | **New exposure.** A cookie is sent automatically, so every state-changing route becomes forgeable from another site unless the cookie is `SameSite=Lax` or `Strict`, or the routes check a CSRF token. **The PayU callbacks are cross-site POSTs by design** and must stay outside cookie auth: they authenticate by hash | every POST, PUT, PATCH and DELETE |
+| Frontend: storage | Remove every read and write of the token | **23 call sites in 11 files** |
+| Frontend: requests | Every authenticated `fetch` sends `credentials: 'include'` instead of a header | 12 `fetch` calls, 7 header sites in 6 files |
+| Frontend: "am I logged in?" | Today it is "is there a token in storage" (`App.jsx`). Script cannot see an httpOnly cookie, so the app has to ask the server (`/api/auth/me`) on load | the app's auth state |
+| Tests | Every suite that authenticates sends `Authorization: Bearer`. Either the readers accept both during a transition, or the harnesses learn cookies | **6 of the 21 suite files** send an Authorization header |
+
+**The constraint that decides whether it is possible at all: same-site
+hosting.** `vercel.app` is on the Public Suffix List, so
+`<frontend>.vercel.app` and `<backend>.vercel.app` are **different sites**. A
+cookie from the backend is then a **third-party cookie**, which current
+browsers increasingly block outright (Safari already does). **With the two
+new projects on separate `*.vercel.app` names, SEC-15 cannot be fixed this
+way.** It needs either:
+
+- **one custom domain for both** (for example `donate.example.org` and
+  `api.example.org`, which are same-site), or
+- **the frontend proxying `/api` to the backend** through a Vercel rewrite, so
+  the browser only ever talks to one origin.
+
+**That decision is being made now, for a different reason:** the CSP hostname
+that keeps post-F (#15) a draft (CB2-1). **Choose the new hostnames with 4e in
+mind, or 4e starts by undoing them.**
+
+**Why not inside 4b:** rotating `JWT_SECRET` at the cutover already signs
+everyone out, which makes it tempting. But it would add an auth-flow change to
+the one window whose length is set by verification (runbook R3). It goes after
+4b and stays its own package.
 
 ## BRAND-01 (LOW) - THE BRANDING PUT CAN WRITE THE STORAGE FIELDS
 
