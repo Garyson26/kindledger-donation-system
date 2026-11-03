@@ -22,7 +22,8 @@
     "test:guard": "node --test test/server-guard.test.js",
     "test:payment": "node --test test/payment-callbacks.test.js",
     "test:auth": "node --test test/auth-reset.test.js",
-    "test:charset": "node db/check-charset.js"
+    "test:charset": "node db/check-charset.js",
+    "test:sec03": "node --test test/sec-03-injection.test.js"
   },
   "keywords": [],
   "author": "",
@@ -49,8 +50,8 @@
     "mongoose": "^8.18.1",
     "morgan": "^1.10.1",
     "node-cron": "^4.2.1",
-    "nodemailer": "^7.0.12",
-    "uuid": "^8.3.2"
+    "nodemailer": "^10.0.3",
+    "uuid": "^14.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.10",
