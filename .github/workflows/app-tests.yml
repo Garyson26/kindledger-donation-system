@@ -200,14 +200,6 @@ jobs:
         # - they move across when the route does.
         run: npm run test:categories
 
-      - name: Category bridge (ADR-050, temporary)
-        working-directory: Backend
-        # The bridge is deleted in package 3.6, and is tested anyway: for the
-        # duration of Phase 3 it sits on the PAYMENT PRICING path. It needs both
-        # stores, which is why it is in this job - the data-layer job has no
-        # MongoDB.
-        run: npm run test:bridge
-
       - name: Donation characterisation (SPEC-3 package 3.3 baseline)
         working-directory: Backend
         run: npm run test:donations
