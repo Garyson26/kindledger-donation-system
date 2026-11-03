@@ -46,6 +46,23 @@ const SEPARATE_INVOCATION = new Map([
   ],
 ]);
 
+/**
+ * The MongoDB SERVER is wherever this process was told it is: `mongo:27017`
+ * inside the api container (compose), 127.0.0.1 on a CI runner, which sets
+ * TEST_MONGODB_URI to its service. Only the database NAME is chosen per suite,
+ * below. Hard-coding the compose host made every MongoDB suite fail on CI while
+ * passing in its own step (CM1). An Atlas host is refused: a test runner never
+ * touches a hosted cluster.
+ */
+const MONGO_SERVER = (() => {
+  const m = /^(mongodb:\/\/[^/?]+)/.exec(process.env.TEST_MONGODB_URI || '');
+  const server = m ? m[1] : 'mongodb://mongo:27017';
+  if (/mongodb\.net|^mongodb\+srv:/i.test(server)) {
+    throw new Error(`REFUSING: TEST_MONGODB_URI points at a hosted cluster (${server.replace(/\/\/[^@]*@/, '//***@')}).`);
+  }
+  return server;
+})();
+
 /** EACH SUITE GETS ITS OWN MongoDB DATABASE - see the note below. */
 function databaseFor(file) {
   // `null-minted` is the exception, and it is not a convenience.
@@ -56,10 +73,10 @@ function databaseFor(file) {
   //
   // That refusal is the control working, so the runner supplies the right
   // database rather than the suite relaxing its guard.
-  if (file === 'null-minted.test.js') return 'mongodb://mongo:27017/kindledger_legacy';
+  if (file === 'null-minted.test.js') return MONGO_SERVER + '/kindledger_legacy';
 
   const slug = file.replace(/\.test\.js$/, '').replace(/[^a-z0-9]+/gi, '_');
-  return 'mongodb://mongo:27017/kindledger_all_' + slug;
+  return MONGO_SERVER + '/kindledger_all_' + slug;
 }
 
 const dir = __dirname;
@@ -104,7 +121,16 @@ for (const file of suites) {
 
   // eslint-disable-next-line no-console
   console.log(`  ${file.padEnd(40)} ${res.status === 0 ? 'pass' : 'FAIL'}`);
-  if (res.status !== 0) failed += 1;
+  if (res.status !== 0) {
+    failed += 1;
+    // A FAIL with no reason sends the reader off to re-run the suite by hand.
+    // Show the failing assertions, or the tail of the output if there are none.
+    const lines = `${res.stdout || ''}${res.stderr || ''}`.split('\n');
+    const notOk = lines.filter((l) => /^\s*not ok |^\s*(error|expected|actual|code):|AssertionError/.test(l));
+    const shown = (notOk.length ? notOk : lines.filter(Boolean).slice(-25)).slice(0, 40);
+    // eslint-disable-next-line no-console
+    console.log(shown.map((l) => '      | ' + l).join('\n'));
+  }
 }
 
 // eslint-disable-next-line no-console
