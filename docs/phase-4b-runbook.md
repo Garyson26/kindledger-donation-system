@@ -167,14 +167,51 @@ reaching the old projects.** If provisioning starts working:
 - a merge of post-F (new backend host in the CSP) deploys to the **old**
   frontend, whose CSP then blocks its own backend. Production breaks loudly.
 
-**Action (accepted, CE4): disconnect the Git repository from both old
-projects after PR 1 (the hotfix) merges and before PR 2 (the frontend install
-fix) merges.** Disconnecting after PR 1 keeps one chance open. The hotfix's own
-merge tries a production deploy to the old backend. If provisioning works,
-that closes SEC-03 early. **Confirm `READY` on that deployment, not the merge.**
-Before PR 2 is the latest safe point, because nothing after it can usefully
-reach the old projects. **Record that it was done, and when.** A manual CLI
-deploy is still possible after disconnecting.
+**CLOSED (CI2, 3 Nov 2026): Gary disconnected Git from both old projects**,
+before any of the ten PRs merged. Nothing merged to `main` can now reach the
+old frontend or backend.
+
+**One consequence, recorded:** the plan was to disconnect *after* PR 1, so the
+hotfix's merge could try a production deploy. Disconnecting first closes that
+path. **Merging #16 deploys nothing.** SEC-03 is closed in production only by
+pausing the old backend (§3.4, or sooner) or by a manual deploy of the hotfix.
+It is unreachable today only because production's MongoDB login fails
+(remediation map, CI1). That is an availability failure, not a fix.
+
+### 1.8 The Atlas cluster is a free tier: it pauses itself and has no backups (CI1)
+
+Production MongoDB was found **paused from inactivity** on 3 Nov 2026. Atlas
+had withdrawn its hostname, so every lookup failed. Gary resumed it. What Atlas
+documents about free clusters, as of 3 Nov 2026:
+
+| | |
+|---|---|
+| Auto-pause | **After 30 days of inactivity.** Atlas emails a warning 7 days before. "Inactivity" is not defined in the docs; forum guidance treats it as no connections |
+| Can it be switched off? | **No.** There is no setting. You cannot pause a free cluster yourself either |
+| Backups | **None.** Free clusters get no snapshots. Atlas lists a paid backup option for free clusters as a private preview, which may not be offered on this account |
+| Export | `mongodump`, without `--oplog` and without the `admin` database |
+
+**What to do between now and the freeze:**
+
+1. **Keep it awake on purpose.** Connect with the read-only user at least
+   **weekly**: §2's J3 queries, or a `countDocuments()`. 30 days is the limit,
+   and weekly leaves margin for a missed week. Treat the 7-day warning email
+   as an alarm, not a notice. Gary's inbox is the only place it arrives.
+   **Not verified:** that a read-only connection resets the timer. The docs do
+   not say what counts. Watch for the warning email after the first fortnight.
+2. **Take an early export now** (`mongodump --archive --gzip`), restored and
+   counted as in §3 step 6. Today **there is no copy of production data
+   anywhere except a free-tier cluster that has already paused once.** The
+   in-freeze export (§3.6) is the rollback point. This one is insurance until
+   then.
+3. **Option for the cutover window, Gary's call:** move the cluster to a paid
+   tier for the weeks around 4b. It removes the auto-pause and buys real
+   snapshots, at a cost. Weigh it against 4b's date: the further away the
+   freeze, the more weekly connections the free tier depends on.
+
+A cluster that pauses mid-cutover fails the ETL partway. The load is
+resumable (§4), so that by itself costs time, not data. **The data loss case is
+the cluster going away with no export.** Steps 1 and 2 close that.
 
 ---
 
@@ -244,6 +281,13 @@ its own.
 
 **The freeze begins here.** Its length is set by §5, not by §4.
 
+**Before step 1: confirm the Atlas cluster is RUNNING, not paused (CI1).** Open
+it in Atlas and read its state. Then connect with the read-only user and run
+`db.users.countDocuments()`. A cluster that answers a query is running; one the
+dashboard merely lists may not be. **If it is paused, do not start the freeze.**
+Resume it, wait until it answers, and start again from here. A pause partway
+through would fail the ETL at whatever row it had reached (§1.8).
+
 1. **Disable donations at the frontend.** A maintenance state that explains
    itself — not an error. Donors seeing a failure will retry, and a retry during
    a cutover is the case nobody has tested.
@@ -283,6 +327,30 @@ its own.
    should be no writer at all. Confirm rather than assume, because §5.6
    depends on the source being stable. Take the counts and the latest `_id`
    now. §5.6 compares against them.
+
+6. **Take a manual export of production MongoDB, and prove it restores
+   (CI1).** **Without this, there is no way back.** The cluster is on Atlas's
+   free tier, and **its backups are inactive**: free clusters get no
+   snapshots. If the cluster or its data is lost after this point, the
+   rollback in §6 has nothing to roll back to.
+   1. Export with the read-only user:
+      `mongodump --uri "<read-only SRV URI>" --archive=kindledger-<date>.archive --gzip`.
+      Do it **here**, after step 5, because on a free cluster `mongodump`
+      cannot use `--oplog`. The export is consistent only because nothing is
+      writing. Taken any earlier, it could catch a half-written state.
+   2. **Restore it somewhere disposable and compare counts** with step 5's:
+      `mongorestore --archive=... --gzip` into the local compose `mongo`
+      service, then `countDocuments()` for users, categories and donations.
+      **An export that has not been restored is a file, not a backup.**
+   3. **Store it off this machine and OUTSIDE the repository directory.** It
+      holds every donor's name, email and phone number. **The repository is
+      public**, and a file in its directory is one `git add .` away from
+      being public for good. Encrypted storage that Gary controls.
+   4. Record in the cutover log the file's name, size, SHA-256 and where it is
+      stored. Record the location, never a link anyone could open.
+
+   An earlier export, days before, is worth taking as well (§1.8). It does not
+   replace this one: it predates the reconciliation in step 3.
 
 ---
 

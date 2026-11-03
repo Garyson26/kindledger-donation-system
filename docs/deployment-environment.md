@@ -400,7 +400,7 @@ What it adds. The 4b runbook carries each of these as a step, not a note:
 | **CD2a** | **Two live backends.** If the old one is still serving when the new one goes live, donations split between MongoDB and MySQL. Anything the old one takes after the ETL is missing from MySQL | §3.4 pauses the old backend inside the freeze. §6a confirms it is still paused before donations reopen |
 | **CD2b** | **The old projects keep serving vulnerable code** (`58bdadf`, SEC-03) until somebody turns them off. Keeping them makes "off" a deliberate act | §3.4 (backend) and §6a.4 (frontend): pause, then **confirm by request**, not by the dashboard alone |
 | **CD2c** | **Credentials crossing over.** The old backend must never hold the MySQL credential, and the new one must never hold MongoDB's | §1.6, checked by name on both projects, and checked again at §6a.2 |
-| **CD2d** | **The old projects are still Git-connected.** A merge to `main` starts a production deploy on them. Today that fails with `Resource provisioning failed`, **and that failure is the only thing stopping it** | §1.7: disconnect both after PR 1 merges, before PR 2. See also ADR-062's CD1 amendment |
+| **CD2d** | **The old projects are still Git-connected.** A merge to `main` starts a production deploy on them. Today that fails with `Resource provisioning failed`, **and that failure is the only thing stopping it** | **CLOSED (CI2, 3 Nov 2026).** Gary disconnected Git from both, before any PR merged. Runbook §1.7 records the one consequence: merging the hotfix now deploys nothing |
 
 ---
 
@@ -436,7 +436,7 @@ one, because each costs something:**
 | Option | Closes the window | Cost |
 |---|---|---|
 | Pause the old **backend** project now | Yes, immediately | The site's API is down until the end of 4b |
-| Deploy the hotfix to the old project once, manually | Only if provisioning works. The last two attempts failed with "Resource provisioning failed" | May not work. ADR-028's authorship block may apply |
+| Deploy the hotfix to the old project once, manually | Only if provisioning works. The last two attempts failed with "Resource provisioning failed" | May not work. ADR-028's authorship block may apply. **Now the only deploy route:** Git is disconnected (CI2), so merging #16 deploys nothing |
 | Accept the window | No | The bypass stays live until the 4b freeze |
 
 The first deploy of the new project gets the same rule: **confirm `READY` and

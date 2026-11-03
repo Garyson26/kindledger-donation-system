@@ -5547,7 +5547,7 @@ and **keeping** the old ones, rather than deleting them. Applied in
 | CD2a | **Two live backends.** Donations split between MongoDB and MySQL, and anything the old one takes after the ETL never reaches MySQL | **High** | §3.4 pause inside the freeze. §6a.1 re-confirm before reopening. §6 rollback order never passes through "both serving" |
 | CD2b | **The old projects serve `58bdadf` until they are turned off** | **High** (SEC-03) | §3.4 (backend), §6a.4 (frontend). Confirmed by request, before and after |
 | CD2c | **Credentials crossing over.** MySQL credential on the old backend, MongoDB credential on the new | **High** | §1.6, by name, both projects, including the Atlas integration. Repeated at §6a.2 |
-| CD2d | **The old projects are still Git-connected.** Production deploys on every push to `main`. Only `Resource provisioning failed` is stopping them | **High once provisioning works.** Post-F's CSP change would break the old frontend, and MySQL-era backend code would break the old backend | **Accepted (CE4).** §1.7: disconnect Git from both old projects **after PR 1 merges, before PR 2**. **Not in the CD brief; found while checking the projects** |
+| CD2d | **The old projects are still Git-connected.** Production deploys on every push to `main`. Only `Resource provisioning failed` is stopping them | **High once provisioning works.** Post-F's CSP change would break the old frontend, and MySQL-era backend code would break the old backend | **CLOSED (CI2, 3 Nov 2026).** Gary disconnected Git from both before any PR merged. **Not in the CD brief; found while checking the projects** |
 | CD2e | **A copied host variable reproduces CD2a through configuration.** A copied `NOTIFY_URL`/`SUCCESS_URL` sends PayU's confirmations to the old backend. A copied `VITE_API_URL` sends everything | **High**, silent | Env doc §6: **REWRITE** action (8 names). Runbook §6a.3 |
 
 **A correction to CD2a's wording.** "Two backends pointed at the same Atlas
@@ -5675,8 +5675,9 @@ deployed:
 | LOW-03 to LOW-05 | Duplicate files, dead PDF generators, `console.log` sprawl | Open (hygiene) | Not scheduled |
 
 **Mitigating, and recorded, not leaned on:** production's backend answers
-**every** request with `FUNCTION_INVOCATION_FAILED` today (below), so nothing
-in that table is reachable while it stays down. That is an availability failure
+**every** request with `FUNCTION_INVOCATION_FAILED` today, because MongoDB
+rejects its credentials (CI1, below). So nothing in that table is reachable
+while it stays down. That is an availability failure
 standing in for access control, the same shape SEC-03 was recorded with.
 
 ### b. The JWT fallback is permanently public; production does not use it, confirmed by behaviour
@@ -5716,17 +5717,54 @@ production hash against it **before** the ETL. Unknown until then.
 
 ### Two things found while checking, both urgent
 
-**1. Production's MongoDB cluster name does not resolve.** Every production
-request (3 Nov, 08:33 UTC) fails with `querySrv ENOTFOUND
-_mongodb._tcp.foroceanfoundation-db.fbjyfvb.mongodb.net`. Google DNS returns
-**NXDOMAIN** for that SRV record. This map had recorded "MongoDB rejects the
-application's credentials", which is a different failure. A cluster whose
-name no longer exists may be **deleted or renamed, not just locked**. **4b's
-entire data source, and AE1-a's minted-id oracle, live there.** Not
-verifiable from here: the Atlas connector needs authorising. **Gary: confirm in
-Atlas that the cluster and its data exist before anything else in 4b is
-planned.** If the integration store (`store_1KY6ODUNmfpdgqg0`) points at a
-different cluster from `MONGODB_URI`, that is worth knowing too.
+**1. Production's MongoDB cluster name did not resolve.** At 08:33 UTC on
+3 Nov every production request failed with `querySrv ENOTFOUND
+_mongodb._tcp.foroceanfoundation-db.fbjyfvb.mongodb.net`, and Google DNS
+returned NXDOMAIN for the SRV record. I read that as a possibly deleted
+cluster. **That reading was wrong. Corrected under CI1 below.**
+
+### CI1 - CORRECTION: THE CLUSTER WAS PAUSED, AND THE CREDENTIALS ARE ALSO REJECTED
+
+**What happened:** the cluster is on Atlas's free tier, which **auto-pauses
+after 30 days with no activity**. A paused cluster's hostname is withdrawn,
+which is what the NXDOMAIN was. **Gary resumed it on 3 Nov. It was never
+deleted.** The deleted-cluster reading above was wrong.
+
+**The earlier entry, "MongoDB rejects the application's credentials", was NOT
+wrong, and stands.** After the resume, the SRV record resolves again, and
+production's next request (08:55 UTC) failed differently: `MongoDB Connection
+Failed bad auth : Authentication failed`. So two things are true at once:
+
+| Layer | State on 3 Nov | Evidence |
+|---|---|---|
+| Cluster | Paused by the free-tier auto-pause, then resumed by Gary | NXDOMAIN at 08:33; SRV resolves after the resume |
+| Production's `MONGODB_URI` credentials | **Rejected** | `bad auth : Authentication failed` at 08:55, after the resume |
+
+While the cluster was paused, the DNS failure **hid** the credential failure.
+That is why the first reading looked like a contradiction of the map.
+
+**Consequences:**
+
+- **Production is still down, and SEC-03 is still unreachable**, now because of
+  the credential rejection again. That is an availability failure, not a fix.
+  **If anyone restores production's MongoDB credentials, the SEC-03 bypass goes
+  live with it.** Git is disconnected (CI2), so merging #16 will not deploy the
+  fix.
+- **4b depends on a free-tier cluster that pauses itself and has no backups.**
+  Runbook §1.8 (keep it awake, export early), the RUNNING check before §3, and
+  §3 step 6 (export inside the freeze and prove it restores) are the controls.
+  Without step 6 the rollback in §6 rests on nothing.
+- **Auto-pause cannot be disabled on the free tier.** Atlas documents no
+  setting, and you cannot pause or unpause one on a schedule. It stays awake
+  through activity, so connect at least weekly, or move to a paid tier for the
+  cutover window (Gary's call).
+
+### CI2 - CD2d CLOSED
+
+Gary disconnected Git from both old Vercel projects on 3 Nov 2026, **before**
+any of the ten PRs merged. A merge to `main` can no longer reach them.
+Recorded consequence: the hotfix's merge will not deploy either (runbook
+§1.7).
 
 **2. `main` publishes a GPL v3 `LICENSE` today.** It sits beside ISC in
 `Backend/package.json` (ADR-029). ADR-061's reassurance, that the GPL commit

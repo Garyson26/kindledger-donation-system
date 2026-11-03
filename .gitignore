@@ -88,3 +88,9 @@ for_ocean_security_review.md
 # Node
 # =============================================================================
 node_modules/
+
+# MongoDB exports from 4b (runbook 1.8, 3.6). They hold every donor's PII and
+# the repository is public: never inside this directory, and never tracked.
+*.archive
+*.archive.gz
+dump/
