@@ -3152,18 +3152,21 @@ owner, not to invent a body of work for it.
 
 ## When the symptom points away from the cause (AP4)
 
-A short list, because the pattern has now cost real time three times.
+A short list, because the pattern has now cost real time four times.
 
 | Symptom | Cause | The "fix" that would have hidden it |
 |---|---|---|
 | The auth suites PASS and then hang forever | Wiring Redis left a socket holding the event loop | A force-exit flag - which would have hidden a genuine resource leak, in a module every process imports |
 | The SEC-02 suite fails with 429 on its FIRST request | The Redis limiter is shared and persistent, so a re-run inherits the previous run's counters | Marking the suite flaky, or adding a retry |
 | An injected login returns 500 | The SMTP send failing AFTER the credential check was passed | Reading the 500 as a refusal - which is what happened, and it hid SEC-03 for a full package |
+| **DC1:** some donors get a 500 after ~30 s, others are fine; the log says `pool timeout ... active=0 idle=0` | Hostinger refused the connection with `1226 ER_USER_LIMIT_REACHED` (75 per user), and the driver dropped the reason | A bigger `PRISMA_CONNECTION_LIMIT` or a longer pool timeout - each asks for more of the connections the server has just refused |
 
 The common shape: **infrastructure made correct produces a symptom that reads as
 a broken test.** The natural response makes the test quiet rather than making
-the system right. In all three the honest read was available immediately from
-asking what the symptom would mean if the code were correct.
+the system right. In all of them the honest read was available immediately from
+asking what the symptom would mean if the code were correct. **DC1 is the same
+shape outside the test suite:** the symptom read as a slow network, and the
+cause - a specific, named refusal - had been discarded before it reached the log.
 
 ---
 
@@ -6032,11 +6035,22 @@ with the server's reason, once a minute per instance - and only fatal ones,
 because the same hook also receives every ordinary query error (measured: a
 duplicate key and a CHECK refusal both arrived there).
 
+**DC1 is accepted (DF2, 4 Nov 2026), and the logging fix is the valuable
+part.** The connection ceiling is the failure mode most likely to take this
+site down, and before the fix it was **unattributable**: the database gave a
+specific reason, `1226 ... max_user_connections`, and the log showed a vague
+pool timeout that reads as a network fault or a slow host. It is the AP4 shape
+(below) arriving in production instead of in a test, and it is in AP4's table
+now. The instinctive response to a pool timeout - a larger pool, a longer
+timeout, a retry - would have made it worse: each one asks the server for
+more of the 75 it has already refused.
+
 ### CY3 - STRICT MODE IS THE GO/NO-GO, AND WHAT EACH ANSWER MEANS
 
 On shared hosting only the provider can set `sql_mode`, and Prisma 6 cannot set
 it per connection. So Hostinger's `@@GLOBAL.sql_mode` decides this, and nothing
-in this repository can change the answer.
+in this repository can change the answer. *[Wrong about Prisma: its own engine
+cannot, but its MariaDB driver adapter can. DB1 below.]*
 
 **If it contains `STRICT_TRANS_TABLES`:** proceed. The guard passes, CX1 ships.
 
@@ -6067,18 +6081,18 @@ configuration:**
    That is a decision, not a fix, and it would need recording as one.
 
 **OUTCOME: Hostinger is not strict, Gary chose 3 - and DB1 found a fourth
-option that makes most of 3 unnecessary.** See DB1 below.
+option that makes 3 unnecessary on the application path.** See DB1 below.
 
 ---
 
-## DB1 - ACCEPTED RISK, OPEN: HOSTINGER'S GLOBAL `sql_mode` IS NOT STRICT
+## DB1 - SOLVED ON THE APPLICATION PATH: HOSTINGER'S GLOBAL `sql_mode` IS NOT STRICT, AND THE APPLICATION NO LONGER DEPENDS ON IT
 
 | | |
 |---|---|
-| **Accepted by** | Gary, 3 Nov 2026 |
-| **Reason** | Hostinger shared hosting is the only host available, and only the provider can set `sql_mode` there |
-| **Status** | **OPEN.** Accepted, not closed |
-| **Removed by** | The roadmap item "move off shared hosting" (`docs/roadmap.md`), planned for next year |
+| **Was** | An accepted risk, Gary, 3 Nov 2026: Hostinger shared hosting is the only host available, and only the provider can set `sql_mode` there |
+| **Status** | **SOLVED for every write the application makes** (DF1, 4 Nov 2026). Not an accepted risk any more. The application sets strict mode itself, per connection, and the guard refuses if that ever stops working |
+| **What is left** | **Out-of-band SQL only** - phpMyAdmin, a hand-run session, a tool with its own client. Open, pinned in CI, mitigated by procedure (DB3 below) |
+| **Removed by** | Nothing in this repository can make Hostinger's server strict, so the out-of-band residual closes only when the database leaves shared hosting (`docs/roadmap.md`). Strict mode is **not** a reason for that move any more; the residual closes as a side effect of it |
 
 ### Before building workarounds, the question DB1 asked: can the application set it per session?
 
@@ -6092,9 +6106,11 @@ option that makes most of 3 unnecessary.** See DB1 below.
 
 So `config/prisma.js` now builds the client on that adapter, and every
 connection it opens runs MySQL 8.4's default `sql_mode` and UTC. **DB2's
-boundary validation was not built**: the database itself now refuses, for every
-write the application makes, which is stronger than a re-statement of the
-schema's limits in route code that could drift from them.
+boundary validation was not built, and should not be**: the database itself now
+refuses, for every write the application makes, which is stronger than a
+re-statement of the schema's limits in route code that could drift from them.
+CY3's truncation and clipping rows - the ones the application itself could
+reach - are refused by the same mechanism.
 
 **Proved again in CI** (`refuse-unsupported`): on a non-strict 11.8,
 `db:migrate` proceeds with the warning, and the application's own invalid write
@@ -6106,9 +6122,10 @@ is refused.
 - The application's own SESSION not strict: **still REFUSES** - it would mean
   `initSql` did not take, and every write would be exposed.
 - The server's GLOBAL not strict: **WARNING** on every cold start, naming what is
-  not enforced. Downgraded only because Gary accepted it.
+  not enforced. A warning and not a refusal because the GLOBAL now governs only
+  out-of-band SQL, which the application cannot refuse on anyone's behalf.
 
-### DB3 - WHAT IS STILL UNPROTECTED, PLAINLY
+### DB3 - WHAT IS STILL UNPROTECTED, PLAINLY: OUT-OF-BAND SQL, OPEN
 
 | Writer | Covered? | How it is held |
 |---|---|---|
@@ -6118,8 +6135,8 @@ is refused.
 | A future admin import, if it uses `getPrisma()` | Yes | same test, which fails if it does not |
 | **phpMyAdmin, a hand-run SQL session, any tool with its own connection** | **NO** | **Pinned in CI:** an outside client's `'banana'` is stored as `''` on the non-strict server, and the job asserts it. If Hostinger ever becomes strict, that step fails and this row can close |
 
-The last row is the residual, and it is the BUG-02 shape exactly: a donation in
-the table and in no report. The mitigation is procedural - **write nothing by
+The last row is the residual, **and the only part of DB1 still open**. It is the
+BUG-02 shape exactly: a donation in the table and in no report. The mitigation is procedural - **write nothing by
 hand**, and if a correction must be made, `SET SESSION sql_mode =
 'STRICT_TRANS_TABLES';` first in the same SQL tab (deployment-environment §1.5).
 
@@ -6140,6 +6157,30 @@ Measured from a host the guard treats as public: no parameter **refused**;
 certificate - MariaDB 11.4+ clients can verify it against the account's
 password; **interception was not tested**); `accept_invalid_certs` encrypted
 without verification.
+
+---
+
+## DF3 - MERGING #33 DEPLOYED THE BACKEND TO PRODUCTION, WITH NO VARIABLES
+
+#33 said "merging deploys nothing". By the time it merged that was false: the
+`kindledger-api` project had been connected to the repository, with `main` as
+its production branch. Checked on Vercel, 4 Nov 2026:
+
+| | |
+|---|---|
+| Deployment | `dpl_58VuwRuDSBzMohnN5oQLf5nuQ2vF`, commit `824fef4` (the #33 merge), target **production**, state **READY**. The build passed: `prisma generate` only, no database contact |
+| Variables on the project | **None**, in any environment |
+| What it serves | `kindledger-api.vercel.app` is public (deployment protection excludes the production domain). **Every path answers 500 `FUNCTION_INVOCATION_FAILED`** |
+| Why | `config/jwt.js` throws on load with no `JWT_SECRET`, so the process exits before any route exists. It never reached the database |
+| Harm | **None found.** Nothing writes, nothing connects, no secret is involved, and nothing points at this URL yet: donors are still on the old backend (§8 of deployment-environment) |
+
+**This is fail-closed, and it is what should happen.** The risk is the next
+step, not this one. Production is pinned to `824fef4`, which is **pre-#38**: no
+request-time server guard, no strict session, no TLS refusal, no `1226` log
+line. If the variables are added and that deployment is **redeployed**, it boots
+- and connects to Hostinger without any of DB1, DB4 or DC1. Recorded in
+deployment-environment §8: **the first deploy with variables must be #38's
+merge, not a redeploy.**
 
 ---
 

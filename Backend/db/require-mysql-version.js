@@ -273,9 +273,9 @@ async function inspectServer(query, { host } = {}) {
   if (!hasStrictMode(meta.session_mode)) {
     problems.push(`SESSION sql_mode is not strict ("${meta.session_mode || ''}")`);
   }
-  // GLOBAL is everyone else's. ACCEPTED RISK (DB1, Gary, 3 Nov 2026): on shared
-  // hosting nobody but the provider can change it, so it is a warning that
-  // names what is unenforced, not a refusal.
+  // GLOBAL is everyone else's. On shared hosting nobody but the provider can
+  // change it, and since DB1 it governs only out-of-band SQL (DB3), so it is a
+  // warning that names what is unenforced, not a refusal.
   if (!hasStrictMode(meta.global_mode)) {
     warnings.push(
       `GLOBAL sql_mode is not strict ("${meta.global_mode || ''}"). The application's own connections are strict; ` +

@@ -411,6 +411,6 @@ jobs:
               SELECT UUID(), UUID(), 'D', 'd@x.com', id, 100, 100, 'banana' FROM categories WHERE name = 'ci-db1';
             SELECT CONCAT('[', payment_status, ']') FROM donations ORDER BY id DESC LIMIT 1")
           # THE RESIDUAL, PINNED (DB3). If this ever prints [Pending] or fails, the
-          # server became strict and the accepted risk can be closed.
+          # server became strict and DB3 can be closed.
           echo "outside client stored: $stored"
           test "$stored" = "[]"

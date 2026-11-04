@@ -231,8 +231,8 @@ DATABASE_URL='<same>' npm run db:check-drift
 2. **Record the guard's lines in the cutover log:** `Database server OK:
    MariaDB 11.8.x (CHECK constraints enforced, strict session, 0900 collations
    behave)`, and the `WARNING: GLOBAL sql_mode is not strict` line above it.
-   The warning is the accepted risk (remediation map DB1) and is expected. **A
-   refusal is not:** stop and read it.
+   The warning is expected: it names what is unprotected outside the
+   application (remediation map DB1/DB3). **A refusal is not:** stop and read it.
 3. **The drift gate must say `No drift.`**
 4. **TLS** is checked by the guard: it refuses a plaintext connection to
    Hostinger (DB4). If it says `NOT ENCRYPTED`, the URL is missing

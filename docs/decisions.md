@@ -3515,7 +3515,7 @@ for a server SPELLING: MariaDB reports `bigint(20) unsigned` (CY1-3).
 ### Amendment (DB1, DB4, 3 Nov 2026): the application sets strict mode itself, and requires TLS
 
 **Hostinger's GLOBAL `sql_mode` is not strict.** Gary accepted that as a risk
-(remediation map DB1, open), and before any workaround was built, DB1 asked
+(remediation map DB1), and before any workaround was built, DB1 asked
 whether the application could set it per session. It can: `config/prisma.js`
 now builds Prisma on the MariaDB driver adapter, whose `initSql` runs MySQL
 8.4's default `sql_mode` and UTC on every connection the pool opens - proved
@@ -3535,3 +3535,8 @@ hard requirement, GLOBAL is a warning.
 - **No idle-lifetime setting.** The driver's pool holds a connection until the
   server closes it. That suits any connection limit; this account has no
   hourly cap (DC1), only 75 simultaneous connections.
+- **The accepted risk is retired (DF1, 4 Nov 2026).** With every application
+  connection strict, the non-strict server is no longer a risk on the
+  application path. Only out-of-band SQL is unprotected (remediation map DB3,
+  pinned in CI), and strict mode is no longer a reason for the roadmap's move
+  off shared hosting.

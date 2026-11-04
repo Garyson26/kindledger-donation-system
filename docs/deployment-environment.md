@@ -100,7 +100,7 @@ deploy, check the log says redis.** No user-visible symptom will tell you.
 | If missing | REFUSES. `/api/health` answers 503 and every data route errors |
 | **If the server is unsupported** | **REFUSES (CX1(b)).** Every data route and `/api/health` answer 503 `Service unavailable`; the log says `[serverGuard] REFUSING:` and why. Before CX1 it booted and wrote data |
 | **If the URL has no SSL parameter** | **REFUSES (DB4)** for any host that is not loopback, RFC 1918 or a single-label service name. The log says `NOT ENCRYPTED` |
-| **Hostinger's GLOBAL `sql_mode` is not strict** | **Accepted risk (DB1).** The application makes its own connections strict; the log warns on every cold start. See "What this leaves" below |
+| **Hostinger's GLOBAL `sql_mode` is not strict** | **Solved for the application (DB1).** The application makes every connection of its own strict, and refuses if that fails; the log warns on every cold start that the *server* is not. Only out-of-band SQL is exposed - see "What this leaves" below |
 
 #### Two things this deployment cannot fix, said plainly
 
@@ -185,6 +185,13 @@ shared widely - not ordinary daily traffic.
 
 #### What it looks like past 70 - measured, so it is recognisable
 
+**Recognise it by:** donors waiting about **30 seconds** and then getting an
+error, while other donors at the same moment are fine. It looks intermittent
+because it is per instance: only the instances that could not get a connection
+fail, and which instance a donor lands on is chance. Confirm it with the `1226`
+log line below. **Do not raise the pool size or the timeout** - both ask the
+server for more of what it has just refused.
+
 Reproduced locally with a user capped at two connections, two "instances"
 holding both, and the real application booted as a third (DC1):
 
@@ -209,7 +216,7 @@ want a connection, which makes it worse while the burst lasts.
 **If it happens more than once,** 75 is too small for the traffic, and only
 leaving shared hosting changes it (`docs/roadmap.md`).
 
-#### What this leaves: the accepted risk (DB1)
+#### What this leaves: out-of-band SQL (DB3)
 
 Every connection the **application** opens is strict. Anything else that
 connects is not: phpMyAdmin, a hand-run SQL session, a future import script
@@ -537,3 +544,19 @@ one, because each costs something:**
 
 The first deploy of the new project gets the same rule: **confirm `READY` and
 check the behaviour, not just the merge.**
+
+**#33's merge already deployed it, with no variables (remediation map DF3).**
+Every path on `kindledger-api.vercel.app` answers 500 because `JWT_SECRET` is
+missing. That is safe. **What is not safe is redeploying it after adding the
+variables:** that deployment is `824fef4`, from before #38, so it would connect
+to Hostinger without the server guard, strict sessions or the TLS refusal. The
+order is:
+
+1. Add the variables (§6). Adding them does not change a running deployment.
+2. Merge #38. **That merge is the first deploy with variables.** Do not press
+   Redeploy on `824fef4`.
+3. Install the schema (`npm run db:migrate`, §1.4) **from #38's code**. Main
+   before #38 refuses MariaDB outright ("MariaDB is not supported"), and its
+   init migration still uses `REGEXP_LIKE()`, which MariaDB does not have.
+4. Check `/api/health` and the boot log: `[serverGuard] MariaDB 11.8... supported`,
+   the GLOBAL `sql_mode` warning, and `[rateLimiters]` saying redis.

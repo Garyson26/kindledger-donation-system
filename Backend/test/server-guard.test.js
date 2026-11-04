@@ -190,10 +190,10 @@ test('inspectServer: MySQL 8.4 with its default sql_mode is supported', async ()
   assert.equal(r.supported, true);
 });
 
-test('inspectServer: a non-strict GLOBAL is a WARNING when the session is strict (DB1, accepted risk)', async () => {
+test('inspectServer: a non-strict GLOBAL is a WARNING when the session is strict (DB1)', async () => {
   // CHANGED IN DB1. This was a refusal. config/prisma.js now makes every
-  // application connection strict on connect, and Gary accepted the server's
-  // GLOBAL default as a risk on 3 Nov 2026 - so it is named, not refused.
+  // application connection strict on connect, so the server's GLOBAL default
+  // reaches only out-of-band SQL (DB3) - it is named, not refused.
   const r = await inspectServer(fakeServer({ global: 'NO_ENGINE_SUBSTITUTION' }).query);
   assert.equal(r.supported, true);
   assert.deepEqual(r.problems, []);
