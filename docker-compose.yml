@@ -131,7 +131,34 @@ services:
       # hash is computed over a string an attacker can build (SEC-01).
       PAYU_MERCHANT_KEY: ${PAYU_MERCHANT_KEY}
       PAYU_MERCHANT_SALT: ${PAYU_MERCHANT_SALT}
-      PAYU_BASE_URL: ${PAYU_BASE_URL:-https://test.payu.in}
+      # =======================================================================
+      # REQUIRED. NO DEFAULT. (BW1)
+      # =======================================================================
+      # This used to default to https://test.payu.in, and that default is the
+      # most expensive thing this audit found.
+      #
+      # A self-hoster who does not set it runs the WHOLE DONATION FLOW against
+      # PayU's sandbox. The site works. Donors complete payments. Receipts
+      # render, the dashboard fills in, donations are marked Paid.
+      #
+      #   **NO MONEY MOVES.**
+      #
+      # Every symptom points away from the cause: the code is correct, the
+      # hashes verify, the callbacks arrive, the database is consistent. The
+      # only way to notice is reconciling a bank account that never received
+      # anything.
+      #
+      # ENV-01 was an ABSENT variable silently disabling a security check. This
+      # is a PRESENT variable silently disabling the PURPOSE OF THE SOFTWARE.
+      # Both fail in the direction that looks like success.
+      #
+      # `:?` rather than a runtime guard, and the difference from
+      # PAYU_MERCHANT_SALT is the point: a missing salt is DETECTABLE by the
+      # code, so it refuses at the moment it would have signed something. A test
+      # gateway and a production gateway are INDISTINGUISHABLE to the code.
+      # Only the operator knows which one they meant, so the only place to ask
+      # is before the stack starts.
+      PAYU_BASE_URL: "${PAYU_BASE_URL:?set PAYU_BASE_URL. Use https://test.payu.in for the sandbox or https://secure.payu.in for real payments. There is no default - the wrong one takes donations that never arrive.}"
       SUCCESS_URL: ${SUCCESS_URL}
       FAILURE_URL: ${FAILURE_URL}
       CANCEL_URL: ${CANCEL_URL}

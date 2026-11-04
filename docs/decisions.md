@@ -3335,3 +3335,113 @@ Commit `4f3b7ec` added GPL v3 while the repository was private. No public
 distribution occurred under it, so no public grant exists and nothing is
 revoked. This is a first choice, not a relicensing.
 
+### Amendment (CH4, 3 Nov 2026): the premise above is false. `main` is public and carries GPL v3
+
+**The paragraph above assumed the repository stayed private until Apache-2.0
+landed. It did not.** The repository is public (CG1), and **`main` publishes
+the GPL v3 text in `LICENSE` today.** Apache-2.0 reaches `main` only when PR E
+(#31) merges. **Anyone who clones `main` before then receives a tree whose
+`LICENSE` file is GPL v3.**
+
+**This is not a legal opinion.** It records what the repository shows, so Gary
+can take advice if he wants to.
+
+**What `main` publishes today, verbatim from its tree:**
+
+| Where | Says |
+|---|---|
+| `LICENSE` | The full GNU GPL v3 text. Its section 2: *"All rights granted under this License are granted for the term of copyright on the Program, and are irrevocable provided the stated conditions are met."* |
+| `Backend/package.json` | `"license": "ISC"` |
+| `Frontend/package.json` | No licence field |
+| `README.md` | *"Undecided — do not rely on the current state of the repository."* It then says that LICENSE contains GPL v3 and that the inconsistency is known |
+
+**What the Apache-2.0 switch does, as a matter of what the repository will
+contain:** from the merge of #31, `main`'s tree carries Apache-2.0 in
+`LICENSE`, `NOTICE`, both `package.json` files and the README. **It changes
+what later clones receive. It cannot change what an earlier clone received,
+or the file that came with it.**
+
+**What it does NOT settle. Questions for an adviser, not answered here:**
+
+1. **Did a GPL v3 grant attach to the versions published while `LICENSE` said
+   GPL?** The repository also said ISC and "Undecided, do not rely on" at the
+   same time. How those three interact is the question.
+2. **Is this still "a first choice, not a relicensing"?** That sentence above
+   rests on the private premise. If a grant did attach, the Apache-2.0 switch
+   may be a relicensing of later versions. Whether that is open to Gary
+   depends on question 3.
+3. **Who holds copyright in the code?** The authors of commits reachable from
+   `main` (`git shortlog -sne origin/main`, 3 Nov 2026) include two people
+   other than Gary: Daxita Ghelani (16 commits, two addresses) and Viraj
+   Ghelani / CloudPeak (7 commits, three identities). Whose work it is, in law,
+   is not something a commit log answers.
+4. **Since when?** When the repository became public again is not recorded
+   anywhere in it. ADR-028 records a public period before September, and
+   `4f3b7ec` (GPL) is dated 10 Sep 2026. The window during which GPL text was
+   publicly served starts at the later of the two.
+
+**What does not change:** the reasons recorded above for choosing Apache-2.0
+over GPL and AGPL. How the footer section reads for versions that carried GPL
+text belongs with question 1.
+
+---
+
+## ADR-062: ADR-028 is superseded BY CIRCUMSTANCE, not solved
+
+**Status:** accepted (CB1)
+**Supersedes:** ADR-028, *as an operating constraint for this migration only*.
+ADR-028 is on `docs/incident-j1-j6` and arrives in `main` before this one.
+
+### What changed
+
+Gary is deleting both Vercel projects and creating new ones after Phase 4c
+(CB3 step 5). *[Corrected by CE5: the new backend goes live at the END of 4b,
+inside the freeze. 4c is cleanup afterwards. And by CD1: the old projects are
+kept. See the amendment below.]* Until then, **nothing deploys on merge**, which removes three
+blockers at once:
+
+- the `Resource provisioning failed` errors on PR #5 (both projects, under a
+  second, before install);
+- **ADR-028's commit-authorship block**;
+- the risk of `main` auto-deploying a MySQL application while production runs
+  MongoDB. That risk is why the migration PRs were going to carry a
+  `[DO NOT DEPLOY]` title prefix and why Vercel's production branch was going to
+  be moved off `main`. **Both steps are dropped.** The deploy guidance stays in
+  each PR description as information, because the order still matters when the
+  new project is first deployed.
+
+### What did NOT change
+
+**ADR-028's constraint was not fixed. The project it applied to is going away.**
+Whether the authorship block reappears depends on how the new projects are
+connected to the repository: which account owns them, which Git integration is
+used, and who authors the merge commits. **None of that is known yet.**
+
+So:
+
+- **Do not cite ADR-028 as resolved.** Its status is "not currently reachable".
+- **On the new project's first deploy, check for `BLOCKED` explicitly.** A
+  merge that does not deploy looks identical to one that did, from GitHub.
+- If it reappears, ADR-028's analysis applies unchanged.
+
+### Why record it at all
+
+A constraint that goes away because its context was deleted is easy to remember
+as a constraint that was dealt with. The next person to connect a Vercel project
+to this repository should find this, and not an absence.
+
+### Amendment (CD1): the old projects are kept, not deleted
+
+The decision above stands. Two of its premises do not:
+
+- **"The project it applied to is going away."** It is not. It is kept and
+  paused at the cutover (4b runbook §3.4, §6a.4). ADR-028 is still "not
+  currently reachable", but only on the new projects. **The old projects can
+  still hit it.**
+- **"Nothing deploys on merge."** The old projects are still Git-connected and
+  still try to deploy every push to `main`. They do not deploy because
+  provisioning fails, not because anything was configured to stop them. That
+  is an accident, not a control. **Until the old projects are disconnected
+  from Git (runbook §1.7), the risk this ADR dropped, `main` auto-deploying
+  MySQL code onto a MongoDB production, is held off only by that failure.**
+

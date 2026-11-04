@@ -3,6 +3,21 @@
 **Package 3.0 (SPEC-3 section 3).** Every known finding in one place: where it
 lives, which phase closes it, by what mechanism, and how that is verified.
 
+> **`[location redacted while open]` (CH6, 3 Nov 2026).** This repository is
+> public. For every finding still open **in what production runs**, the file
+> and line it was found at have been removed. 42 references, all in production's
+> code or in the tests that point at it. Production serves `58bdadf`, so a
+> finding fixed only on an unmerged branch is still open there, at that line,
+> and counts as open here. **Closed findings keep full detail**, as do
+> findings that only ever existed on the migration branches.
+>
+> **What the redaction does not do:** history keeps every earlier version of
+> this file, so it slows a reader of the current file down and no more. **When
+> a finding's fix is deployed**, restore its location from history
+> (`git log -p -- docs/remediation-map.md`) in the same commit that records
+> the closure. A finding still marked "open" here is always one somebody can
+> go and look for.
+
 This replaces the Phase 1b document that was deferred, and it is the artefact
 every later package checks itself against. A package is not complete until the
 findings assigned to its file are closed with evidence or explicitly deferred
@@ -92,7 +107,7 @@ before deciding*. Both leave the database untouched, and "the database is
 untouched" is what an outcome-only assertion checks.
 
 **This rule is generalised from SEC-14, which is the worked example.**
-`payment-callbacks.test.js:355` posts a malformed hash and asserts the donation
+[location redacted while open] posts a malformed hash and asserts the donation
 stays `Pending`. It passes. The donation does stay `Pending` - because
 `verifyHash()` throws a `RangeError` before it can decide anything, the route's
 catch block turns that into a 500, and nothing is written. The test was correct
@@ -111,7 +126,7 @@ fail-closed the moment someone adds a `catch` that returns 200.
 This is the same family as ADR-048's wrong-reason test, inverted: there the
 assertion was vacuous; here it was real but tested the wrong property.
 
-**Retroactive application is deliberately deferred.** `payment-callbacks.test.js:355`
+**Retroactive application is deliberately deferred.** [location redacted while open]
 should assert a 4xx and the absence of a thrown error rather than only the
 donation state. That change belongs with **`payment.js`'s migration**, alongside the SEC-14
 fix, not now - editing a regression suite before the code it guards is changed
@@ -369,7 +384,7 @@ to live.
 
 ### SEC-14 is NOT closed. A passing test was concealing it.
 
-`verifyHash()` in `routes/payment.js:46-53` guards with a **character**-length
+`verifyHash()` in [location redacted while open] guards with a **character**-length
 comparison and then decodes as hex:
 
 ```js
@@ -387,7 +402,7 @@ received chars 128 -> bytes 0
 THROWS: RangeError: Input buffers must have the same byte length
 ```
 
-`test/payment-callbacks.test.js:355` sends exactly this (`'z'.repeat(128)`) and
+[location redacted while open] sends exactly this (`'z'.repeat(128)`) and
 passes, because it asserts the *outcome* - the donation stays `Pending` - and
 the outcome is right. The request 500s, the throw is caught by the route's
 handler, nothing is written. It fails closed.
@@ -434,7 +449,7 @@ here - it is simply older than the fix. Marked closed below.**
 
 **SEC-04 is deliberately absent from this table.** Half of it is closed -
 `app.set('trust proxy', 1)` is at `app.js:50` and proven through Nginx. The
-limiter store is not wired; `routes/auth.js:19-25` still constructs a default
+limiter store is not wired; [location redacted while open] still constructs a default
 in-memory limiter. Per ADR-042 the finding stays open until **`auth.js` migrates**
 and swaps the import. Reporting it closed on the strength of the store existing is
 precisely the error ADR-042 was written to prevent.
@@ -534,14 +549,14 @@ without them, "the category endpoints still work" would have been an opinion.
 analysis, which enumerates callers rather than reasoning about purpose.
 **Trigger: `dataCleanupService` is retired, which happens with `donations.js`.**
 
-`POST /api/admin/cleanup/trigger` (`admin.js:281`) calls
+`POST /api/admin/cleanup/trigger` ([location redacted while open]) calls
 `triggerManualCleanup()`, which deletes donations older than ten years, and
 users older than ten years who have no donations.
 
 **What is NOT wrong, checked rather than assumed:**
 
 - **It is not reachable by a non-admin.** `router.use(adminAuth)` at
-  `admin.js:17` guards every route in the file, including this one. A non-admin
+  [location redacted while open] guards every route in the file, including this one. A non-admin
   gets 403, an unauthenticated caller 401. This was the specific question asked,
   and the answer is no.
 - **The blast radius today is zero rows.** Both deletes are bounded by a
@@ -678,7 +693,7 @@ question is open.
 
 matches the first user in the collection, passes `bcrypt.compare` against **that
 user's** hash, and proceeds to generate and store a login OTP
-(`auth.js:238-256`). The attacker is **past the credential check**, holding a
+([location redacted while open]). The attacker is **past the credential check**, holding a
 pending OTP for an account whose address they never knew.
 
 ### Why the original classification understated it
@@ -726,7 +741,7 @@ deploy 3.2, and until then to leave Atlas down.
 ## SEC-08 is CLOSED on /login, and is easy to reintroduce (AI4)
 
 Both an unknown address and a wrong password return `400 {"error":"Invalid
-credentials"}`, byte for byte (`auth.js:235-239`). I assumed otherwise and the
+credentials"}`, byte for byte ([location redacted while open]). I assumed otherwise and the
 test showed it.
 
 **The reintroduction risk is the useful half.** The natural repository
@@ -2423,7 +2438,7 @@ semantics. They should know they are its first caller.
 - **CATEGORY: not entangled.** One call, `categoryBridge.countCategories()` at
   `admin.js:31`, already resolving to MySQL. Nothing to do.
 - **DONATION: entangled, but NOT equally** - two `countDocuments` in
-  `GET /admin/stats` (`admin.js:27,32`). Read-only, no control, no false
+  `GET /admin/stats` ([location redacted while open]). Read-only, no control, no false
   success. **Reported rather than taken**, per AR3. Recommendation and its cost
   are in the audit document; the short version is that they sit in the same
   handler as the user count, so leaving them produces one handler reading two
@@ -2604,14 +2619,14 @@ moved down, and that is recorded as prominently as the one that moved up.
 **Was:** "Unauthenticated donor PII via `GET /payment/status/:txnid`" - Medium,
 filed as information disclosure.
 
-**Outcome, read from the code:** `payment.js:612` has no authentication of any
+**Outcome, read from the code:** [location redacted while open] has no authentication of any
 kind. It returns the WHOLE donation record, populated - donor name, email,
 phone, amount, and the payment details including `mihpayid` and `bank_ref_num`.
 The only thing standing between an anonymous request and a donor's personal data
 is knowing `txnid`.
 
 **And the application publishes `txnid` into the URL bar itself.** Every callback
-redirects to `FRONTEND_SUCCESS_URL?txnid=...` (`payment.js:247,304,391,471`). A
+redirects to `FRONTEND_SUCCESS_URL?txnid=...` ([location redacted while open]). A
 value in a query string is in the browser history, in the `Referer` header sent
 to every third party the success page loads, and in any analytics or error
 reporter on that page. **The credential protecting donor PII is transmitted the
@@ -2627,14 +2642,14 @@ disclosure" placed it.
 
 ### MOVED DOWN: SEC-18 is Low, and its real finding is a different one
 
-**Was:** "bcrypt cost 10 (`admin.js:128,220`)" - Medium.
+**Was:** "bcrypt cost 10 ([location redacted while open])" - Medium.
 
 **Outcome:** cost 10 versus 12 is a four-fold change in offline cracking cost,
 and it only matters at all GIVEN a database compromise. It is hardening, not a
 control that can be defeated. **Low.**
 
-**But reading it produced a better finding than the severity.** `admin.js:140`
-and `:232` call `bcrypt.hash(password, 10)` DIRECTLY - they do not go through
+**But reading it produced a better finding than the severity.** [location redacted while open]
+and [location redacted while open] call `bcrypt.hash(password, 10)` DIRECTLY - they do not go through
 `repositories/users`, which is where `BCRYPT_COST = 12` lives and where
 `create()` and `setPassword()` apply it. So:
 
@@ -2657,7 +2672,7 @@ than the number that led to it.
 auto-verifies" - Low.
 
 **Outcome, checked by enumerating every read of the flag:** `isVerified` is read
-in **exactly one place in the entire codebase** - `auth.js:312`, the line that
+in **exactly one place in the entire codebase** - [location redacted while open], the line that
 sets it to true. No route and no middleware gates anything on it.
 
 **So the flag is not a control.** An "unverified" account has precisely the
@@ -2791,7 +2806,7 @@ smallest correct alternative is to move `payment.js`'s donation WRITE path into
 The trigger was recorded as "once `donations.js` has migrated", reasoning that
 `Donation.category` stays an ObjectId ref *until donations migrate*. The concept
 was right and the file was wrong: **the ref is written by `payment.js:141`, not
-by `donations.js`.** `donations.js:47`'s write is BUG-01 and has never once
+by `donations.js`.** [location redacted while open]'s write is BUG-01 and has never once
 succeeded, so removing the minter at 3.3 would have broken the live donation
 write path on the first category created afterwards.
 
@@ -3449,8 +3464,9 @@ specific.
 | **4b** | Production cutover: freeze, rollback boundary, J3, snapshot rehearsal | Phase 3 complete |
 | **4c** | Terminal cleanup: `etl/`, `models/`, the `mongoose` dependency, `scripts/seedDatabase.js`, `docker-compose.legacy-mongo.yml` | 4b complete, rollback boundary closed |
 | **4d** | The Prisma advisory bump (U-6) - its own package because it regenerates the client the data layer sits on | after 4c, so a failure in either cannot be attributed to the other |
+| **4e** | **SEC-15: the session moves from `localStorage` to an httpOnly cookie** (CH3). Not small; see "SEC-15 - OPEN" | 4b complete, **and frontend and backend served from the same site** |
 | **5** | Frontend | Phase 4 complete |
-| **6** | Release: licence, history scrub, publication gate | Phase 5 complete |
+| **6** | Release: licence, rotation (no history scrub, CG1), publication gate (bypassed, Phase 6 checklist §0) | Phase 5 complete |
 
 **4a moving ahead does not reorder the phases** - it splits one. 4b stays last
 and is stronger for it: the ETL will have been exercised by five route packages
@@ -3506,7 +3522,7 @@ that needing materially different resolution logic rather than different
 parameters is the signal to stop.
 
 **`dataCleanupService` was live-reachable and had been treated as dead.**
-`admin.js:13` imports three of its functions, which DELETE donations and users.
+[location redacted while open] imports three of its functions, which DELETE donations and users.
 BUG-04 stops the cron firing, which is what made it look inert, but an admin can
 still invoke it. Retiring it removes a reader of `Donation`, `User` AND
 `PendingSignup` in one change, and takes `PendingSignup` to a single reader so
@@ -3580,12 +3596,12 @@ The original table is kept below as the record of what the package was given.
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| SEC-16 | Low | `PUT /donations/:id` writes any `status` string (`donations.js:249,293` - `findByIdAndUpdate`, no `runValidators`) | Repository accepts only enum members; MySQL ENUM rejects the rest | Test writes a junk status and expects rejection | **R** |
+| SEC-16 | Low | `PUT /donations/:id` writes any `status` string ([location redacted while open] - `findByIdAndUpdate`, no `runValidators`) | Repository accepts only enum members; MySQL ENUM rejects the rest | Test writes a junk status and expects rejection | **R** |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
-| BUG-01 | - | `POST /api/donations` can never succeed - builds a document without the required `donorEmail`/`amount` (`donations.js:22-33`) | Decide: supply the fields or delete the endpoint | Characterisation test records the current 400 **as current behaviour**, then the change is visible | **R** |
-| BUG-02 | - | `PATCH /:id/status` accepts only lowercase `approved`/`rejected` (`donations.js:289`) while callbacks write `Approved`. **MECHANISM NOW VERIFIED BY BEHAVIOUR (AM3)** - see below | Canonical enum casing through the repository | Test asserts both casings resolve correctly; see ADR-018 for the ETL side | **R**, mechanism confirmed **X** |
-| BUG-06 | - | `optionalAuth` 401s a guest holding a stale token (`donations.js:7-17`) | Catch the auth failure and fall through to guest | Test: expired token + guest donation succeeds | **R** |
-| BUG-08 | - | Unbounded pagination (`donations.js:112,218`) | As 3.1 | As 3.1 | **R** |
+| BUG-01 | - | `POST /api/donations` can never succeed - builds a document without the required `donorEmail`/`amount` ([location redacted while open]) | Decide: supply the fields or delete the endpoint | Characterisation test records the current 400 **as current behaviour**, then the change is visible | **R** |
+| BUG-02 | - | `PATCH /:id/status` accepts only lowercase `approved`/`rejected` ([location redacted while open]) while callbacks write `Approved`. **MECHANISM NOW VERIFIED BY BEHAVIOUR (AM3)** - see below | Canonical enum casing through the repository | Test asserts both casings resolve correctly; see ADR-018 for the ETL side | **R**, mechanism confirmed **X** |
+| BUG-06 | - | `optionalAuth` 401s a guest holding a stale token ([location redacted while open]) | Catch the auth failure and fall through to guest | Test: expired token + guest donation succeeds | **R** |
+| BUG-08 | - | Unbounded pagination ([location redacted while open]) | As 3.1 | As 3.1 | **R** |
 | ADR-041 | - | `distinct()` must keep data semantics, not enum semantics | `donations.listStatusesInUse()` | Already tested in `test:data-layer`; route test asserts the endpoint's shape | **R** |
 | ADR-003 | - | Deleting a user preserves their donations - **behaviour change** | FK `ON DELETE SET NULL`; `donor.isGuest` distinguishes | Test: delete a donor, donation survives and stays attributable | **R** |
 
@@ -3601,25 +3617,25 @@ The original table is kept below as the record of what the package was given.
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
 | SEC-08 | Medium | User enumeration (admin-side endpoints) | Generic responses | Test asserts identical responses for known and unknown | **R** |
-| SEC-18 | **Low** (AJ3: was Medium) | bcrypt cost 10 (`admin.js:140,232`). **The real finding is that these call `bcrypt.hash` DIRECTLY instead of `repositories/users`** - two hashing implementations, one governed by policy | Route both through `users.create` / `users.setPassword` | Test asserts the cost AND that an admin password reset revokes sessions | **R**, re-derived **X** |
+| SEC-18 | **Low** (AJ3: was Medium) | bcrypt cost 10 ([location redacted while open]). **The real finding is that these call `bcrypt.hash` DIRECTLY instead of `repositories/users`** - two hashing implementations, one governed by policy | Route both through `users.create` / `users.setPassword` | Test asserts the cost AND that an admin password reset revokes sessions | **R**, re-derived **X** |
 | **ADMIN-01** | **High** | **EVERY admin user-management operation writes MongoDB, which authentication no longer reads.** See the dedicated section above - this is not a bcrypt finding and not a `tokenVersion` finding, it is a store split | Migrate `admin.js`'s user operations, or move them into the package that owns the entity | Test: each admin operation, then assert the effect through `/api/auth/login` | **X** (AJ3) |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
-| SEC-21 | **Medium** (AJ3: was Low, and RESTATED) | **`isVerified` gates nothing.** It is read in exactly one place in the codebase - `auth.js:312`, the line that sets it true. SEC-05's shape. Not High only because self-service signup enforces verification structurally via `PendingSignup` | Decide whether the flag is a control. If it is, gate on it; if it is not, remove it rather than leave a field the admin UI can toggle to no effect | Test: an unverified account is refused, or the field is gone | **R**, re-derived **X** |
-| BUG-03 | - | **Dashboard "approved" counter is NOT "always 0" - it counts the LOWERCASE SUBSET** (`countDocuments({status:"approved"})`, `admin.js:32`). Measured in the AR1 audit: it returned **1 when the true figure was 2**. It reads 0 only where no admin ever used `PATCH /:id/status`; anywhere else it reads a plausible fraction. **A tile showing 0 is visibly broken; a tile showing 1 of 2 is believed** | Canonical casing; follows BUG-02, and closed as a side effect of migrating the two `/stats` counts | Test: donations approved through BOTH writers, expect the tile to count both | **R**, corrected by **X** (AR1) |
-| BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` (`Backend/vercel.json:15-20`) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
-| BUG-08 | - | Unbounded pagination (`admin.js:80`) | As 3.1 | As 3.1 | **R** |
+| SEC-21 | **Medium** (AJ3: was Low, and RESTATED) | **`isVerified` gates nothing.** It is read in exactly one place in the codebase - [location redacted while open], the line that sets it true. SEC-05's shape. Not High only because self-service signup enforces verification structurally via `PendingSignup` | Decide whether the flag is a control. If it is, gate on it; if it is not, remove it rather than leave a field the admin UI can toggle to no effect | Test: an unverified account is refused, or the field is gone | **R**, re-derived **X** |
+| BUG-03 | - | **Dashboard "approved" counter is NOT "always 0" - it counts the LOWERCASE SUBSET** (`countDocuments({status:"approved"})`, [location redacted while open]). Measured in the AR1 audit: it returned **1 when the true figure was 2**. It reads 0 only where no admin ever used `PATCH /:id/status`; anywhere else it reads a plausible fraction. **A tile showing 0 is visibly broken; a tile showing 1 of 2 is believed** | Canonical casing; follows BUG-02, and closed as a side effect of migrating the two `/stats` counts | Test: donations approved through BOTH writers, expect the tile to count both | **R**, corrected by **X** (AR1) |
+| BUG-04 | - | Retention purge has never run - Vercel cron hits `/api/admin/cleanup/trigger` behind `adminAuth` ([location redacted while open]) | Phase 2's `services/scheduler.js` replaces it; remove the dead cron declaration | Scheduler tests already pass; assert the endpoint is gone or authenticated by shared secret | **R** |
+| BUG-08 | - | Unbounded pagination ([location redacted while open]) | As 3.1 | As 3.1 | **R** |
 
 ### `routes/auth.js` + `routes/users.js` + `middleware/`  *(trigger: users data migrated; currently 3.2)*
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| **SEC-04** | **High** | **Rate limiting non-functional** - `routes/auth.js:19-25` builds a default in-memory limiter | Wire `config/rateLimiters.js`. **This is what closes the finding** (ADR-042) | `test:auth` unchanged; assert the Redis store is in use | **R** |
-| **SEC-05** | **High** | `isActive` never enforced and tokens cannot be revoked - confirmed: the flag exists on the model and `admin.js:196` toggles it, but **no route or middleware reads it**, and `tokenVersion` does not exist in `routes/`, `middleware/` or `models/` | Check `isActive` at both login steps and in both middlewares; `tokenVersion` on the token, incremented by `setPassword`/`setActive` | Test: disable an account, existing token rejected, login refused | **R** |
+| **SEC-04** | **High** | **Rate limiting non-functional** - [location redacted while open] builds a default in-memory limiter | Wire `config/rateLimiters.js`. **This is what closes the finding** (ADR-042) | `test:auth` unchanged; assert the Redis store is in use | **R** |
+| **SEC-05** | **High** | `isActive` never enforced and tokens cannot be revoked - confirmed: the flag exists on the model and [location redacted while open] toggles it, but **no route or middleware reads it**, and `tokenVersion` does not exist in `routes/`, `middleware/` or `models/` | Check `isActive` at both login steps and in both middlewares; `tokenVersion` on the token, incremented by `setPassword`/`setActive` | Test: disable an account, existing token rejected, login refused | **R** |
 | **SEC-03** | **High** | NoSQL operator injection - **12+ `findOne({ email })` call sites, no `String()` coercion anywhere in `routes/` or `middleware/`** | Parameterised SQL removes the class; repositories coerce and lowercase | Test posts `{"email":{"$ne":null}}` and expects no match | **R** |
 | SEC-08 | Medium | User enumeration on five endpoints | Generic responses | Test asserts identical responses | **R** |
 | SEC-10 | Medium | Password policy absent in two places, inconsistent elsewhere | One shared validator across all five paths | Test each path with a weak password | **R** |
-| SEC-13 | Medium | OTPs and reset codes stored in plaintext - confirmed at `auth.js:385` (`user.resetPasswordCode = verificationCode`) | Repositories store sha256 (`users.setResetCode`) | Test: read the row, assert no plaintext code | **R** |
-| SEC-18 | Medium | bcrypt cost 10 (`auth.js:57,506,533`) | `BCRYPT_COST = 12` | As 3.3 | **R** |
+| SEC-13 | Medium | OTPs and reset codes stored in plaintext - confirmed at [location redacted while open] (`user.resetPasswordCode = verificationCode`) | Repositories store sha256 (`users.setResetCode`) | Test: read the row, assert no plaintext code | **R** |
+| SEC-18 | Medium | bcrypt cost 10 ([location redacted while open]) | `BCRYPT_COST = 12` | As 3.3 | **R** |
 | SEC-19 | Low | `err.message` to client | As 3.1 | Characterisation test | **R** |
 | ADR-034 | - | A correct code at `/verify` must NOT clear the attempt counter | `users.verifyResetCode` deliberately does not reset | Already asserted in `test:auth` and `test:data-layer`; must stay true | **R** |
 | ADR-033 | - | Duplicate index declarations in the Mongoose models | Moot once the models go (3.6); must not be reintroduced in the Prisma schema | Drift gate; boot logs free of the Mongoose duplicate-index warning | **X** |
@@ -3629,12 +3645,12 @@ The original table is kept below as the record of what the package was given.
 
 | ID | Sev | Finding | Mechanism | Verification | Prov |
 |---|---|---|---|---|---|
-| **SEC-14** | Medium | **Still live.** Malformed hash throws `RangeError` - char-length guard, byte-length decode (`payment.js:51-52`) | Validate `/^[0-9a-f]{128}$/i` before decoding | Extend `payment-callbacks.test.js:355` to assert the response status, not only the donation state | **R**, re-opened by **X** |
-| SEC-06 | **High** (AJ3: was Medium) | Unauthenticated donor PII via `GET /payment/status/:txnid`, and the `txnid` protecting it is published into the URL bar by the app's own redirects - confirmed: no auth middleware at `payment.js:601` | Authenticate; random transaction ids | Test: unauthenticated request returns no PII | **R** |
-| SEC-07 | Medium | Donation attribution forgery - `userId` is destructured from `req.body` at `payment.js:99` and written at `:134` | Take the user from the token, never the body | Test: post a forged `userId`, assert it is ignored | **R** |
+| **SEC-14** | Medium | **Still live.** Malformed hash throws `RangeError` - char-length guard, byte-length decode ([location redacted while open]) | Validate `/^[0-9a-f]{128}$/i` before decoding | Extend [location redacted while open] to assert the response status, not only the donation state | **R**, re-opened by **X** |
+| SEC-06 | **High** (AJ3: was Medium) | Unauthenticated donor PII via `GET /payment/status/:txnid`, and the `txnid` protecting it is published into the URL bar by the app's own redirects - confirmed: no auth middleware at [location redacted while open] | Authenticate; random transaction ids | Test: unauthenticated request returns no PII | **R** |
+| SEC-07 | Medium | Donation attribution forgery - `userId` is destructured from `req.body` at [location redacted while open] and written at [location redacted while open] | Take the user from the token, never the body | Test: post a forged `userId`, assert it is ignored | **R** |
 | SEC-11 | Medium | Unauthenticated write endpoints allow storage/email flooding | `paymentInitiateLimiter` (built in Phase 2, unwired); stale-`Pending` sweep | Test the limiter fires; scheduler test for the sweep | **R** |
-| **PAY-01** | Low | **`quantity` is unbounded while `extraAmount` is clamped, on consecutive lines** (`payment.js:136-137`). `quantity="99999999999999999999"` prices a donation at 1.5e23, unauthenticated. After 3.4 it becomes an unauthenticated 500 instead | One `Math.min`, with the ceiling a named constant beside `extraAmount`'s so the pair cannot drift again | Test both bounds together | **X** (AJ3) |
-| SEC-19 | Low | `details: error.message` at `payment.js:443,475` | Generic message | Characterisation test | **R** |
+| **PAY-01** | Low | **`quantity` is unbounded while `extraAmount` is clamped, on consecutive lines** ([location redacted while open]). `quantity="99999999999999999999"` prices a donation at 1.5e23, unauthenticated. After 3.4 it becomes an unauthenticated 500 instead | One `Math.min`, with the ceiling a named constant beside `extraAmount`'s so the pair cannot drift again | Test both bounds together | **X** (AJ3) |
+| SEC-19 | Low | `details: error.message` at [location redacted while open] | Generic message | Characterisation test | **R** |
 | ADR-012 / ADR-026 | - | SEC-01 idempotency is a non-atomic read-then-write. **ADR-026 supersedes ADR-012's conclusion**: the `mihpayid` UNIQUE index is integrity, NOT the replay defence | Wrap the callback in `withTransaction` (SPEC-3 §4.3) | Concurrent-callback test | **R** |
 | ADR-024 §3 / ADR-026 / ADR-027 | - | No security decision may rest on an unsigned field; unsigned text must be escaped per sink | Keep the `verifyHash` banner; escape at each sink, not at ingest | Test asserts `unmappedstatus` cannot drive the decision | **R** |
 | SPEC-3 §4.6 | - | Alternate-case parser fallbacks (`.AMOUNT`, `.STATUS`, `udf_4`, `udf[4]`) | Delete them; keep the banner comment | Tests unchanged - they are unreachable today | **R** |
@@ -3692,9 +3708,9 @@ packages rather than rehearsed once against a snapshot.
 
 | ID | Sev | Finding | Prov |
 |---|---|---|---|
-| SEC-15 | Medium | JWT in `localStorage` (confirmed at `LoginPage.jsx:51,81`, `SignupPage.jsx:75`) | **R** |
+| SEC-15 | Medium | JWT in `localStorage` (confirmed at [location redacted while open], [location redacted while open]) | **R** |
 | SEC-17 | Low | `Frontend/.env` is tracked (confirmed by `git ls-files`) | **R** |
-| SEC-20 | Low | `/tailwind-test` and `/button-showcase` routed in production (`App.jsx:162-163`) | **R** |
+| SEC-20 | Low | `/tailwind-test` and `/button-showcase` routed in production ([location redacted while open]) | **R** |
 | BUG-07 | - | Dead and mismatched frontend API methods | **R** |
 | ADR-035 | - | `react-router-dom@7` major; the advisories themselves are unreachable | **X** (`npm audit` + reachability check) |
 | ADR-037 | - | `vite` exposure restated accurately - not build-time only | **X** |
@@ -5170,6 +5186,759 @@ files takes a string literal.**
 anywhere in the frontend.** X1's trigger has not fired, and the deferral still
 holds after the upgrade - which is the thing the re-run was for.
 
+
+---
+
+## BU1 - THE FIRST FINDING THAT CAME FROM THE WHITELABEL FRAMING, NOT FROM SECURITY
+
+Every finding in this map so far arrived by asking a security question. This one
+arrived by asking a **product** one.
+
+Package 5.4 replaced nine hardcoded `For Ocean Foundation` strings with the
+configured organisation name, and left `"For Ocean Foundation"` as the FALLBACK
+in three places - the React default, the PDF generator's parameter default, and
+`index.html`'s `<title>`.
+
+**Correct for this deployment. Wrong for a product.** A fallback renders before
+the branding fetch resolves, so every OTHER charity installing this would show
+For Ocean Foundation's name on their own site for that moment - and
+`index.html`'s title would show it before any JavaScript ran at all.
+
+> **A default is a decision about the installation you have not met.**
+
+`organisationName` now defaults to empty - which renders as nothing, and
+**nothing beats briefly rendering the wrong organisation**. The PDF defaults to a
+generic title and `index.html` says "Donations".
+
+SPEC-5 section 10 asked for exactly this ("no hardcoded For Ocean Foundation
+string remains in the frontend") and the first pass satisfied it in spirit while
+leaving four. The literal reading was the correct one.
+
+### Why it is worth recording as a class
+
+The security questions this project has been asking - what does an attacker see,
+what does a control actually measure - do not reach it. Nothing about a fallback
+organisation name is exploitable. It is wrong because **the audience changed**:
+the code is no longer for one NGO, and a value that was a fact became an
+assumption the moment the software acquired a second possible installer.
+
+Phase 5 is the first phase where that question applies, and it should be asked
+of every remaining default before publication.
+
+---
+
+## BT3b - `npm audit` HEADLINES AND DEPENDENCY TREES DISAGREE IN BOTH DIRECTIONS
+
+Two findings, one lesson, pointing opposite ways:
+
+| | The claim | The tree | The lesson |
+|---|---|---|---|
+| **U-6** | `package.json` lists `prisma` under `devDependencies` | `@prisma/client` (a PRODUCTION dependency) pulls `prisma`, so three HIGH advisories were in the production tree | **the declaration was wrong** |
+| **BT3** | `npm audit` in `Frontend/` reports 2 vulnerabilities, **1 high** | `npm audit --omit=dev` reports **0**. Both are build tooling, and the esbuild advisory is specifically about the DEVELOPMENT SERVER | **the headline was wrong** |
+
+> **Neither the declaration nor the headline is the answer. The tree is.**
+
+And U-6 added the other half, which is the one most likely to be skipped:
+**an advisory names a vulnerable PACKAGE and a vulnerable RANGE.** Upgrading the
+thing that depends on it is a different claim - bumping Prisma to v7 would have
+changed a major version of the data layer and left all three advisories in
+place, because the vulnerable range covers v7.
+
+**Queued, not started:** `vite@8`, a build-tool major. It fixes a dev-server
+advisory that reaches no deployed site and no self-hoster, so it is its own
+package rather than something to fold into a router upgrade.
+
+
+---
+
+## ENV-02 (HIGH) - THE GATEWAY DEFAULT TOOK DONATIONS THAT NEVER ARRIVED
+
+**Severity: HIGH. Fails in the direction that looks like success.**
+
+```yaml
+PAYU_BASE_URL: ${PAYU_BASE_URL:-https://test.payu.in}     # was
+```
+
+A self-hoster who did not set it ran the **entire donation flow against PayU's
+sandbox**. The site works. Donors complete payments. Receipts render, the admin
+dashboard fills in, donations are marked Paid.
+
+**No money moves.**
+
+Every symptom points away from the cause: the code is correct, the hashes
+verify, the callbacks arrive, the database is consistent. **The only way to
+notice is reconciling against a bank account that never received anything.**
+
+### Beside ENV-01, because the pair is the lesson
+
+| | ENV-01 | **ENV-02** |
+|---|---|---|
+| The variable | **ABSENT** | **PRESENT** |
+| What it silently disabled | a security check - PayU response hashes became publicly computable | **the purpose of the software** - donations that never arrive |
+| The symptom | none. A hash verified and matched | none. A donation completed and was marked Paid |
+
+> **ENV-01 was an absent variable silently disabling a security check. ENV-02 is
+> a present variable silently disabling the point of the software. Both fail in
+> the direction that looks like success.**
+
+### Why `:?` and not a runtime guard, which is where ENV-01 went
+
+`PAYU_MERCHANT_SALT` is guarded at the point of use, because a blank salt is
+**detectable by the code**: it refuses at the moment it would have signed
+something, and that leaves the stack running for people not working on payments.
+
+**A test gateway and a production gateway are indistinguishable to the code.**
+Both are valid hosts, both answer, both sign correctly. There is no observation
+the software can make that separates them. Only the operator knows which one
+they meant, so the only place to ask is before the stack starts.
+
+### Fixed, and asserted BY OUTCOME
+
+- `docker-compose.yml`: `${PAYU_BASE_URL:?...}` with the two hosts named in the
+  message.
+- **`config/payu.js` had a SECOND fallback** - `|| 'https://test.payu.in'` -
+  which would have survived the compose file being fixed. Removed. AY2 again:
+  the same default, one layer down, in the file the first one is about.
+- `.env.example` is **deliberately blank** with both hosts in the comment. A
+  value there is inherited by everyone who copies it.
+- CI asserts the stack **refuses to start**, before the `.env` is written, which
+  is the only moment the variable is genuinely absent. A test grepping the
+  compose file for `:?` would measure the declaration; this measures the
+  behaviour (BO3).
+
+### The only detection available, written down rather than assumed
+
+**The first real donation after any deployment must be reconciled against the
+bank before the site is announced.** There is no code-level check for this and
+there cannot be one. It is in the self-hosting notes and in the 4b runbook.
+
+---
+
+## BW2 - THE OPERATIVE RULE FOR DEFAULTS
+
+> **A default is acceptable when it is universal, or when it fails safe, or when
+> getting it wrong is VISIBLE and CHEAP TO CORRECT.**
+>
+> **A default is not acceptable when an installer must get it right for their
+> own context and THE WRONG VALUE WORKS.**
+
+### It supersedes BU1's first version, and the difference is instructive
+
+BU1 framed it as **"a fact about this deployment versus a decision about an
+installation nobody has met"**. That framing found the organisation-name
+fallback, which is why it was written - but applied consistently it is wrong in
+both directions:
+
+- **It flags the branding seed colours**, which are For Ocean Foundation's blue
+  and therefore a local fact. Keeping them is required by SPEC-5 section 10, and
+  a wrong colour is visible on first load and fixed in thirty seconds.
+- **It misses the cost asymmetry entirely.** `PAYU_BASE_URL` and a hex colour
+  are both local facts. One costs an NGO every donation until somebody reads a
+  bank statement; the other costs a click.
+
+The operative question is not *where did this value come from* but **what does
+getting it wrong cost, and how soon does anyone find out**. BU1's version is
+recorded as the weaker first attempt rather than deleted - it produced the
+finding that led here.
+
+---
+
+## BW3 - THE OTHER THREE DEFAULTS
+
+### `SCHEDULER_TIMEZONE`: `Asia/Kolkata` -> `UTC`. DONE.
+
+A fact about one deployment. An NGO elsewhere had destructive jobs firing at
+whatever local hour 02:00 IST happens to be for them - quietly, because a cron
+at the wrong hour still fires. **Neutral beats somebody else's local time**: an
+operator who wants their own hour sets the variable, and one who never thinks
+about it gets a value that is wrong for nobody in particular.
+
+### `RETENTION_YEARS`: hardcoded -> environment, with validation. DONE.
+
+Ten years is a **legal** figure that varies by jurisdiction, and it was not even
+environment-configurable, on a job that **deletes donation records**.
+
+AT1 keeping `JOB_RETENTION_PURGE` off by default is a **mitigation, not a fix**:
+nothing is deleted on a number nobody chose *until somebody turns the job on and
+inherits a figure they never saw*. It now reads from the environment and refuses
+a non-positive value, and the default stays 10 for continuity with this
+deployment.
+
+### `INR`: LEFT, and recorded as a constraint of the gateway rather than a default
+
+Hardcoded in the donations repository, the schema default and the branding seed.
+
+**It is not independently changeable.** PayU is an India-only gateway, so an
+installation outside India cannot use the payment flow at all - the currency is
+*downstream* of a gateway choice this project already made.
+
+Making the currency configurable would produce a field an NGO can set to EUR and
+still not be paid in, which is worse than the honest statement:
+
+> **This software supports PayU. PayU is India-only. An NGO outside India needs
+> gateway work, which is a piece of engineering and not a configuration value.**
+
+**What would unblock it: supporting a second gateway.** Recorded as the trigger,
+so the currency question is revisited then rather than being rediscovered as a
+bug.
+
+
+---
+
+## FE-01 - `main`'s FRONTEND CANNOT BE INSTALLED AS COMMITTED
+
+**Not ours. Introduced by Dependabot's grouped bump, PR #5, already merged to
+`main`.**
+
+PR #5 raised `vite` to `^8.3.0`. `@vitejs/plugin-react` `^4.2.1` resolves to
+4.7.0, whose peer range is `^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0`. vite 8 is
+outside it.
+
+| npm | What it says |
+|---|---|
+| **11** | `ERESOLVE unable to resolve dependency tree ... peer vite@"^4.2.0 \|\| ^5.0.0 \|\| ^6.0.0 \|\| ^7.0.0" from @vitejs/plugin-react@4.7.0` - the real error |
+| **10** - which Node 20 ships, and which CI uses | `Cannot read properties of null (reading 'edgesOut')` - **an opaque crash naming nothing in this project** |
+
+The symptom under the npm most likely to hit it gives no indication of the
+cause.
+
+### Fix, proven on `main`'s own tree
+
+`@vitejs/plugin-react` `^6.1.2` (the line declaring vite 8 support) **and a
+committed lockfile**. Without the lockfile npm 10 still crashes on fresh
+resolution even with compatible versions - its own bug. With one, npm 10's
+`npm ci` and `npm install` both succeed and the lockfile is stable across runs.
+Then: vite 8.3.4 builds, and **ten routes load in headless Chromium with zero
+uncaught exceptions.**
+
+Both Vercel projects run Node `24.x`, which satisfies vite 8's and plugin-react
+6's `^20.19 || >=22.12`. The fix will not fail on the Node setting.
+
+### Two moderate advisories that the fix does NOT touch, and why both are unreachable
+
+`npm audit --omit=dev` on `main`'s frontend reports two `react-router` 6
+advisories. They are pre-existing and the fix cannot have introduced them - it
+changes one devDependency.
+
+- **Open redirect via backslash in `<Link>`/`useNavigate`.** X1's enumeration,
+  re-run in 5.5: every navigation target is a literal or a fixed prefix with a
+  server id interpolated not at the start. Unreachable.
+- **Constructor injection via `deserializeErrors()` in SSR hydration.** The app
+  calls `createRoot`, uses `BrowserRouter`, and has no `hydrateRoot`, data
+  router or hydration data anywhere. The vulnerable function only runs when
+  hydrating server-rendered router state, which this client-only app never
+  does. Unreachable - checked, not assumed.
+
+Both are closed by react-router 7.18.4, which PR-F delivers.
+
+---
+
+## THE RULE: "NO CONFLICTS" IS NOT EVIDENCE A MERGE WORKS
+
+Merging `origin/main` into phase-2, `Frontend/package.json` merged with **no git
+conflict** to `vite ^8` - phase-2 never touched that line - while phase-2's
+lockfile still pinned vite 5. **Git saw a clean merge. npm refused to install
+it.**
+
+> **For any merge touching either frontend package file, regenerate the
+> lockfile with npm 10 and run `npm ci`. A clean merge of a manifest says
+> nothing about whether the manifest and its lockfile still agree.**
+
+It generalises past npm: git merges TEXT, and any pair of files that must agree
+- manifest and lockfile, schema and generated client, migration and snapshot -
+can each merge cleanly into a pair that no longer does. The check has to be the
+tool that reads both, not the one that merged them.
+
+---
+
+## VERCEL - WHAT PRODUCTION IS ACTUALLY SERVING
+
+Read from both projects, environment values not touched:
+
+| | Frontend | Backend |
+|---|---|---|
+| Node | `24.x` | `24.x` |
+| **Serving** | `58bdadf` - PR #14, 10 Sept, `READY` | `58bdadf` - PR #14, 10 Sept, `READY` |
+| PR #5 (`17b30a1`), 18 Oct | **`ERROR`** - `BUILD_FAILED: Resource provisioning failed`, 784 ms | **`ERROR`** - same, 835 ms |
+
+**PR #5 never reached production.** So production is still on `nodemailer` 7,
+and the earlier concern that production email had been running on v10 does not
+apply.
+
+**PR #5 did not fail on FE-01.** It failed in under a second, before any install
+could run - and the backend, which has no vite at all, failed identically. The
+cause is account- or project-level, not code.
+
+**It is also a DIFFERENT failure from ADR-028.** The same deployment list shows
+ADR-028's commit-authorship block as `BLOCKED`. This is `ERROR` with a
+provisioning message. The cause is not visible from the API and needs the
+dashboard.
+
+> **Why this matters now: the hotfix is planned as "merge and deploy now".** If
+> provisioning is still failing, the merge will succeed and the deploy will not,
+> and production will keep serving the auth bypass while the PR shows as merged.
+> **The hotfix's deploy has to be confirmed `READY`, not assumed** - and the
+> provisioning failure is worth diagnosing before relying on it.
+
+---
+
+## BZ4 - AN UNRELATED PROJECT'S BRANCHES ARE IN THIS REPOSITORY
+
+`origin/setup-12` and `origin/setup-13` (identical) are **"Sentinel"**
+(`sentinel-tip`): their own initial commit on 22 Feb, no shared history with
+`main`, lowercase `backend/`/`frontend/`, a TypeScript frontend. **12 of 13
+commits are by Viraj.**
+
+They contain a fallback secret - `SECRET_KEY=${SECRET_KEY:-change-me-in-production}`,
+three times - the JWT-fallback shape: a working key whenever the variable is
+unset.
+
+**Left alone deliberately.** It is a colleague's work, possibly live elsewhere.
+It is added to Phase 6's scrub scope as a decision that **needs Viraj and is
+Gary's to make.**
+
+---
+
+## BZ5 - NODEMAILER 10: THE CORRECTION, AND WHAT IS STILL UNPROVEN
+
+Phase 2's own commit 3 had already upgraded `nodemailer` to `^10.0.3` -
+identically to Dependabot, which is why that line did not conflict. Every
+signup and login suite reaches `createTransport().sendMail()` and fails at the
+SMTP handshake with `EAUTH`; an API break would throw before that.
+
+**Delivery is still unproven**, and cannot be proven without a real mail server.
+**One real OTP after deployment is the only proof**, and it is in the 4b
+runbook.
+
+
+---
+
+## CB2 - FOUND WHILE BUILDING THE ENVIRONMENT LIST
+
+Full list: `docs/deployment-environment.md`. These are the items that are
+findings rather than configuration.
+
+| # | Finding | Severity | Disposition |
+|---|---|---|---|
+| CB2-1 | **Frontend CSP `connect-src` hardcodes the old backend hostname** (`Frontend/vercel.json`). Any new backend host is blocked by the browser | **Blocks step 5** | **CLOSED in post-F (#33), CX2.** `https://kindledger-api.vercel.app`; the old host removed |
+| CB2-2 | **Tracked `Frontend/.env` names the old backend.** If `VITE_API_URL` is unset on the new project, the build falls back to a hostname that will have no owner once the old project is deleted. **The CSP also allows that host.** Whether `*.vercel.app` names are re-claimable is UNVERIFIED | **High if claimable** | Same PR: remove the value so the fallback is `localhost` (fails loud) |
+| CB2-3 | **No `prisma generate` in the backend build.** Prisma documents stale-client failures on Vercel's dependency cache. Not reproduced: the cache cannot be simulated locally | Medium. The first deploy works | **Post-F: `"vercel-build": "prisma generate"`.** Not postinstall, which would have broken the Docker build: the Dockerfile runs `npm ci` before copying `prisma/`. Found while making the change |
+| CB2-4 | **`REDIS_URL` absent means per-instance in-memory rate limits on serverless.** Fails silent | **High on Vercel** | Required in the list. Check the boot log after first deploy |
+| CB2-5 | **`PRISMA_CONNECTION_LIMIT` default of 10 is derived for one container.** On serverless it multiplies by instance count | Medium | Derivation in the list. Start at 1 |
+| CB2-6 | **Logo upload and the scheduler cannot work on Vercel.** Read-only filesystem; no long-running process. `UPLOADS_DIR=/tmp` or `SCHEDULER_ENABLED=true` would turn a loud failure into a silent one | Recorded | Documented as unsupported on Vercel. DEF-05 |
+| CB2-7 | **A MongoDB credential was set on the FRONTEND project** (Atlas Marketplace integration, production). Vite only bundles `VITE_*`, so it was not shipped to browsers | Low | Not carried over |
+| CB2-8 | **Four secrets were stored as readable, not Sensitive.** Vercel flagged `MONGODB_URI`, `JWT_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` as `readable-secret` | Low | New project: create all as Sensitive |
+| CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **UNPINNED.** Queue for a follow-up: read from branding |
+| CB2-10 | **`npm run test:bridge` points at a test deleted in 3.6** | Trivial. Fails loud | **CLOSED in E (#31), CM1.** The script and its CI step were removed with the bridge. CI found it the first time the PayU job could start |
+
+**And one correction to how ENV-02 had been described.** "The stack refuses to
+start without `PAYU_BASE_URL`" is true of **compose only**. Vercel has no
+compose file. There, a missing value fails loud at the first donation, because
+there is no fallback (BW1), and a **wrong** value is still silent. The list says
+so.
+
+### Checked and clean
+
+**PayU salt history.** Every salt-shaped value ever committed (`git log --all
+-G`) is the `TEST…` fixture in a test file. No evidence the production salt was
+ever in the repository, so carrying it over is not contradicted.
+
+## CD - THE OLD VERCEL PROJECTS STAY
+
+**CD1: the plan changed.** Gary is creating new frontend and backend projects
+and **keeping** the old ones, rather than deleting them. Applied in
+`docs/deployment-environment.md` §1.2, §6, §7 and §8, and in the 4b runbook.
+
+| Was | Now |
+|---|---|
+| Secure the Atlas source before deleting the projects (env doc §7.1) | **Withdrawn.** Nothing is deleted. It returns if deletion does |
+| Recover carried-over values from source systems | **Copy from the old backend.** All nine COPY values are stored there as readable `encrypted`, so they can be revealed |
+| CB2-2: the old `*.vercel.app` name may be claimable once released | **Gone.** The name is not released. **`Frontend/.env` still gets fixed**: it is wrong, and while the old backend serves, a fallback build silently reaches it, on MongoDB, with SEC-03 |
+| SEC-03 stays live until the new backend is up | **Unchanged in substance.** It is now tied to an explicit act: the window closes when the old backend is **paused** (runbook §3.4), not when the new one comes up |
+
+**CD2: risks the plan change creates, each a runbook step, not a note.**
+
+| # | Risk | Severity | Runbook step |
+|---|---|---|---|
+| CD2a | **Two live backends.** Donations split between MongoDB and MySQL, and anything the old one takes after the ETL never reaches MySQL | **High** | §3.4 pause inside the freeze. §6a.1 re-confirm before reopening. §6 rollback order never passes through "both serving" |
+| CD2b | **The old projects serve `58bdadf` until they are turned off** | **High** (SEC-03) | §3.4 (backend), §6a.4 (frontend). Confirmed by request, before and after |
+| CD2c | **Credentials crossing over.** MySQL credential on the old backend, MongoDB credential on the new | **High** | §1.6, by name, both projects, including the Atlas integration. Repeated at §6a.2 |
+| CD2d | **The old projects are still Git-connected.** Production deploys on every push to `main`. Only `Resource provisioning failed` is stopping them | **High once provisioning works.** Post-F's CSP change would break the old frontend, and MySQL-era backend code would break the old backend | **CLOSED (CI2, 3 Nov 2026).** Gary disconnected Git from both before any PR merged. **Not in the CD brief; found while checking the projects** |
+| CD2e | **A copied host variable reproduces CD2a through configuration.** A copied `NOTIFY_URL`/`SUCCESS_URL` sends PayU's confirmations to the old backend. A copied `VITE_API_URL` sends everything | **High**, silent | Env doc §6: **REWRITE** action (8 names). Runbook §6a.3 |
+
+**A correction to CD2a's wording.** "Two backends pointed at the same Atlas
+cluster" happens literally only if CD2c is also broken. After 3.6 the new
+backend reads no MongoDB on the request path. The general form, which needs
+nothing else to go wrong, is two backends each taking donations into a
+different store. The steps above cover both.
+
+**CD3: copy-across column.** Env doc §6 gives each of the 36 backend names an
+action, and §2.1 and §2.2 carry the same column. Gary types in **21 on the
+backend and 1 on the frontend**. The other 15 stay unset. The brief's three
+actions became five. **REWRITE** is CD2e. **DO NOT SET** covers the
+13 names that must stay off Vercel.
+
+**Checked, not assumed:** the old projects' variable NAMES were re-read for
+this (21 on the backend, 2 on the frontend). Values were not decrypted.
+
+## ENV-03 (HIGH) - A CORRECT VALUE IN THE WRONG PLACE
+
+**Recorded as a finding in its own right (CE4).** It started as CD2e.
+
+Copy `NOTIFY_URL` from the old backend to the new one and nothing is wrong with
+the value. It is a well-formed URL, it answers, and the endpoint behind it
+verifies PayU's hash correctly. **It is the old backend's endpoint.** PayU's
+server-to-server confirmation goes there. While the old backend is up, it
+accepts the confirmation and records the donation as Paid **in MongoDB**. MySQL
+keeps it Pending. Neither side errors. Nothing in either log looks wrong.
+`SUCCESS_URL`, `FAILURE_URL` and `CANCEL_URL` do the same through the donor's
+browser. `VITE_API_URL` does it for every request the new frontend makes.
+
+**Beside ENV-02, because the pair is the class.** ENV-02 was a valid value from
+the wrong environment (sandbox). ENV-03 is a valid value from the wrong
+deployment. In both, the code has no way to tell. Every check it could run
+passes.
+
+| | |
+|---|---|
+| Names affected | 8: `ALLOWED_ORIGINS`, `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL`, `FRONTEND_SUCCESS_URL`, `FRONTEND_FAILURE_URL`, `VITE_API_URL` |
+| Fails | **SILENT** while the old backend serves. Loud once it is paused, except that a donation confirmed during the gap is already in the wrong store |
+| Why the copy is likely | The env list said "copy from the old project" for its neighbours. A person setting 21 variables by hand copies in runs |
+| Control | Env doc §6 gives these a separate action, **REWRITE**, so no row says COPY. Runbook §6a.3 checks them by host before donations reopen. Pausing the old backend at §3.4 turns the failure loud |
+| Not a control | The application. It cannot know which deployment it is |
+
+## CE5 - THE DEPLOY SEQUENCE, SETTLED
+
+Env doc §8 said production serves `58bdadf` "through 4b and 4c". ADR-062 said
+the new projects come "after Phase 4c". The runbook assumed donations land in
+MySQL at the end of 4b. **The runbook was right.** The new backend goes live at
+the **end of 4b, inside the freeze**, before donations reopen. 4c is cleanup
+afterwards.
+
+Fixed: env doc §8 (rewritten around the sequence), ADR-062 (annotated in
+place), and the runbook. The runbook verified through the application (§5.5)
+but never deployed it, so a §4a now deploys it. AL3 grep for other statements
+of the sequence (`4b and 4c`, `after Phase 4c`, `step 5`, `nothing deploys`,
+`first deploy`, `4c`): the remediation map's 4c/4d table and the runbook's §8
+already say 4c is cleanup after 4b. Nothing else stated the order. The same
+pass caught runbook §7a. It still said "the stack refuses to start" without
+`PAYU_BASE_URL`, which is the compose-only claim CB2 corrected. Fixed.
+
+## CI-01 (HIGH, for what it hid) - NO MYSQL JOB HAD EVER STARTED IN CI. FIXED (CM1)
+
+Found when the stack was pushed on 3 Nov and every branch went red.
+
+The workflows pass `--character-set-server=utf8mb4`,
+`--collation-server=utf8mb4_0900_ai_ci` and `--default-time-zone=+00:00` in a
+service container's `options:`. GitHub hands `options:` to `docker create`,
+and these are **mysqld** arguments, so Docker rejects them: `unknown flag:
+--character-set-server`, exit 125, at "Initialize containers". The flags
+arrived with Phase 1a (`4142de7`, PR #11). **The Schema workflow has failed on
+`main` at that step on every run since then.** The same block is in
+`app-tests.yml` twice (the data-layer job from AA1, and the job that grew a
+MySQL service in package 3.1).
+
+**What it meant:** until the fix, every "N/N green" in this map and in the commit history was
+a local or in-container run. That evidence is real, but **CI has never
+independently confirmed any MySQL suite.** The commits said "CI status
+UNCONFIRMED" at the time, and this is the answer. Only the MongoDB-only job
+(PayU callbacks and reset controls) has ever passed in CI, on A and B.
+
+**FIXED (CM1), at the earliest point each block exists.** The service
+`options:` keep only the health check. A "Configure MySQL as docker-compose.yml
+does" step applies the three settings with `SET PERSIST` once the server is
+up, reads them back with the database's defaults, and fails unless all five
+match compose. The `schema.yml` fix is in PR 1 (#24), so every PR inherits it.
+The two `app-tests.yml` blocks are fixed in the PRs that add them: B (#28) for
+the data-layer job, C (#29) for the PayU job. A merge cannot rewrite lines a
+branch adds itself. The secrets check moved to its own job with no services in
+E (#31), where the test first exists.
+
+**Proved in CI, not asserted.** Pass counts from the job logs:
+
+| Where | Suite | CI result |
+|---|---|---|
+| PR 1 (#24) | server-guard, schema, drift gate (twice) | 14/14, 30/30, clean |
+| B (#28) | data-layer (with the Redis store assertion) | 26/26 |
+| B (#28) | payment-callbacks, auth-reset, trust-proxy | 17/17, 6/6, 4/4 |
+
+### What the first full CI run found (CM1)
+
+Fixing CI-01 let every step run for the first time. Five things surfaced that
+local and in-container runs could not see. Each was fixed in the PR whose range
+introduced it, and each PR was re-run until green:
+
+| Where | Finding | Fix |
+|---|---|---|
+| D (#30) | **A vacuous test.** `payment-characterisation`'s "QUIRK (SEC-19)" asserted `details: error.message` was present. 3.4 removed the leak and left a comment saying so, and the test's regex matched the comment. It passed while unable to tell fixed from broken | Flipped to "SEC-19 CLOSED: no payment handler returns err.message to the client", on comment-stripped source with a non-vacuity check. Checked both ways: clean on the branch, both of `main`'s leaks caught |
+| E (#31) | CB2-10: the bridge test's CI step and script outlived the bridge | Removed |
+| E (#31), F (#32) | **The whole-suite runners hard-coded MongoDB at `mongo:27017`**, the compose hostname, so on a runner every MongoDB suite failed there while passing in its own step | The server comes from `TEST_MONGODB_URI`; the database name stays derived per suite; an Atlas host is refused. E also gets F's `null-minted` database exception, which it lacked |
+| E (#31) | **`signup-timing` and `password-timing` never set `JWT_SECRET`**, so `config/jwt.js` threw before either measured anything | Both set the same test-only value as every other suite |
+| F (#32) | **`branding.test.js` uploads into `/var/lib/kindledger/uploads`**, which only the api container's Dockerfile creates. Two upload tests got a 500 | A scratch directory unless `UPLOADS_DIR` is supplied, as `logo-upload.test.js` already did |
+
+**The class:** three of the five passed only inside the api container, whose
+environment and filesystem supplied what the suite assumed. "Every suite green"
+before CM1 meant "green in one environment". The runners now print the
+failing assertions under a FAIL, so the next one of these explains itself.
+
+Every count above reports 0 skipped and 0 todo. The PR descriptions carry
+the counts for every branch.
+
+**Found beside it, and fixed in post-F:** the ENV-02 step "The stack REFUSES
+to start without PAYU_BASE_URL" ran `docker compose config` with nothing set.
+Compose reports only the first missing required variable, and that was
+`DATABASE_URL`, so the step tested the wrong guard and failed. It passed
+locally because the checkout had a `.env`. The step now supplies the other
+five required variables. Checked both ways against a clean copy of the
+compose file: it refuses naming `PAYU_BASE_URL`, and accepts once that is set.
+
+## CG1 - THE REPOSITORY STAYS PUBLIC: WHAT IS EXPOSED, CHECKED 3 NOV 2026
+
+**Decided by Gary: public deliberately, rotate rather than scrub.** No history
+rewrite: it would break all ten stacked PRs and every clone. The Phase 6
+checklist §0 and §1 carry the consequences.
+
+### a. `for_ocean_security_review.md` is on `main`'s front page, not just in history
+
+Added at `bacd6d9` (24 May, "CloudPeak update"), removed in package 3.0
+(`6cfec20`), and from `main` itself by PR 1 (#24, CH1). **Until #24 merges
+the file sits at the root of `origin/main` and of 17 other public
+branches**, including the heads of the first five PRs as first opened. ADR-030 called it
+"never public", which assumed a private repository and no longer holds. It
+remains in history whatever happens to `main`.
+
+Most of its ~40 findings were fixed before production's `58bdadf`
+(SECURITY-REVIEW.md appendix A). **What it describes that production still
+has.** Production is `58bdadf`; none of the stack's fixes are merged or
+deployed:
+
+| Its ID | Now | In production (`58bdadf`) | Fixed where |
+|---|---|---|---|
+| BE-HIGH-03 | SEC-04: rate limiting non-functional | **Open.** In-memory default limiter, per instance on serverless | D (#30), package 3.2 |
+| BE-HIGH-06 | SEC-08: account enumeration on four endpoints | **Open** | D (#30) and E (#31) |
+| BE-MED-09 | SEC-16 / BUG-02: admin status writes unvalidated | **Open** | D (#30) |
+| BE-HIGH-07 | SEC-15: JWT in `localStorage` | **Open, everywhere.** Not fixed on the stack either | Not scheduled |
+| BE-MED-07 | Seeder sets `Password@123` for 1000 users | **Open in the legacy seeder** (see c) | Seeder deleted in 4c |
+| BE-MED-11 | SEC-12: no lockfiles to audit | **Open** | B (#28) |
+| LOW-02 | SEC-17: `Frontend/.env` tracked | **Open.** Post-F empties it; still tracked | Post-F (#33), partially |
+| LOW-03 to LOW-05 | Duplicate files, dead PDF generators, `console.log` sprawl | Open (hygiene) | Not scheduled |
+
+**Mitigating, and recorded, not leaned on:** production's backend answers
+**every** request with `FUNCTION_INVOCATION_FAILED` today, because MongoDB
+rejects its credentials (CI1, below). So nothing in that table is reachable
+while it stays down. That is an availability failure
+standing in for access control, the same shape SEC-03 was recorded with.
+
+### b. The JWT fallback is permanently public; production does not use it, confirmed by behaviour
+
+Fallback literals ever committed, values not reproduced here: **30 characters**
+in `Backend/config/jwt.js` from `e11a09e` (17 Jan) to `bacd6d9` (24 May), both
+ancestors of `main`; **43 characters** as a test fallback in
+`Backend/test/branding.test.js` from `3db866a` (22 Sep); 10 characters inside a
+comment in the secrets test.
+
+**Production is not using the 30-character one. Shown by behaviour, without
+reading the secret.** Production's `app.js` requires `routes/auth.js` (line
+12), and so `config/jwt.js`, which throws at load if `JWT_SECRET` is missing or
+under 32 characters, **before** `connectDB()` (line 88). Production's runtime
+logs for 3 Nov show every request reaching "MongoDB Connection Failed". So the
+guard passed, and the value is at least 32 characters.
+
+**Production is not using the 43-character one either.** Vercel records the old
+backend's `JWT_SECRET` as created with the project on 22 Jan and never edited.
+The test value first appeared eight months later. This is metadata, so it would
+miss a value copied *out* of production into the test. Nothing suggests that
+happened, and rotation (CG2) makes it moot.
+
+### c. `Password@123`: no current code path, one data path
+
+At `main` and every stack tip it appears only in `Backend/scripts/seedDatabase.js`
+(the legacy MongoDB seeder, which refuses to run unless `NODE_ENV` is not
+production **and** `ALLOW_SEED=true`), its README, the top-level README's
+warning, and a comment in the MySQL seeder explaining why that one generates a
+random password per run. **No application code uses it.** The seeder an
+installation runs today (`npm run db:seed`) never produces it.
+
+**The one way it reaches a current installation is data.** If the legacy
+seeder ever ran against production MongoDB, those hashes are in production, and
+the ETL copies password hashes verbatim. 4b runbook §2.2 checks every
+production hash against it **before** the ETL. Unknown until then.
+
+### Two things found while checking, both urgent
+
+**1. Production's MongoDB cluster name did not resolve.** At 08:33 UTC on
+3 Nov every production request failed with `querySrv ENOTFOUND
+_mongodb._tcp.foroceanfoundation-db.fbjyfvb.mongodb.net`, and Google DNS
+returned NXDOMAIN for the SRV record. I read that as a possibly deleted
+cluster. **That reading was wrong. Corrected under CI1 below.**
+
+### CI1 - CORRECTION: THE CLUSTER WAS PAUSED, AND THE CREDENTIALS ARE ALSO REJECTED
+
+**What happened:** the cluster is on Atlas's free tier, which **auto-pauses
+after 30 days with no activity**. A paused cluster's hostname is withdrawn,
+which is what the NXDOMAIN was. **Gary resumed it on 3 Nov. It was never
+deleted.** The deleted-cluster reading above was wrong.
+
+**The earlier entry, "MongoDB rejects the application's credentials", was NOT
+wrong, and stands.** After the resume, the SRV record resolves again, and
+production's next request (08:55 UTC) failed differently: `MongoDB Connection
+Failed bad auth : Authentication failed`. So two things are true at once:
+
+| Layer | State on 3 Nov | Evidence |
+|---|---|---|
+| Cluster | Paused by the free-tier auto-pause, then resumed by Gary | NXDOMAIN at 08:33; SRV resolves after the resume |
+| Production's `MONGODB_URI` credentials | **Rejected** | `bad auth : Authentication failed` at 08:55, after the resume |
+
+While the cluster was paused, the DNS failure **hid** the credential failure.
+That is why the first reading looked like a contradiction of the map.
+
+**Consequences:**
+
+- **Production is still down, and SEC-03 is still unreachable**, now because of
+  the credential rejection again. That is an availability failure, not a fix.
+  **If anyone restores production's MongoDB credentials, the SEC-03 bypass goes
+  live with it.** Git is disconnected (CI2), so merging #24 will not deploy the
+  fix.
+- **4b depends on a free-tier cluster that pauses itself and has no backups.**
+  Runbook §1.8 (keep it awake, export early), the RUNNING check before §3, and
+  §3 step 6 (export inside the freeze and prove it restores) are the controls.
+  Without step 6 the rollback in §6 rests on nothing.
+- **Auto-pause cannot be disabled on the free tier.** Atlas documents no
+  setting, and you cannot pause or unpause one on a schedule. It stays awake
+  through activity, so connect at least weekly, or move to a paid tier for the
+  cutover window (Gary's call).
+
+### CI2 - CD2d CLOSED
+
+Gary disconnected Git from both old Vercel projects on 3 Nov 2026, **before**
+any of the ten PRs merged. A merge to `main` can no longer reach them.
+Recorded consequence: the hotfix's merge will not deploy either (runbook
+§1.7).
+
+**2. `main` publishes a GPL v3 `LICENSE` today.** It sits beside ISC in
+`Backend/package.json` (ADR-029). ADR-061's reassurance, that the GPL commit
+`4f3b7ec` was made while private so no public grant exists, does not survive a
+public repository. Apache-2.0 arrives in E (#31). **What the published GPL text
+means for the versions under it is a licensing question for Gary.** Recorded,
+not answered.
+
+## SEC-15 (MEDIUM) - OPEN, AND NOT FIXED ANYWHERE (CH3)
+
+**Status, stated plainly: OPEN in production, OPEN on every branch, and until
+now in no package.** None of the ten PRs touches it. Earlier maps carried it
+as "R", which read like a deferral. It was a gap. It is also named, with its
+locations, in the old review that is permanently public (CG1). **Assigned to
+package 4e.**
+
+**What it is:** the login token is a bearer JWT kept in `localStorage`, and
+every authenticated call sends it in an `Authorization` header. Any script
+running on the frontend's origin can read it. The CSP narrows how such a
+script could arrive. It does nothing once one has, and then the token is
+stolen outright, valid for its full lifetime (1 hour), from anywhere.
+
+**What fixing it takes.** The fix is to keep the token where script cannot
+reach it: an httpOnly, Secure cookie set by the backend. **That changes the
+auth flow, and it is not small:**
+
+| Area | What changes | Size, measured at the stack tip |
+|---|---|---|
+| Backend: issuing | The login-OTP and signup-OTP completions set the cookie instead of returning the token in the body | the auth routes that issue tokens |
+| Backend: reading | `authMiddleware`, `adminAuth` and the auth check in `payment.js` read the cookie | 3 readers. `cookie-parser` and `credentials: true` are already in `app.js` |
+| Backend: logout | **New endpoint.** Logout is client-side today (delete from storage). An httpOnly cookie can only be cleared by the server | 1 route |
+| **CSRF** | **New exposure.** A cookie is sent automatically, so every state-changing route becomes forgeable from another site unless the cookie is `SameSite=Lax` or `Strict`, or the routes check a CSRF token. **The PayU callbacks are cross-site POSTs by design** and must stay outside cookie auth: they authenticate by hash | every POST, PUT, PATCH and DELETE |
+| Frontend: storage | Remove every read and write of the token | **23 call sites in 11 files** |
+| Frontend: requests | Every authenticated `fetch` sends `credentials: 'include'` instead of a header | 12 `fetch` calls, 7 header sites in 6 files |
+| Frontend: "am I logged in?" | Today it is "is there a token in storage" (`App.jsx`). Script cannot see an httpOnly cookie, so the app has to ask the server (`/api/auth/me`) on load | the app's auth state |
+| Tests | Every suite that authenticates sends `Authorization: Bearer`. Either the readers accept both during a transition, or the harnesses learn cookies | **6 of the 21 suite files** send an Authorization header |
+
+**The constraint that decides whether it is possible at all: same-site
+hosting.** `vercel.app` is on the Public Suffix List, so
+`<frontend>.vercel.app` and `<backend>.vercel.app` are **different sites**. A
+cookie from the backend is then a **third-party cookie**, which current
+browsers increasingly block outright (Safari already does). **With the two
+new projects on separate `*.vercel.app` names, SEC-15 cannot be fixed this
+way.** It needs either:
+
+- **one custom domain for both** (for example `donate.example.org` and
+  `api.example.org`, which are same-site), or
+- **the frontend proxying `/api` to the backend** through a Vercel rewrite, so
+  the browser only ever talks to one origin.
+
+**That decision is being made now, for a different reason:** the CSP hostname
+that keeps post-F (#33) a draft (CB2-1). **Choose the new hostnames with 4e in
+mind, or 4e starts by undoing them.**
+
+**Why not inside 4b:** rotating `JWT_SECRET` at the cutover already signs
+everyone out, which makes it tempting. But it would add an auth-flow change to
+the one window whose length is set by verification (runbook R3). It goes after
+4b and stays its own package.
+
+## BRAND-01 (LOW) - THE BRANDING PUT CAN WRITE THE STORAGE FIELDS
+
+Found by an automated review while preparing PR F. **Confirmed by reading the
+code. Not yet fixed.**
+
+`PUT /api/admin/branding` copies every field in `branding.WRITABLE`
+(`repositories/branding.js`), and that list includes `logoPath`, `logoMime`
+and `faviconPath`. Those were meant to be set only by the logo upload.
+
+| | |
+|---|---|
+| `logoMime` | Sent verbatim as `Content-Type` by the public `GET /api/branding/logo`. An admin can set `text/html`. `nosniff` is set and the file body is a re-encoded image, so getting script out of it is hard. It is still the wrong place to trust input |
+| `logoPath` | `resolveWithin()` confines it to the uploads directory, at serve and at delete. So the reach is "any file in uploads". The next upload then **deletes** the file it names as the previous logo |
+| Who | Admins only. A compromised admin account is the case |
+| Why LOW | Contained to the uploads directory, admin-only, and logo upload does not work on Vercel at all (CB2-6) |
+
+**Fix, proposed and not yet made:** a route-level allowlist for the PUT that
+excludes the three storage fields. Map `logoMime` against the upload's accepted
+types when serving. Require `logoPath` to match the shape the upload generates
+before resolving it. It needs the branding suite, which needs the compose
+stack. **Unpinned: Gary's call whether it rides in post-F or a follow-up.**
+
+
+## CX2 - THE BACKEND HOSTNAME IS CHOSEN: `kindledger-api.vercel.app`
+
+CB2-1 closes. `Frontend/vercel.json`'s `connect-src` names the new backend and
+**no longer names the old one**. Keeping both would have let a frontend built
+with the old `VITE_API_URL` keep working against MongoDB, which is the silent
+misrouting deployment-environment §1.2 describes.
+
+**What is verified and what is not.** On 3 Nov 2026 the name answered
+`404 DEPLOYMENT_NOT_FOUND`. That proves nothing is deployed there. It does not
+prove the project name is free: Vercel only settles that when the project is
+created, and a taken name gets a suffix. **The confirmation is the first step of
+creating the backend project, and it comes before the frontend deploys.**
+
+**SEC-15 is not helped by this choice** and was not meant to be: two
+`*.vercel.app` names are two sites. Package 4e's `/api` rewrite keeps this host
+as the rewrite target, so 4e does not have to start by undoing it.
+
+---
+
+## CQ1 - AUTO-DELETE HEAD BRANCHES CLOSED A STACKED PR UNMERGED
+
+**What happened.** #31 merged into `main` at 10:40:15 on 3 Nov 2026. The
+repository deletes head branches on merge, so `stack/e-request-path-leaves-mongo`
+was deleted - and it was #32's base. #32 closed, unmerged, at 10:40:18. `main`
+was then missing all 62 files of the whitelabel work, and #33 targeted a branch
+whose PR was closed.
+
+**The cause was advice, not a mistake at the keyboard.** Turning auto-delete on
+before merging #24 was my recommendation. Stacked PRs were the one case where
+it does harm, and the stack was exactly what was being merged.
+
+**Repair (CQ1).** `stack/e` restored at `f07435b`, #32 reopened and retargeted
+to `main` (62 files, unchanged), #33 retargeted to `main` before #32 merged.
+**No rebase was needed or done:** `f07435b` is in #32's history and `main`'s
+tree is byte-identical to it, so the retarget alone produces the same diff a
+rebase would, without rewriting the commits #33 is built on.
+
+**The rule.** While any open PR targets a branch other than `main`, auto-delete
+stays OFF, or every dependent PR is retargeted to `main` before its base merges.
+After a merge run, check that no PR ended closed-unmerged. Auto-delete is OFF
+now and goes back ON once #33 has merged.
+
+---
 
 ## Counts
 

@@ -69,11 +69,44 @@ const migrationState = require('../config/migrationState');
 const destructiveJobs = require('../config/destructiveJobs');
 
 // SPEC-1A section 9: donations are retained for ten years.
-const RETENTION_YEARS = 10;
+/**
+ * HOW LONG DONATION RECORDS ARE KEPT - A LEGAL DECISION, NOT A CONSTANT (BW3).
+ *
+ * This was hardcoded at 10 and not even environment-configurable, on a job that
+ * DELETES DONATION RECORDS. Ten years is a plausible figure for an Indian
+ * charity and it is not a fact about anyone else: retention obligations vary by
+ * jurisdiction and by the organisation's own commitments to its donors.
+ *
+ * AT1 keeping `JOB_RETENTION_PURGE` off by default is a MITIGATION, not a fix -
+ * it means nothing is deleted on a number nobody chose, until somebody turns
+ * the job on and inherits a figure they never saw.
+ *
+ * So it is configurable, and `assertRunnable` requires it to be stated
+ * explicitly when the purge is authorised - see config/destructiveJobs.js. The
+ * default remains 10 for continuity with this deployment; what changed is that
+ * an installation enabling the purge has to have said a number out loud.
+ */
+const RETENTION_YEARS = Number(process.env.RETENTION_YEARS || 10);
+if (!Number.isInteger(RETENTION_YEARS) || RETENTION_YEARS < 1) {
+  throw new Error(
+    `RETENTION_YEARS must be a positive whole number of years, got "${process.env.RETENTION_YEARS}". ` +
+      'It decides when donation records are permanently deleted.'
+  );
+}
 
 // Asia/Kolkata, matching the original node-cron declaration in
 // dataCleanupService.js. Times are otherwise ambiguous for an Indian NGO.
-const TIMEZONE = process.env.SCHEDULER_TIMEZONE || 'Asia/Kolkata';
+// UTC, NOT Asia/Kolkata (BW3).
+//
+// The original value matched For Ocean Foundation's node-cron declaration and
+// was a fact about ONE deployment. An NGO in Nairobi or Lima would have had
+// destructive jobs firing at whatever local hour 02:00 IST happens to be for
+// them - quietly, because a cron at the wrong hour still fires.
+//
+// Neutral beats somebody else's local time. An operator who wants their own
+// local hour sets SCHEDULER_TIMEZONE; an operator who does not think about it
+// gets a value that is wrong for nobody in particular.
+const TIMEZONE = process.env.SCHEDULER_TIMEZONE || 'UTC';
 
 const tasks = [];
 
