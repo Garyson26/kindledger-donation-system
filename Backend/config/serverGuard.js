@@ -25,7 +25,7 @@
  *
  * WHAT IT COSTS. Two SELECTs, once per process, on the pooled connection the
  * first request opens anyway. With PRISMA_CONNECTION_LIMIT=1 that is zero
- * extra connections - which matters on a host that caps connections per hour.
+ * extra connections - which matters on a host that allows 75 per user.
  * It runs no DDL; the CHECK-enforcement probe stays in the install-time gate.
  * =============================================================================
  */

@@ -158,65 +158,56 @@ database with data needs a backup taken first.
 **Fresh.** New database, new credential. **It goes on the new backend only.
 The old backend must never be given it** (CD2c, 4b runbook §1.6).
 
-### 1.5 The connection budget: `PRISMA_CONNECTION_LIMIT`, and two Hostinger limits
+### 1.5 The connection limit: `PRISMA_CONNECTION_LIMIT`, and Hostinger's 75
 
-Measured on the account (DB4): `wait_timeout = 20` seconds,
-`max_user_connections = 75`. The hourly cap (`max_connections_per_hour`) is
-in `SHOW GRANTS` and **is still unknown**; Hostinger's own example shows 500.
+Measured on the account (DB4, DC1): `max_user_connections = 75`,
+`wait_timeout = 20` seconds. **There is no hourly cap:** `SHOW GRANTS` carries
+no `MAX_CONNECTIONS_PER_HOUR` or `MAX_QUERIES_PER_HOUR` clause. So the one
+limit that matters is how many connections are open **at the same moment**.
 
 | Setting | Value | Why |
 |---|---|---|
-| `PRISMA_CONNECTION_LIMIT` | **`1`** | One connection per function instance. Measured: 200 queries, sequential or 50 at a time, used **one** connection; `10` used ten for the same burst |
-| idle lifetime | **none to set** | The application's pool keeps a connection until the SERVER closes it, then replaces it before the next query, with no failed request (measured, DB1). That is the longest a connection can live, which is what an hourly cap wants (CY1-4). With `wait_timeout = 20`, "until the server closes it" means 20 seconds of quiet |
+| `PRISMA_CONNECTION_LIMIT` | **`1`** | One connection per function instance. Measured: 200 queries, sequential or 50 at a time, used **one** connection; `10` used ten for the same burst. With 10, seven busy instances would take every slot |
+| idle lifetime | **none to set** | The application's pool keeps a connection until the server closes it, then opens a new one before the next query, with no failed request (measured, DB1). With `wait_timeout = 20`, an instance that has been quiet for 20 seconds holds **no** connection - which frees its slot for someone else |
 
-#### The simultaneous ceiling: about 70 function instances
+#### The ceiling: about 70 function instances active within any 20 seconds
 
-Each instance holds at most one connection, so the ceiling is
-`75 - headroom`. Keep **5** for the things that are not the application: a
-migration, phpMyAdmin, the ETL, a person at a prompt. **About 70 instances.**
-One instance serves many concurrent requests on Vercel, so 70 is a large amount
-of traffic for this site; a campaign email to the whole donor list is the kind
-of event that could approach it.
+Each instance holds at most **one** connection, and holds it only while it has
+served a request in the last 20 seconds. So the number that must stay under 75
+is **instances that were busy in the last 20 seconds**. Keep **5** for things
+that are not the application - a migration, phpMyAdmin, the ETL, a person at a
+prompt - which leaves **about 70**.
 
-**What happens past it:** the 76th connection is refused by the server
-(`User ... has exceeded the 'max_user_connections' resource (current value:
-75)`). Requests on the instances that could not connect fail - errors on
-sign-in, donation and the category list, `/api/health` 503 on those instances -
-while requests on instances that did connect keep working. **It clears by
-itself:** as the spike passes, idle instances' connections are closed by the
-server after 20 seconds and the slots free up. Nothing needs restarting.
+One Vercel instance serves many concurrent requests, so 70 simultaneously busy
+instances is far more traffic than this site has had. **The event that could
+reach it is a burst** - a campaign email to the whole donor list, or a link
+shared widely - not ordinary daily traffic.
 
-#### The hourly cap is the tighter limit, because `wait_timeout` is 20 seconds
+#### What it looks like past 70 - measured, so it is recognisable
 
-What spends the hourly allowance is **new connections**, not requests:
+Reproduced locally with a user capped at two connections, two "instances"
+holding both, and the real application booted as a third (DC1):
 
-```
-connections per hour ≈ new function instances per hour
-                     + quiet spells longer than 20 s, per warm instance
-                     + migrations, seeds and people at a prompt
-```
+| Where | What you see |
+|---|---|
+| A donor on an instance that could not connect | **A slow failure, not a fast one.** Each database query waits the pool's 10-second timeout before failing. The category list answered **500 after 30 seconds**. If the Vercel function's time limit is shorter, Vercel answers 504 instead |
+| `/api/health` on that instance | **503 after 10 seconds** |
+| Donors on instances that DID connect | **Nothing.** They keep working. That is what makes it look intermittent |
+| **The function log - the line to search for** | `[prisma] the database refused a new connection: 1226 ER_USER_LIMIT_REACHED User 'u433859718_...' has exceeded the 'max_user_connections' resource (current value: 75)` |
+| Also in the log, less useful on its own | `pool timeout: failed to retrieve a connection from pool after 10000ms (pool connections: active=0 idle=0 limit=1)` - `active=0 idle=0` means the instance never got a connection at all |
 
-A 20-second `wait_timeout` makes the second line large. An instance that
-answers a request every 30 seconds reconnects every time: **120 connections an
-hour from one instance doing very little.** Against a cap of 500, four such
-instances use it all. There is no keep-alive answer on serverless - an idle
-instance runs no code to ping with. **This is the number to watch in the first
-week:** count `[serverGuard] ... supported` lines (one per instance) and
-connection errors per hour in the Vercel logs, and get the real cap from
-`SHOW GRANTS`.
+**The `1226` line exists because of DC1.** Before it, the driver dropped the
+server's reason and the log showed only the pool timeout, which reads like a
+network fault. It is logged at most once a minute per instance.
 
-**The symptom when the hourly cap is reached.** Every route that touches the
-database fails at once and keeps failing **until the clock hour resets**:
+**It clears by itself.** Once the burst passes, instances go quiet and the
+server closes their connections 20 seconds later, freeing slots. Measured: the
+moment one slot freed, the refused instance answered **200 in 313 ms**. Nothing
+needs restarting or redeploying - a redeploy starts fresh instances that each
+want a connection, which makes it worse while the burst lasts.
 
-- donors see errors on sign-in, donation and the category list;
-- `/api/health` answers 503;
-- the function log shows `has exceeded the 'max_connections_per_hour' resource`.
-
-Nothing is wrong with the code, the data or the credentials, and redeploying
-does not help - a redeploy starts new instances, which spends more of the
-allowance. Wait for the hour to turn. If it happens more than once, the cap is
-too small for the traffic; only Hostinger can raise it, and the roadmap item
-(`docs/roadmap.md`) removes it.
+**If it happens more than once,** 75 is too small for the traffic, and only
+leaving shared hosting changes it (`docs/roadmap.md`).
 
 #### What this leaves: the accepted risk (DB1)
 

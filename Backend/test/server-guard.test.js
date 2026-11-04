@@ -419,3 +419,21 @@ test('DB3: no source file outside config/prisma.js builds its own PrismaClient (
   const unexpected = found.filter((f) => f !== path.join('config', 'prisma.js') && !READ_ONLY.has(f));
   assert.deepEqual(unexpected, [], `these build their own client and bypass the strict session: ${unexpected.join(', ')}`);
 });
+
+// =============================================================================
+// DC1 - the reason a connection was refused reaches the log, once a minute
+// =============================================================================
+test('DC1: a refused connection is logged with the server reason, and repeats are suppressed', (t) => {
+  const logged = [];
+  t.mock.method(console, 'error', (m) => logged.push(m));
+  const { logger } = buildPoolConfig('mysql://u:p@db/d');
+  const capped = { fatal: true, errno: 1226, code: 'ER_USER_LIMIT_REACHED', sqlMessage: "User 'u' has exceeded the 'max_user_connections' resource (current value: 75)" };
+  for (let i = 0; i < 27; i++) logger.error(capped); // the pool retries this often (measured)
+  assert.equal(logged.length, 1, 'once per minute, not once per retry');
+  assert.match(logged[0], /1226 ER_USER_LIMIT_REACHED .*max_user_connections/);
+  assert.doesNotMatch(logged[0], /mysql:\/\//, 'never the URL - it carries the password');
+  // The driver's logger also receives ordinary query errors, which are not a
+  // refused connection and must not be logged as one (measured: it does).
+  logger.error({ fatal: false, errno: 1062, code: 'ER_DUP_ENTRY', sqlMessage: 'Duplicate entry' });
+  assert.equal(logged.length, 1);
+});

@@ -6014,6 +6014,24 @@ became **two** across a 5 s pause; 3600 s stayed at one. So:
 connection until the server closes it and replaces it before the next query, so
 the `PRISMA_MAX_IDLE_CONNECTION_LIFETIME` variable CX1 added was removed again.
 
+### DC1 - CY1-4'S PREMISE DID NOT HOLD FOR THIS ACCOUNT, AND THE SYMPTOM WAS NOT WHAT WAS DOCUMENTED
+
+**There is no hourly cap.** `SHOW GRANTS` on the account carries no
+`MAX_CONNECTIONS_PER_HOUR` clause; the 500 came from an example in Hostinger's
+help centre, not from this account. CY1-4's reasoning about hourly caps is
+correct in general and moot here. Its conclusion - hold connections as long as
+the server allows - still costs nothing, and the binding limit is
+`max_user_connections = 75` (deployment-environment §1.5).
+
+**The documented symptom was wrong.** It said the log would show the server's
+"exceeded" message. Measured with a user capped at two connections: it does not.
+The pool waits 10 seconds per query, fails with `pool timeout ... active=0
+idle=0`, and the server's `1226 ER_USER_LIMIT_REACHED` reaches only the
+driver's logger. **Fixed:** `config/prisma.js` now logs fatal connection errors
+with the server's reason, once a minute per instance - and only fatal ones,
+because the same hook also receives every ordinary query error (measured: a
+duplicate key and a CHECK refusal both arrived there).
+
 ### CY3 - STRICT MODE IS THE GO/NO-GO, AND WHAT EACH ANSWER MEANS
 
 On shared hosting only the provider can set `sql_mode`, and Prisma 6 cannot set

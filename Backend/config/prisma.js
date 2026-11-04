@@ -75,13 +75,48 @@ const SESSION_INIT_SQL = `SET SESSION sql_mode = '${SESSION_SQL_MODE}', time_zon
  * NO IDLE-LIFETIME SETTING, AND THAT IS THE CONNECTION BUDGET (CY1-4). The pool
  * keeps its connections until the SERVER closes them, then replaces them before
  * handing them out (measured: no failed query across a wait_timeout). That is
- * the longest a connection can live, which is what an hourly connection cap
- * wants. A shorter client-side lifetime would only add billed reconnects.
+ * the longest a connection can live. A shorter client-side lifetime would only
+ * add reconnects. (Hostinger's account has no hourly cap, DC1; its binding
+ * limit is 75 simultaneous connections, and an instance quiet for longer than
+ * wait_timeout gives its slot back.)
  *
  * TLS: `sslaccept=strict` verifies the certificate, `accept_invalid_certs`
  * encrypts without verifying, and NO PARAMETER MEANS PLAINTEXT (measured). The
  * server guard refuses plaintext to any non-private host (DB4).
  */
+/**
+ * WHY THE SERVER REFUSED A CONNECTION - which nothing else reports (DC1).
+ *
+ * When the pool cannot open a connection, the query fails only with
+ * `pool timeout: failed to retrieve a connection from pool after 10000ms
+ * (pool connections: active=0 idle=0 limit=1)`. The server's actual answer is
+ * dropped. Measured with a user capped at two connections: the reason -
+ * `1226 ER_USER_LIMIT_REACHED ... exceeded the 'max_user_connections'
+ * resource` - reaches only the driver's logger. On Hostinger that is THE
+ * failure to recognise (75 connections per user), so it is logged here.
+ *
+ * The pool retries continuously - 27 calls in 3 s - so each distinct error is
+ * logged at most once a minute per process. Never the URL: it has the password.
+ *
+ * ONLY `fatal` errors. The driver's logger also receives every ordinary query
+ * error - a duplicate key, a CHECK refusal - which the application already
+ * handles; labelling those "refused a new connection" would send whoever reads
+ * the log after the wrong cause.
+ */
+const lastLogged = new Map();
+function logConnectionError(err) {
+  if (!err || err.fatal !== true) return;
+  const key = err.errno || err.code || 'unknown';
+  const now = Date.now();
+  if (now - (lastLogged.get(key) || 0) < 60000) return;
+  lastLogged.set(key, now);
+  console.error(
+    `[prisma] the database refused a new connection: ${err && err.errno} ${err && err.code} ${(err && (err.sqlMessage || err.message)) || ''}`
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+}
+
 function buildPoolConfig(raw = process.env.DATABASE_URL) {
   if (!raw) return undefined;
   const url = new URL(raw);
@@ -110,6 +145,7 @@ function buildPoolConfig(raw = process.env.DATABASE_URL) {
     // required anyway, so it is never needed there.
     allowPublicKeyRetrieval: !ssl && isPrivateHost(url.hostname),
     initSql: SESSION_INIT_SQL,
+    logger: { error: logConnectionError },
   };
   for (const k of Object.keys(config)) if (config[k] === undefined) delete config[k];
   return config;

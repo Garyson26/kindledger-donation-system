@@ -3533,4 +3533,5 @@ hard requirement, GLOBAL is a warning.
 - **TLS is required to any non-private host (DB4).** Hostinger offers TLS and
   does not require it; the guard reads `Ssl_cipher` and refuses plaintext.
 - **No idle-lifetime setting.** The driver's pool holds a connection until the
-  server closes it, which is what an hourly cap wants (CY1-4).
+  server closes it. That suits any connection limit; this account has no
+  hourly cap (DC1), only 75 simultaneous connections.
