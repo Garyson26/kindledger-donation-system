@@ -135,9 +135,11 @@ test('every _minor column is BIGINT UNSIGNED', async () => {
   `;
   assert.ok(rows.length >= 5, `expected at least 5 _minor columns, found ${rows.length}`);
   for (const r of rows) {
+    // `(20)` is a SPELLING, not a type: MariaDB reports the display width that
+    // MySQL 8.0.19+ stopped printing. Both are BIGINT UNSIGNED (CX1, CY1-3).
     assert.match(
       r.COLUMN_TYPE,
-      /^bigint unsigned$/i,
+      /^bigint(\(20\))? unsigned$/i,
       `${r.TABLE_NAME}.${r.COLUMN_NAME} is ${r.COLUMN_TYPE}, expected bigint unsigned`
     );
   }

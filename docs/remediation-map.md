@@ -3152,18 +3152,21 @@ owner, not to invent a body of work for it.
 
 ## When the symptom points away from the cause (AP4)
 
-A short list, because the pattern has now cost real time three times.
+A short list, because the pattern has now cost real time four times.
 
 | Symptom | Cause | The "fix" that would have hidden it |
 |---|---|---|
 | The auth suites PASS and then hang forever | Wiring Redis left a socket holding the event loop | A force-exit flag - which would have hidden a genuine resource leak, in a module every process imports |
 | The SEC-02 suite fails with 429 on its FIRST request | The Redis limiter is shared and persistent, so a re-run inherits the previous run's counters | Marking the suite flaky, or adding a retry |
 | An injected login returns 500 | The SMTP send failing AFTER the credential check was passed | Reading the 500 as a refusal - which is what happened, and it hid SEC-03 for a full package |
+| **DC1:** some donors get a 500 after ~30 s, others are fine; the log says `pool timeout ... active=0 idle=0` | Hostinger refused the connection with `1226 ER_USER_LIMIT_REACHED` (75 per user), and the driver dropped the reason | A bigger `PRISMA_CONNECTION_LIMIT` or a longer pool timeout - each asks for more of the connections the server has just refused |
 
 The common shape: **infrastructure made correct produces a symptom that reads as
 a broken test.** The natural response makes the test quiet rather than making
-the system right. In all three the honest read was available immediately from
-asking what the symptom would mean if the code were correct.
+the system right. In all of them the honest read was available immediately from
+asking what the symptom would mean if the code were correct. **DC1 is the same
+shape outside the test suite:** the symptom read as a slow network, and the
+cause - a specific, named refusal - had been discarded before it reached the log.
 
 ---
 
@@ -5937,6 +5940,247 @@ rebase would, without rewriting the commits #33 is built on.
 stays OFF, or every dependent PR is retargeted to `main` before its base merges.
 After a merge run, check that no PR ended closed-unmerged. Auto-delete is OFF
 now and goes back ON once #33 has merged.
+
+---
+
+## MIG-01 (HIGH) - A MIGRATION THAT FAILS PARTWAY LEAVES A PLAUSIBLE HALF-SCHEMA (CY2)
+
+**Found while testing MariaDB (CX1), and worse than the bug that exposed it.**
+`prisma migrate deploy` of the unmodified init migration on MariaDB 11.8 failed
+at statement ten, on `REGEXP_LIKE()`. By then the first six tables existed,
+`_prisma_migrations` held a failed row, and nothing could undo it: **DDL on
+MySQL and MariaDB commits statement by statement.** The database looked nearly
+right. A retry would not have fixed it; Prisma refuses to proceed past a failed
+migration until it is resolved by hand.
+
+That is the shape this project keeps meeting - ENV-01, ENV-02, BUG-02 - **a
+failure that leaves a state which looks like success.** On a shared host where
+dropping tables means clicking through phpMyAdmin, it is also an expensive one
+to be in.
+
+**Fix, CX1. The defence is ordering, because rollback does not exist:**
+
+1. **Refuse before the first statement.** `npm run db:migrate` runs the guard
+   first, and the guard now checks every server property the migration depends
+   on: CHECK enforcement, the 0900 collations by behaviour, strict mode in both
+   scopes. Every reason the migration could stop partway *because of the server*
+   is a reason the guard refuses.
+2. **The REGEXP change removes the one statement MariaDB could not run.**
+3. **Proved both ways in CI.** `schema-mariadb` asserts the migration applies in
+   full (8 tables, 1 finished migration, drift gate clean), not just exit 0.
+   `refuse-unsupported` runs `db:migrate` against MariaDB 10.11 and a non-strict
+   11.8 and asserts **zero tables** afterwards.
+4. **Recovery is written down** (deployment-environment §1.4): drop every table
+   including `_prisma_migrations`, then `npm run db:migrate` again.
+
+**What is NOT closed, stated.** `npx prisma migrate deploy` on its own still
+skips the guard; the docs say never, nothing enforces it. And a migration can
+still stop partway for reasons no pre-check sees - a dropped connection, a
+killed process. The guard closes the class "the server cannot run this", not
+every class.
+
+---
+
+## CX1 - MARIADB 11.4.5+ IS SUPPORTED. HOSTINGER IS FINAL
+
+Hostinger shared hosting runs MariaDB 11.8 and is the only host available. The
+guard refused MariaDB by name on a premise - "no utf8mb4_0900_* collations" -
+that MariaDB 11.4.5 made false. ADR-063 records the decision; this records what
+was measured against `mariadb:11.8.9` with `mysql:8.4.13` as the reference.
+
+| Area | Result |
+|---|---|
+| Email collation (c) | `utf8mb4_0900_as_ci` is an alias of `utf8mb4_uca1400_nopad_as_ci`. **22 pairs identical** on both servers, under both collations and through a unique index: jose@/josé@ distinct, case folded, trailing space distinct, Cyrillic homoglyph distinct. Config, not schema |
+| CHECK (d) | **One schema change:** MariaDB has no `REGEXP_LIKE()`, so `branding_settings` could not be created. Now the `REGEXP` operator. All 10 CHECK probes then enforce identically. errno differs (3819/4025), read by nothing |
+| ENUM, `ON UPDATE`, nullable UNIQUE (d) | Identical |
+| Strict mode (d) | Identical except **MariaDB's default admits zero dates**. Accepted (CY1-2), then **closed by DB1**: every application session now runs MySQL 8.4's default `sql_mode`, which includes `NO_ZERO_DATE` |
+| Time zone | Not a dependency. Prisma supplies `now()` itself; with the server at +05:30 both stored UTC |
+| Schema suite (e) | **30/30 on both.** One assertion changed for a server SPELLING, `bigint(20) unsigned` (CY1-3) |
+| Every other suite | **All pass on MariaDB 11.8**, run locally through `npm run test:all` |
+| Guard at start (b) | New. On 10.11: every data route and `/api/health` answer 503, the log says why |
+| TLS | **Measured: without an SSL parameter Prisma connects in PLAINTEXT**, even to a server offering TLS. `sslaccept=strict` refuses a self-signed certificate; `accept_invalid_certs` encrypts without verifying. Documented as the fallback, never "no parameter" |
+
+### CY1-4 - THE IDLE-TIMEOUT INSTRUCTION WAS BACKWARDS, AND WHY
+
+CX1 asked for "the shortest viable idle timeout". **That is the right answer to a
+cap on SIMULTANEOUS connections and the wrong one for Hostinger's cap, which is
+PER HOUR.** Under an hourly cap every reconnect is billed, and a short idle
+timeout turns one long-lived connection into a new one after every quiet spell.
+The reasoning for one limit was applied to the other; they need opposite
+settings.
+
+Measured with `connection_limit=1` against mariadb:11.8: 200 queries,
+sequential or 50 at a time, used **one** connection; an idle lifetime of 3 s
+became **two** across a 5 s pause; 3600 s stayed at one. So:
+`PRISMA_CONNECTION_LIMIT=1`, and connections held as long as the server allows.
+**DB1 made the second half automatic:** the MariaDB driver's pool keeps a
+connection until the server closes it and replaces it before the next query, so
+the `PRISMA_MAX_IDLE_CONNECTION_LIFETIME` variable CX1 added was removed again.
+
+### DC1 - CY1-4'S PREMISE DID NOT HOLD FOR THIS ACCOUNT, AND THE SYMPTOM WAS NOT WHAT WAS DOCUMENTED
+
+**There is no hourly cap.** `SHOW GRANTS` on the account carries no
+`MAX_CONNECTIONS_PER_HOUR` clause; the 500 came from an example in Hostinger's
+help centre, not from this account. CY1-4's reasoning about hourly caps is
+correct in general and moot here. Its conclusion - hold connections as long as
+the server allows - still costs nothing, and the binding limit is
+`max_user_connections = 75` (deployment-environment §1.5).
+
+**The documented symptom was wrong.** It said the log would show the server's
+"exceeded" message. Measured with a user capped at two connections: it does not.
+The pool waits 10 seconds per query, fails with `pool timeout ... active=0
+idle=0`, and the server's `1226 ER_USER_LIMIT_REACHED` reaches only the
+driver's logger. **Fixed:** `config/prisma.js` now logs fatal connection errors
+with the server's reason, once a minute per instance - and only fatal ones,
+because the same hook also receives every ordinary query error (measured: a
+duplicate key and a CHECK refusal both arrived there).
+
+**DC1 is accepted (DF2, 4 Nov 2026), and the logging fix is the valuable
+part.** The connection ceiling is the failure mode most likely to take this
+site down, and before the fix it was **unattributable**: the database gave a
+specific reason, `1226 ... max_user_connections`, and the log showed a vague
+pool timeout that reads as a network fault or a slow host. It is the AP4 shape
+(below) arriving in production instead of in a test, and it is in AP4's table
+now. The instinctive response to a pool timeout - a larger pool, a longer
+timeout, a retry - would have made it worse: each one asks the server for
+more of the 75 it has already refused.
+
+### CY3 - STRICT MODE IS THE GO/NO-GO, AND WHAT EACH ANSWER MEANS
+
+On shared hosting only the provider can set `sql_mode`, and Prisma 6 cannot set
+it per connection. So Hostinger's `@@GLOBAL.sql_mode` decides this, and nothing
+in this repository can change the answer. *[Wrong about Prisma: its own engine
+cannot, but its MariaDB driver adapter can. DB1 below.]*
+
+**If it contains `STRICT_TRANS_TABLES`:** proceed. The guard passes, CX1 ships.
+
+**If it does not, the guard refuses and the site does not run.** That is
+correct, and here is what the refusal is preventing - measured on mariadb:11.8
+with `sql_mode=''`, through the application's own write path:
+
+| Write | Non-strict result |
+|---|---|
+| A hand-written INSERT with `payment_status='banana'` | **Stored as `''`. Matched by no status filter. BUG-02 by configuration, exactly** |
+| Prisma create/update with an out-of-set enum | Refused by Prisma's own validation before any SQL is sent |
+| A 200-character donor name (column 120) | **Silently stored as 120** |
+| PayU's error text, 1500 characters (column 1000) | **Silently cut to 1000** |
+| A quantity of 5,000,000,000 | **Silently clipped to 4,294,967,295** |
+
+Every application and ETL write goes through Prisma's typed API, so the enum
+case is reachable only by hand-written SQL - phpMyAdmin, a one-off script. That
+narrows it; it does not close it, and the truncation and clipping rows are
+reachable by the application itself, silently. **The options, none of them
+configuration:**
+
+1. **Ask Hostinger to make the account's server strict.** The only fix that
+   keeps the guard as it is.
+2. **A host that allows it** - a Hostinger VPS, where `sql_mode` is yours.
+3. **Run on a non-strict server knowingly.** That means changing the guard to
+   accept it, adding length and range validation for every column the
+   application writes, and accepting that hand-written SQL can recreate BUG-02.
+   That is a decision, not a fix, and it would need recording as one.
+
+**OUTCOME: Hostinger is not strict, Gary chose 3 - and DB1 found a fourth
+option that makes 3 unnecessary on the application path.** See DB1 below.
+
+---
+
+## DB1 - SOLVED ON THE APPLICATION PATH: HOSTINGER'S GLOBAL `sql_mode` IS NOT STRICT, AND THE APPLICATION NO LONGER DEPENDS ON IT
+
+| | |
+|---|---|
+| **Was** | An accepted risk, Gary, 3 Nov 2026: Hostinger shared hosting is the only host available, and only the provider can set `sql_mode` there |
+| **Status** | **SOLVED for every write the application makes** (DF1, 4 Nov 2026). Not an accepted risk any more. The application sets strict mode itself, per connection, and the guard refuses if that ever stops working |
+| **What is left** | **Out-of-band SQL only** - phpMyAdmin, a hand-run session, a tool with its own client. Open, pinned in CI, mitigated by procedure (DB3 below) |
+| **Removed by** | Nothing in this repository can make Hostinger's server strict, so the out-of-band residual closes only when the database leaves shared hosting (`docs/roadmap.md`). Strict mode is **not** a reason for that move any more; the residual closes as a side effect of it |
+
+### Before building workarounds, the question DB1 asked: can the application set it per session?
+
+**Yes, and it was proved by behaviour** against a mariadb:11.8 whose GLOBAL
+`sql_mode` was `''`:
+
+| Mechanism | Result |
+|---|---|
+| A `sql_mode` in the connection string - four spellings | **Ignored.** Prisma's own engine runs no SQL on connect |
+| Prisma's MariaDB driver adapter, `initSql` on every new connection | **Works.** Session strict on the first connection, on the one replacing a KILLed connection, and on the one replacing a connection the server closed at `wait_timeout`. A hand-written `payment_status='banana'` was **refused (1265)** each time, with no failed query across the reconnects |
+
+So `config/prisma.js` now builds the client on that adapter, and every
+connection it opens runs MySQL 8.4's default `sql_mode` and UTC. **DB2's
+boundary validation was not built, and should not be**: the database itself now
+refuses, for every write the application makes, which is stronger than a
+re-statement of the schema's limits in route code that could drift from them.
+CY3's truncation and clipping rows - the ones the application itself could
+reach - are refused by the same mechanism.
+
+**Proved again in CI** (`refuse-unsupported`): on a non-strict 11.8,
+`db:migrate` proceeds with the warning, and the application's own invalid write
+is refused.
+
+### What the guard does now
+
+- Unsupported version or missing collations: **still REFUSES.**
+- The application's own SESSION not strict: **still REFUSES** - it would mean
+  `initSql` did not take, and every write would be exposed.
+- The server's GLOBAL not strict: **WARNING** on every cold start, naming what is
+  not enforced. A warning and not a refusal because the GLOBAL now governs only
+  out-of-band SQL, which the application cannot refuse on anyone's behalf.
+
+### DB3 - WHAT IS STILL UNPROTECTED, PLAINLY: OUT-OF-BAND SQL, OPEN
+
+| Writer | Covered? | How it is held |
+|---|---|---|
+| The API, every route | **Yes** | strict session; CI proves the refusal |
+| The ETL (`npm run etl`, `etl:null-minted`) | **Yes** - it uses `getPrisma()` | `server-guard.test.js` "DB3": fails if any source file builds its own `PrismaClient` |
+| `npm run db:seed` | **Yes** - moved onto `getPrisma()` in DB1 | same test |
+| A future admin import, if it uses `getPrisma()` | Yes | same test, which fails if it does not |
+| **phpMyAdmin, a hand-run SQL session, any tool with its own connection** | **NO** | **Pinned in CI:** an outside client's `'banana'` is stored as `''` on the non-strict server, and the job asserts it. If Hostinger ever becomes strict, that step fails and this row can close |
+
+The last row is the residual, **and the only part of DB1 still open**. It is the
+BUG-02 shape exactly: a donation in the table and in no report. The mitigation is procedural - **write nothing by
+hand**, and if a correction must be made, `SET SESSION sql_mode =
+'STRICT_TRANS_TABLES';` first in the same SQL tab (deployment-environment §1.5).
+
+---
+
+## DB4 - TLS WAS AVAILABLE AND OPTIONAL. THE APPLICATION NOW REQUIRES IT
+
+Hostinger reports `have_ssl = YES` and `require_secure_transport = 0`: TLS
+works, and the server accepts plaintext too. CX1 measured that a
+`DATABASE_URL` without an SSL parameter connects **in plaintext**, and only
+documented it. **DB4 enforces it:** the guard reads `Ssl_cipher` on the
+application's own connection and refuses if it is empty, for any host that is
+not loopback, RFC 1918, IPv6-local or a single-label service name. A dotted name
+counts as public even if it resolves privately - fail closed.
+
+Measured from a host the guard treats as public: no parameter **refused**;
+`sslaccept=strict` encrypted (and accepted MariaDB 11.8's own self-signed
+certificate - MariaDB 11.4+ clients can verify it against the account's
+password; **interception was not tested**); `accept_invalid_certs` encrypted
+without verification.
+
+---
+
+## DF3 - MERGING #33 DEPLOYED THE BACKEND TO PRODUCTION, WITH NO VARIABLES
+
+#33 said "merging deploys nothing". By the time it merged that was false: the
+`kindledger-api` project had been connected to the repository, with `main` as
+its production branch. Checked on Vercel, 4 Nov 2026:
+
+| | |
+|---|---|
+| Deployment | `dpl_58VuwRuDSBzMohnN5oQLf5nuQ2vF`, commit `824fef4` (the #33 merge), target **production**, state **READY**. The build passed: `prisma generate` only, no database contact |
+| Variables on the project | **None**, in any environment |
+| What it serves | `kindledger-api.vercel.app` is public (deployment protection excludes the production domain). **Every path answers 500 `FUNCTION_INVOCATION_FAILED`** |
+| Why | `config/jwt.js` throws on load with no `JWT_SECRET`, so the process exits before any route exists. It never reached the database |
+| Harm | **None found.** Nothing writes, nothing connects, no secret is involved, and nothing points at this URL yet: donors are still on the old backend (§8 of deployment-environment) |
+
+**This is fail-closed, and it is what should happen.** The risk is the next
+step, not this one. Production is pinned to `824fef4`, which is **pre-#38**: no
+request-time server guard, no strict session, no TLS refusal, no `1226` log
+line. If the variables are added and that deployment is **redeployed**, it boots
+- and connects to Hostinger without any of DB1, DB4 or DC1. Recorded in
+deployment-environment §8: **the first deploy with variables must be #38's
+merge, not a redeploy.**
 
 ---
 

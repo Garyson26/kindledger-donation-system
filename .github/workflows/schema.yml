@@ -197,3 +197,220 @@ jobs:
             fi
           done
           exit $bad
+
+  # ---------------------------------------------------------------------------
+  # CX1(f) - the same gate on MariaDB 11.8, the server Hostinger shared hosting
+  # runs. Both jobs must pass: the schema is one artefact for two servers.
+  # ---------------------------------------------------------------------------
+  # STOCK SETTINGS ON PURPOSE. The MySQL job applies three server settings first
+  # because docker-compose.yml does; a Hostinger customer can change none of
+  # them, so this job changes none of them either. If the schema only works on
+  # a configured MariaDB, this job is where that shows.
+  #
+  # The mariadb client inside the service container is used rather than the
+  # runner's mysql client, so a client/server auth-plugin mismatch cannot turn
+  # into a red run that says nothing about the schema.
+  schema-mariadb:
+    name: Schema conformance and drift (MariaDB 11.8)
+    runs-on: ubuntu-latest
+
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root-password
+          MARIADB_DATABASE: kindledger
+          MARIADB_USER: kindledger
+          MARIADB_PASSWORD: ci-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+          --health-start-period=30s
+
+    env:
+      DATABASE_URL: mysql://kindledger:ci-password@127.0.0.1:3306/kindledger
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: Backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Record the server as found
+        # Evidence, not a check: what an unconfigured MariaDB reports, so a
+        # change in the image's defaults is visible in the log.
+        run: |
+          docker exec ${{ job.services.mariadb.id }} mariadb -uroot -pci-root-password -N -B -e "
+            SELECT VERSION(), @@GLOBAL.sql_mode, @@collation_server, @@time_zone"
+
+      - name: Apply db/schema.sql
+        run: docker exec -i ${{ job.services.mariadb.id }} mariadb -ukindledger -pci-password kindledger < db/schema.sql
+
+      - name: Generate Prisma client
+        working-directory: Backend
+        run: npx prisma generate
+
+      - name: Server compatibility guard
+        working-directory: Backend
+        run: npm run db:check-server
+
+      - name: Server guard unit tests
+        working-directory: Backend
+        run: npm run test:guard
+
+      - name: Schema conformance tests
+        working-directory: Backend
+        run: npm run test:schema
+
+      - name: Drift gate
+        working-directory: Backend
+        run: npm run db:check-drift
+
+      - name: The migration applies IN FULL, through the install path (CY2)
+        working-directory: Backend
+        # `npm run db:migrate` - guard, then `prisma migrate deploy` - because
+        # that is what an installer runs. The unmodified init migration stopped
+        # partway on MariaDB and left six tables behind; "fully applies" is
+        # asserted by count and by the drift gate, not inferred from exit 0.
+        run: |
+          docker exec ${{ job.services.mariadb.id }} mariadb -uroot -pci-root-password -e "
+            CREATE DATABASE kindledger_from_migration;
+            GRANT ALL ON kindledger_from_migration.* TO 'kindledger'@'%';"
+          export DATABASE_URL=mysql://kindledger:ci-password@127.0.0.1:3306/kindledger_from_migration
+          npm run db:migrate
+          got=$(docker exec ${{ job.services.mariadb.id }} mariadb -uroot -pci-root-password -N -B -e "
+            SELECT CONCAT((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'kindledger_from_migration'), ' ',
+                          (SELECT COUNT(*) FROM kindledger_from_migration._prisma_migrations
+                            WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL))")
+          echo "tables, finished migrations: $got"
+          test "$got" = "8 1"
+          npm run db:check-drift
+
+  # ---------------------------------------------------------------------------
+  # CY2 - a refused install leaves NOTHING. MySQL-family DDL cannot roll back,
+  # so the only defence against a half-applied schema is refusing before the
+  # first statement.
+  #
+  # DB1 - and a NON-STRICT server is no longer refused, because the
+  # application makes its own sessions strict on connect. This job proves both
+  # halves of that: the application's writes are refused, and a client that
+  # does NOT go through config/prisma.js still stores '' - the accepted
+  # residual (DB3), pinned here so a change in either direction is seen.
+  # ---------------------------------------------------------------------------
+  refuse-unsupported:
+    name: Unsupported servers are refused; a non-strict one is made strict per session
+    runs-on: ubuntu-latest
+
+    services:
+      mariadb_old:
+        # No utf8mb4_0900_* collations before 11.4.5.
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root-password
+          MARIADB_DATABASE: kindledger
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12 --health-start-period=30s
+      mariadb_lax:
+        # A supported version with a non-strict GLOBAL sql_mode, as on
+        # Hostinger. Set below.
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root-password
+          MARIADB_DATABASE: kindledger
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12 --health-start-period=30s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies and generate the client
+        working-directory: Backend
+        run: |
+          npm ci --no-audit --no-fund
+          npx prisma generate
+
+      - name: Make the 11.8 server non-strict
+        run: |
+          docker exec ${{ job.services.mariadb_lax.id }} mariadb -uroot -pci-root-password -e "
+            SET GLOBAL sql_mode = ''"
+
+      - name: MariaDB 10.11 - db:migrate refuses, and creates nothing
+        working-directory: Backend
+        run: |
+          if DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3307/kindledger" npm run db:migrate; then
+            echo "::error::db:migrate SUCCEEDED against MariaDB 10.11"; exit 1
+          fi
+          tables=$(docker exec ${{ job.services.mariadb_old.id }} mariadb -uroot -pci-root-password -N -B -e "
+            SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'kindledger'")
+          echo "MariaDB 10.11: refused, tables left behind: $tables"
+          test "$tables" = "0"
+
+      - name: MariaDB 10.11 - the application refuses too (CX1(b))
+        working-directory: Backend
+        run: |
+          DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3307/kindledger" \
+          NODE_ENV=production VERCEL=1 JWT_SECRET=ci-only-jwt-secret-at-least-32-characters \
+          node -e '
+            const app = require("./app.js");
+            const server = app.listen(0, async () => {
+              const base = `http://127.0.0.1:${server.address().port}`;
+              let bad = 0;
+              for (const p of ["/api/categories", "/api/branding", "/api/health"]) {
+                const r = await fetch(base + p);
+                console.log(`${p} -> ${r.status}`);
+                if (r.status !== 503) bad++;
+              }
+              process.exit(bad ? 1 : 0);
+            });'
+
+      - name: Non-strict 11.8 - db:migrate proceeds, with the WARNING (DB1)
+        working-directory: Backend
+        run: |
+          out=$(DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3308/kindledger" npm run db:migrate 2>&1) || { echo "$out"; exit 1; }
+          echo "$out" | grep -E "WARNING|Database server OK"
+          echo "$out" | grep -q "WARNING: GLOBAL sql_mode is not strict" || { echo "::error::no warning"; exit 1; }
+
+      - name: Non-strict 11.8 - the application's own write is REFUSED; an outside client's is not (DB1, DB3)
+        working-directory: Backend
+        run: |
+          DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3308/kindledger" node -e '
+            const { getPrisma, disconnect } = require("./config/prisma");
+            const { randomUUID } = require("crypto");
+            (async () => {
+              const p = getPrisma();
+              const cat = await p.category.create({ data: { uuid: randomUUID(), name: "ci-db1", shortDescription: "s", donationAmountMinor: 100n } });
+              try {
+                await p.$executeRawUnsafe(
+                  "INSERT INTO donations (uuid, transaction_ref, donor_name, donor_email, category_id, base_amount_minor, amount_minor, payment_status) VALUES (?, ?, \"D\", \"d@x.com\", ?, 100, 100, \"banana\")",
+                  randomUUID(), randomUUID(), cat.id);
+                console.log("::error::the application stored an out-of-set ENUM on a non-strict server"); process.exitCode = 1;
+              } catch (e) { console.log(`application write refused: ${e.code}`); }
+              await disconnect();
+            })();'
+          stored=$(docker exec ${{ job.services.mariadb_lax.id }} mariadb -uroot -pci-root-password -N -B kindledger -e "
+            INSERT INTO donations (uuid, transaction_ref, donor_name, donor_email, category_id, base_amount_minor, amount_minor, payment_status)
+              SELECT UUID(), UUID(), 'D', 'd@x.com', id, 100, 100, 'banana' FROM categories WHERE name = 'ci-db1';
+            SELECT CONCAT('[', payment_status, ']') FROM donations ORDER BY id DESC LIMIT 1")
+          # THE RESIDUAL, PINNED (DB3). If this ever prints [Pending] or fails, the
+          # server became strict and DB3 can be closed.
+          echo "outside client stored: $stored"
+          test "$stored" = "[]"

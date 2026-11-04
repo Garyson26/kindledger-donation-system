@@ -512,6 +512,12 @@ tested explicitly.
 end-to-end path is worth confirming. Until then the connection-failure message
 notes that an auth error does not rule MariaDB out.
 
+**Amendment (CX1, 3 Nov 2026): the gap is closed, and its premise was wrong.**
+Prisma 6.19 authenticates against `11.8.9-MariaDB-ubu2404` without trouble, so
+the guard now runs end to end on MariaDB in CI - supported on 11.8, refused on
+10.11 and on a non-strict 11.8. The earlier failure was this host's connection,
+not MariaDB's handshake. And MariaDB is no longer refused by name: see ADR-063.
+
 ---
 
 ## ADR-017 — Package A's hotfix does not appear on this branch
@@ -3445,3 +3451,92 @@ The decision above stands. Two of its premises do not:
   from Git (runbook §1.7), the risk this ADR dropped, `main` auto-deploying
   MySQL code onto a MongoDB production, is held off only by that failure.**
 
+## ADR-063: MariaDB 11.4.5+ is supported, and the server guard tests behaviour at install AND at start
+
+**Status:** accepted (CX1, CY1)
+**Amends:** ADR-016, and the "MariaDB is not supported" line in README,
+CONTRIBUTING and `.env.example`.
+
+### Context
+
+Hostinger shared hosting runs MariaDB 11.8 (its own help centre: "Hostinger Web
+and Cloud hosting plans use MariaDB"), and it is the only host available to this
+deployment. The guard refused MariaDB by name, on the reasoning that it has no
+`utf8mb4_0900_*` collations. **That stopped being true in MariaDB 11.4.5**
+(MDEV-20912), which added them as aliases of its UCA 14.0 collations.
+
+### Decision
+
+1. **The requirement is per feature, not per product.** CHECK enforcement
+   (MySQL 8.0.16, MariaDB 10.2.1), the two 0900 collations (MySQL 8.0.1,
+   MariaDB 11.4.5), and a strict `sql_mode` in both scopes. The version gate
+   picks the threshold by flavour; the collations are then checked by
+   **comparing strings with known answers**, because a version number is a claim
+   and a comparison is a test.
+2. **The schema uses only SQL both servers accept.** One change was needed:
+   `REGEXP_LIKE()`, which MariaDB lacks, became the `REGEXP` operator in the two
+   colour CHECKs. The init migration was edited in place (CY1-1): a follow-up
+   migration would never be reached on a fresh MariaDB, and no production
+   database had applied it.
+3. **The guard runs when the application starts**, not only in `db:migrate`.
+   Before, a deploy pointed at an unsupported server booted and wrote data. Now
+   every route after `/api/health` waits for one verdict per process and
+   answers 503 on a refusal; `/api/health` answers 503 too. An unreachable
+   database is not a refusal (ADR-039 stands).
+4. **CI runs the schema job on both servers**, with MariaDB left at its stock
+   settings because a shared-hosting customer can change none of them, plus a
+   job proving a refused install creates nothing.
+
+### What was measured, and the differences accepted
+
+Identical on both servers: 22 email pairs under both collations and through a
+unique index; all 10 CHECK probes; 7 ENUM probes; `ON UPDATE
+CURRENT_TIMESTAMP(3)`; the nullable UNIQUE on `mihpayid`; 12 of 13 strict-mode
+probes; the schema suite (30/30) and the drift gate. Accepted differences: the
+CHECK errno (3819 vs 4025, read by nothing); MariaDB's default `sql_mode`
+admitting zero dates, which Prisma cannot write (CY1-2); fractional-second
+rounding beyond millisecond precision, which is never written. One test changed,
+for a server SPELLING: MariaDB reports `bigint(20) unsigned` (CY1-3).
+
+### Consequences
+
+- **The installed schema is only as good as the order of install.**
+  `npm run db:migrate`, never bare `prisma migrate deploy` - see MIG-01 in the
+  remediation map.
+- **Strict mode is now the hosting decision.** On shared hosting only the
+  provider can set `sql_mode`. If Hostinger's is not strict, the guard refuses
+  and there is no configuration answer; see the remediation map's CY3 entry.
+  *[Superseded by the amendment below: Hostinger is not strict, and the
+  application now sets it per session.]*
+- **A UCA version difference remains** (14.0 vs 9.0). The tested pairs are
+  Latin-script; a script whose weights changed between Unicode 9 and 14 could
+  compare differently.
+
+### Amendment (DB1, DB4, 3 Nov 2026): the application sets strict mode itself, and requires TLS
+
+**Hostinger's GLOBAL `sql_mode` is not strict.** Gary accepted that as a risk
+(remediation map DB1), and before any workaround was built, DB1 asked
+whether the application could set it per session. It can: `config/prisma.js`
+now builds Prisma on the MariaDB driver adapter, whose `initSql` runs MySQL
+8.4's default `sql_mode` and UTC on every connection the pool opens - proved
+on first connect, after a KILL and after `wait_timeout`, with an invalid ENUM
+refused each time. This also amends **ADR-019**: SESSION strictness is still a
+hard requirement, GLOBAL is a warning.
+
+**Consequences:**
+
+- **One driver for the whole data layer changed.** Every suite passes on it,
+  on both servers. The adapter must stay at the client's exact version; a test
+  fails if they diverge.
+- **Every writer must use `getPrisma()`.** A test fails if any source file
+  builds its own `PrismaClient` (the read-only drift gate excepted).
+- **TLS is required to any non-private host (DB4).** Hostinger offers TLS and
+  does not require it; the guard reads `Ssl_cipher` and refuses plaintext.
+- **No idle-lifetime setting.** The driver's pool holds a connection until the
+  server closes it. That suits any connection limit; this account has no
+  hourly cap (DC1), only 75 simultaneous connections.
+- **The accepted risk is retired (DF1, 4 Nov 2026).** With every application
+  connection strict, the non-strict server is no longer a risk on the
+  application path. Only out-of-band SQL is unprotected (remediation map DB3,
+  pinned in CI), and strict mode is no longer a reason for the roadmap's move
+  off shared hosting.

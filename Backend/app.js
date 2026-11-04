@@ -20,6 +20,7 @@ const paymentRoutes = require("./routes/payment");
 // Mongoose models are untouched and still serve every existing consumer.
 const healthRoutes = require("./routes/health");
 const { registerShutdownHandlers } = require("./config/prisma");
+const { requireSupportedServer, refuseUnsupportedServerAtBoot } = require("./config/serverGuard");
 const { initializeScheduler } = require("./services/scheduler");
 
 const app = express();
@@ -88,6 +89,11 @@ const openCors = cors();
 // otherwise be one more thing between the platform and a liveness answer.
 app.use("/api/health", healthRoutes);
 
+// CX1(b). Everything after health waits for one server verdict per process, so
+// a deploy pointed at an unsupported database refuses instead of writing to it.
+// See config/serverGuard.js for why "unreachable" is not a refusal.
+app.use(requireSupportedServer);
+
 app.use("/api/auth", restrictiveCors, authRoutes);
 // SPEC-5 5.2. PUBLIC and unauthenticated by necessity - the donor app needs
 // branding before anyone logs in, and before it knows whether anyone will.
@@ -155,6 +161,8 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  // Serverless has no "start" to refuse; the middleware above is its refusal.
+  refuseUnsupportedServerAtBoot();
 }
 
 // Export for Vercel serverless

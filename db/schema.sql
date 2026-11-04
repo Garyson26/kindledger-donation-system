@@ -414,10 +414,13 @@ CREATE TABLE IF NOT EXISTS branding_settings (
     ON DELETE SET NULL
     ON UPDATE RESTRICT,
   CONSTRAINT ck_branding_settings_singleton CHECK (id = 1),
+  -- The REGEXP OPERATOR, not REGEXP_LIKE(). MariaDB has no REGEXP_LIKE and
+  -- refused this table outright (CX1); on MySQL 8 the two are the same
+  -- function. Both servers verified to accept and refuse the same values.
   CONSTRAINT ck_branding_settings_primary_colour
-    CHECK (primary_colour IS NULL OR REGEXP_LIKE(primary_colour, '^#[0-9A-Fa-f]{6}$')),
+    CHECK (primary_colour IS NULL OR primary_colour REGEXP '^#[0-9A-Fa-f]{6}$'),
   CONSTRAINT ck_branding_settings_secondary_colour
-    CHECK (secondary_colour IS NULL OR REGEXP_LIKE(secondary_colour, '^#[0-9A-Fa-f]{6}$'))
+    CHECK (secondary_colour IS NULL OR secondary_colour REGEXP '^#[0-9A-Fa-f]{6}$')
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_0900_ai_ci

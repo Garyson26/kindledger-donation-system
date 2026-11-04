@@ -84,6 +84,11 @@ for_ocean_security_review.md
 # THIS FILE TOO: zero open findings, or redacted of file and line.
 !docs/entity-ownership-audit.md
 
+# DB5's roadmap. TRACKED and under the AC3 gate: decided-but-deferred work and
+# what each item retires. It repeats constraints already in the tracked
+# deployment-environment.md and carries no exploit detail.
+!docs/roadmap.md
+
 # =============================================================================
 # Node
 # =============================================================================

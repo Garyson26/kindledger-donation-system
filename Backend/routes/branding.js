@@ -9,7 +9,7 @@
  * VALIDATION REFUSES BEFORE THE DATABASE DOES, AND THAT IS THE POINT
  * -----------------------------------------------------------------------------
  * `branding_settings` already constrains the colours with
- * `CHECK (REGEXP_LIKE(primary_colour, '^#[0-9A-Fa-f]{6}$'))`. If the API just
+ * `CHECK (primary_colour REGEXP '^#[0-9A-Fa-f]{6}$')`. If the API just
  * forwarded the value, a bad colour would surface as a Prisma error and a 500 -
  * **the SEC-14 shape**, where a caller's malformed input becomes a server fault
  * and the log fills with stack traces for something that is simply a typo.
