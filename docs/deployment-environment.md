@@ -395,6 +395,12 @@ names read through `config/destructiveJobs.js`) and **1** on the frontend.
 **You type in 21 of them on the backend and 1 on the frontend.** The other 15
 stay unset.
 
+> **Tick Production only, not Preview or Development.** Vercel's form ticks all
+> three by default. With the project connected to Git, it builds a preview of
+> **every branch**, and a preview given these values is any branch's code
+> running against the donor database, with the real PayU salt (DF3). A preview
+> without them fails closed, as every deployment on the project does today.
+
 | Action | Means |
 |---|---|
 | **COPY** | Exists on the old backend. Copy the value across unchanged |
