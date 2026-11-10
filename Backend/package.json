@@ -46,7 +46,8 @@
     "test:branding": "node --test test/branding.test.js",
     "test:all": "node test/run-all-suites.js",
     "test:logo": "node --test test/logo-upload.test.js",
-    "test:rate-limiter-redis": "node --test test/rate-limiter-redis.test.js"
+    "test:rate-limiter-redis": "node --test test/rate-limiter-redis.test.js",
+    "test:email": "node --test test/email-transport.test.js"
   },
   "keywords": [],
   "author": "",

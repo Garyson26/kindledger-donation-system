@@ -10,8 +10,55 @@ function escapeHtml(s) {
     .replace(/'/g, '&#039;');
 }
 
-// Email configuration
-const createTransporter = () => {
+/**
+ * =============================================================================
+ * The transport (CP1): Resend first, SMTP as the fallback, neither = refuse
+ * =============================================================================
+ * RESEND when RESEND_API_KEY is set. Called directly over HTTPS with Node's
+ * fetch rather than through the SDK: one POST, and RESEND_BASE_URL lets the
+ * tests point it at a local server. Resend sends only from a verified domain,
+ * so EMAIL_FROM is required with it.
+ *
+ * SMTP otherwise, exactly as before: EMAIL_SERVICE=gmail, or SMTP_HOST/PORT/
+ * SECURE, authenticated as EMAIL_USER/EMAIL_PASSWORD.
+ *
+ * NEITHER: THIS MODULE REFUSES TO LOAD, as config/jwt.js does without a
+ * secret. Every login sends a code, so an app that cannot send mail cannot let
+ * anyone in - and before CP1 it started anyway, defaulted to smtp.gmail.com
+ * with no credentials, and failed one request at a time.
+ *
+ * Sends never throw. Every function below returns { success, messageId } or
+ * { success: false, error }, which is what routes/auth.js was written against:
+ * /login answers 500 when its code cannot be sent, and the SEC-08 paths are
+ * fire-and-forget.
+ * =============================================================================
+ */
+const DEFAULT_ORGANISATION_NAME = 'Your Organisation'; // the schema's default branding row
+const RESEND_DEFAULT_BASE_URL = 'https://api.resend.com';
+const RESEND_TIMEOUT_MS = 10000;
+
+function selectTransport(env) {
+  if (env.RESEND_API_KEY) {
+    if (!env.EMAIL_FROM) {
+      throw new Error(
+        'RESEND_API_KEY is set but EMAIL_FROM is not. Resend sends only from a verified domain: ' +
+          'set EMAIL_FROM to an address on it, e.g. no-reply@your-domain.org.'
+      );
+    }
+    return { kind: 'resend', from: env.EMAIL_FROM };
+  }
+  if (env.EMAIL_USER && env.EMAIL_PASSWORD) {
+    return { kind: 'smtp', from: env.EMAIL_FROM || env.EMAIL_USER };
+  }
+  throw new Error(
+    'No email transport is configured, and every login sends a code by email. Set RESEND_API_KEY and ' +
+      'EMAIL_FROM (Resend), or EMAIL_USER and EMAIL_PASSWORD (SMTP; with EMAIL_SERVICE=gmail or SMTP_HOST).'
+  );
+}
+
+const TRANSPORT = selectTransport(process.env);
+
+function createSmtpTransporter() {
   // For Gmail service
   if (process.env.EMAIL_SERVICE === 'gmail') {
     return nodemailer.createTransport({
@@ -33,15 +80,81 @@ const createTransporter = () => {
       pass: process.env.EMAIL_PASSWORD,
     },
   });
-};
+}
+
+/**
+ * CB2-9. The name every email uses, from branding - not the first NGO's name
+ * hardcoded in seventeen places. Unreadable branding must not stop a login code, so it
+ * falls back to the default row's name rather than failing the send.
+ */
+async function organisationName() {
+  try {
+    const branding = await require('../repositories/branding').getPublic();
+    return (branding && branding.organisationName) || DEFAULT_ORGANISATION_NAME;
+  } catch {
+    return DEFAULT_ORGANISATION_NAME;
+  }
+}
+
+/** The display name in From:, made safe for a header - no CR/LF, quotes or angle brackets. */
+function senderName(name) {
+  return String(name).replace(/[\r\n"<>]/g, '').trim() || DEFAULT_ORGANISATION_NAME;
+}
+
+async function sendViaResend({ to, subject, html }, name) {
+  const base = (process.env.RESEND_BASE_URL || RESEND_DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const res = await fetch(`${base}/emails`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+      // Resend rejects a request with no User-Agent (403).
+      'User-Agent': 'KindLedger',
+    },
+    body: JSON.stringify({ from: `${name} <${TRANSPORT.from}>`, to: [to], subject, html }),
+    signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
+  });
+  const text = await res.text();
+  // Status and body verbatim: Resend's reason ("domain is not verified") is
+  // the useful part, and its error body's fields are not pinned down here.
+  if (!res.ok) throw new Error(`Resend answered ${res.status}: ${text.slice(0, 300)}`);
+  let id;
+  try {
+    id = JSON.parse(text).id;
+  } catch {
+    id = undefined;
+  }
+  return id;
+}
+
+async function sendViaSmtp({ to, subject, html }, name) {
+  const info = await createSmtpTransporter().sendMail({
+    from: { name, address: TRANSPORT.from },
+    to,
+    subject,
+    html,
+  });
+  return info.messageId;
+}
+
+/** Send one message on the configured transport. Never throws. */
+async function deliver(message, organisation) {
+  const name = senderName(organisation);
+  try {
+    const messageId =
+      TRANSPORT.kind === 'resend' ? await sendViaResend(message, name) : await sendViaSmtp(message, name);
+    return { success: true, messageId };
+  } catch (error) {
+    return { success: false, error: (error && error.message) || String(error) };
+  }
+}
 
 // Send verification email
 const sendVerificationEmail = async (email, code, userName = 'User') => {
   try {
-    const transporter = createTransporter();
+    const org = await organisationName();
 
     const mailOptions = {
-      from: `"For Ocean Foundation" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: 'Password Reset Verification Code',
       html: `
@@ -66,7 +179,7 @@ const sendVerificationEmail = async (email, code, userName = 'User') => {
             </div>
             <div class="content">
               <p>Hi ${escapeHtml(userName)},</p>
-              <p>We received a request to reset your password for your For Ocean Foundation account.</p>
+              <p>We received a request to reset your password for your ${escapeHtml(org)} account.</p>
               
               <div class="code-box">
                 <p style="margin: 0; font-size: 14px; color: #666;">Your verification code is:</p>
@@ -87,11 +200,11 @@ const sendVerificationEmail = async (email, code, userName = 'User') => {
                 <li>Change your password regularly</li>
               </ul>
               
-              <p>Best regards,<br>The For Ocean Foundation Team</p>
+              <p>Best regards,<br>The ${escapeHtml(org)} Team</p>
             </div>
             <div class="footer">
               <p>This is an automated email. Please do not reply to this message.</p>
-              <p>&copy; ${new Date().getFullYear()} For Ocean Foundation. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} ${escapeHtml(org)}. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -99,9 +212,10 @@ const sendVerificationEmail = async (email, code, userName = 'User') => {
       `,
     };
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log('Email sent:', info.messageId);
-    return { success: true, messageId: info.messageId };
+    const result = await deliver(mailOptions, org);
+    if (result.success) console.log('Email sent:', result.messageId);
+    else console.error('Email sending error:', result.error);
+    return result;
   } catch (error) {
     console.error('Email sending error:', error);
     return { success: false, error: error.message };
@@ -140,10 +254,9 @@ const sendVerificationEmail = async (email, code, userName = 'User') => {
  */
 async function sendSignupAttemptNotice(email, existingUserName = 'there') {
   try {
-    const transporter = createTransporter();
+    const org = await organisationName();
 
     const mailOptions = {
-      from: `"For Ocean Foundation" <${process.env.EMAIL_USER}>`,
       to: email,
       // Deliberately NOT "Verify your email" - the subject line is visible on a
       // lock screen, and it should read as information rather than as an action.
@@ -164,7 +277,7 @@ async function sendSignupAttemptNotice(email, existingUserName = 'there') {
         <body>
           <div class="container">
             <div class="header">
-              <h1>🌊 For Ocean Foundation</h1>
+              <h1>${escapeHtml(org)}</h1>
             </div>
             <div class="content">
               <p>Hi ${escapeHtml(existingUserName)},</p>
@@ -179,11 +292,11 @@ async function sendSignupAttemptNotice(email, existingUserName = 'there') {
 
               <p>We will never ask you for your password or a verification code by email.</p>
 
-              <p>Best regards,<br>The For Ocean Foundation Team</p>
+              <p>Best regards,<br>The ${escapeHtml(org)} Team</p>
             </div>
             <div class="footer">
               <p>This is an automated email. Please do not reply to this message.</p>
-              <p>&copy; ${new Date().getFullYear()} For Ocean Foundation. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} ${escapeHtml(org)}. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -191,8 +304,9 @@ async function sendSignupAttemptNotice(email, existingUserName = 'there') {
       `,
     };
 
-    const info = await transporter.sendMail(mailOptions);
-    return { success: true, messageId: info.messageId };
+    const result = await deliver(mailOptions, org);
+    if (!result.success) console.error('[email] signup-attempt notice failed:', result.error);
+    return result;
   } catch (error) {
     console.error('[email] signup-attempt notice failed:', error && error.message);
     return { success: false, error: error && error.message };
@@ -209,10 +323,9 @@ module.exports = {
 // Send Login OTP
 async function sendLoginOTP(email, otp, userName = 'User') {
   try {
-    const transporter = createTransporter();
+    const org = await organisationName();
 
     const mailOptions = {
-      from: `"For Ocean Foundation" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: 'Login Verification Code',
       html: `
@@ -237,7 +350,7 @@ async function sendLoginOTP(email, otp, userName = 'User') {
             </div>
             <div class="content">
               <p>Hi ${escapeHtml(userName)},</p>
-              <p>Someone is trying to log in to your For Ocean Foundation account. To continue, please use this verification code:</p>
+              <p>Someone is trying to log in to your ${escapeHtml(org)} account. To continue, please use this verification code:</p>
               
               <div class="code-box">
                 <p style="margin: 0; font-size: 14px; color: #666;">Your OTP is:</p>
@@ -251,11 +364,11 @@ async function sendLoginOTP(email, otp, userName = 'User') {
                 If you didn't attempt to log in, please ignore this email and ensure your account password is secure.
               </div>
               
-              <p>Best regards,<br>The For Ocean Foundation Team</p>
+              <p>Best regards,<br>The ${escapeHtml(org)} Team</p>
             </div>
             <div class="footer">
               <p>This is an automated email. Please do not reply to this message.</p>
-              <p>&copy; ${new Date().getFullYear()} For Ocean Foundation. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} ${escapeHtml(org)}. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -263,9 +376,10 @@ async function sendLoginOTP(email, otp, userName = 'User') {
       `,
     };
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log('Login OTP email sent:', info.messageId);
-    return { success: true, messageId: info.messageId };
+    const result = await deliver(mailOptions, org);
+    if (result.success) console.log('Login OTP email sent:', result.messageId);
+    else console.error('Login OTP email error:', result.error);
+    return result;
   } catch (error) {
     console.error('Login OTP email error:', error);
     return { success: false, error: error.message };
@@ -275,10 +389,9 @@ async function sendLoginOTP(email, otp, userName = 'User') {
 // Send Signup OTP
 async function sendSignupOTP(email, otp, userName = 'User') {
   try {
-    const transporter = createTransporter();
+    const org = await organisationName();
 
     const mailOptions = {
-      from: `"For Ocean Foundation" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: 'Welcome! Verify Your Email',
       html: `
@@ -299,11 +412,11 @@ async function sendSignupOTP(email, otp, userName = 'User') {
         <body>
           <div class="container">
             <div class="header">
-              <h1>🌊 Welcome to For Ocean Foundation!</h1>
+              <h1>Welcome to ${escapeHtml(org)}!</h1>
             </div>
             <div class="content">
               <p>Hi ${escapeHtml(userName)},</p>
-              <p>Thank you for joining For Ocean Foundation! To complete your registration, please verify your email address with this code:</p>
+              <p>Thank you for joining ${escapeHtml(org)}! To complete your registration, please verify your email address with this code:</p>
               
               <div class="code-box">
                 <p style="margin: 0; font-size: 14px; color: #666;">Your verification code is:</p>
@@ -332,14 +445,14 @@ async function sendSignupOTP(email, otp, userName = 'User') {
 
               <div class="welcome">
                 <strong>✓ What's Next?</strong><br>
-                Once verified, you'll be able to access all features and start making a difference for our oceans!
+                Once verified, you'll be able to sign in, make donations and see your donation history.
               </div>
               
-              <p>Best regards,<br>The For Ocean Foundation Team</p>
+              <p>Best regards,<br>The ${escapeHtml(org)} Team</p>
             </div>
             <div class="footer">
               <p>This is an automated email. Please do not reply to this message.</p>
-              <p>&copy; ${new Date().getFullYear()} For Ocean Foundation. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} ${escapeHtml(org)}. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -347,9 +460,10 @@ async function sendSignupOTP(email, otp, userName = 'User') {
       `,
     };
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log('Signup OTP email sent:', info.messageId);
-    return { success: true, messageId: info.messageId };
+    const result = await deliver(mailOptions, org);
+    if (result.success) console.log('Signup OTP email sent:', result.messageId);
+    else console.error('Signup OTP email error:', result.error);
+    return result;
   } catch (error) {
     console.error('Signup OTP email error:', error);
     return { success: false, error: error.message };

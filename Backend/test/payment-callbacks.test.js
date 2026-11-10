@@ -60,6 +60,7 @@ process.env.NODE_ENV = 'production';
 process.env.VERCEL = '1';
 process.env.MONGODB_URI =
   process.env.TEST_MONGODB_URI || 'mongodb://127.0.0.1:27017/kindledger_payment_test';
+require('./support/email-off'); // CP1: a transport that cannot deliver
 process.env.JWT_SECRET = 'test-only-jwt-secret-at-least-32-chars-long';
 process.env.ADMIN_CREATION_KEY = 'test-admin-key';
 process.env.PAYU_MERCHANT_KEY = KEY;
