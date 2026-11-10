@@ -171,6 +171,10 @@ services:
       NOTIFY_URL: ${NOTIFY_URL}
       FRONTEND_SUCCESS_URL: ${FRONTEND_SUCCESS_URL}
       FRONTEND_FAILURE_URL: ${FRONTEND_FAILURE_URL}
+      # CP1: Resend first (RESEND_API_KEY + EMAIL_FROM), SMTP as the fallback.
+      # With neither, the api exits at start and says which to set.
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      EMAIL_FROM: ${EMAIL_FROM}
       EMAIL_SERVICE: ${EMAIL_SERVICE}
       EMAIL_USER: ${EMAIL_USER}
       EMAIL_PASSWORD: ${EMAIL_PASSWORD}

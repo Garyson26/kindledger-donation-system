@@ -5531,7 +5531,7 @@ findings rather than configuration.
 | CB2-6 | **Logo upload and the scheduler cannot work on Vercel.** Read-only filesystem; no long-running process. `UPLOADS_DIR=/tmp` or `SCHEDULER_ENABLED=true` would turn a loud failure into a silent one | Recorded | Documented as unsupported on Vercel. DEF-05 |
 | CB2-7 | **A MongoDB credential was set on the FRONTEND project** (Atlas Marketplace integration, production). Vite only bundles `VITE_*`, so it was not shipped to browsers | Low | Not carried over |
 | CB2-8 | **Four secrets were stored as readable, not Sensitive.** Vercel flagged `MONGODB_URI`, `JWT_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` as `readable-secret` | Low | New project: create all as Sensitive |
-| CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **UNPINNED.** Queue for a follow-up: read from branding |
+| CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **CLOSED by CP1.** All 17 occurrences - not 4: the sender, greetings, sign-offs and footers - come from branding's organisation name. Pinned by `test:email` "CB2-9" |
 | CB2-10 | **`npm run test:bridge` points at a test deleted in 3.6** | Trivial. Fails loud | **CLOSED in E (#31), CM1.** The script and its CI step were removed with the bridge. CI found it the first time the PayU job could start |
 
 **And one correction to how ENV-02 had been described.** "The stack refuses to
@@ -6551,6 +6551,145 @@ occasional ~2 s request. **Candidate:** a longer `pingTimeout` (it cannot be
 set from `DATABASE_URL` today). Not changed: it is a latency trade-off, and
 `wait_timeout = 20` means validation is what keeps a server-closed connection
 from failing a request (DB1).
+
+---
+
+## CP1 - EMAIL: RESEND FIRST, SMTP AS THE FALLBACK, NEITHER REFUSES
+
+**What changed in `config/email.js`:**
+
+| | |
+|---|---|
+| **Resend** | Used when `RESEND_API_KEY` is set, with `EMAIL_FROM` (an address on a domain verified in Resend). One `POST /emails` over `fetch` - no SDK - with the `User-Agent` Resend requires (it answers 403 without one). `RESEND_BASE_URL` exists only so the suite can point it at a local server |
+| **SMTP** | The fallback, unchanged: `EMAIL_SERVICE=gmail` or `SMTP_*`, as `EMAIL_USER`. `EMAIL_FROM` is optional here |
+| **Neither** | **The module refuses to load**, so the API does not start, and the error names both options. Before, it started, defaulted to `smtp.gmail.com` with no credentials and failed each login separately |
+| **Contract kept** | Sends never throw: `{ success, messageId }` or `{ success: false, error }`. `/login` still answers 500 when its code cannot be sent; the SEC-08 paths stay fire-and-forget |
+| **CB2-9** | The organisation name comes from branding in the sender, greetings, sign-offs and footers of all four emails; branding unreadable falls back to the default row's name rather than failing a login code. The two pieces of ocean-specific copy (the wave emoji in two headers, "a difference for our oceans") went with it |
+| **Header safety** | The name in `From:` has CR, LF, quotes and angle brackets removed: a branding name cannot add a header |
+
+**Proof:** `test/email-transport.test.js`, 11 tests, against a fake Resend over
+HTTP and SMTP on a closed port - **8 failed on the old module, 11 pass on the
+new.** Mutation-checked: removing the header sanitising, preferring SMTP over
+Resend, and removing the refusal each fail exactly their test.
+
+**What the refusal cost elsewhere, and how it was paid:** every app-booting
+suite now sets `require('./support/email-off')` - SMTP to `127.0.0.1:1`, which
+refuses at once - and the compose stack CI starts for `trust-proxy` gets the
+same in its `.env`. Before, those suites set nothing and every send went out to
+`smtp.gmail.com`. Local runs against MySQL 8.4 and MongoDB: `auth-char` 25/25,
+`auth` 6/6, `admin` 22/22, `signup-timing` 8/8, `password-timing` 6/6 -
+unchanged counts.
+
+**The first CI run caught two boots I had missed**, because I listed only
+files that `require('../app')`: `migration-state`'s PAY-02 test boots `app.js`
+in a **child process** (which inherits the environment), and
+`refuse-unsupported` boots it from a **CI shell step** to prove MariaDB 10.11
+gets 503. Both refused to start - the refusal working, in a place that had not
+configured a transport. Both now do; the 10.11 step was reproduced locally
+(503, 503, 503) and `migration-state` passes 11/11. The search that finds them
+is for `app.js` in any form, including `node -e` and child-process scripts.
+
+**Production needs nothing:** it has `EMAIL_USER`/`EMAIL_PASSWORD`, so it
+selects SMTP exactly as before. Switching to Resend is two variables
+(deployment-environment §6, rows 37-38) and a verified domain.
+
+## DQ1 - THE FOOTER IS ONE LINE
+
+The copyright and "Powered by [GitHub mark] KindLedger Donation System" share
+one centred, wrapping line, joined by a middot shown from `md` up; below that
+they stack as two lines, so a wrapped footer never leaves a dot at a line end.
+`footer_text` stays its own line (SPEC-5 §5.2). `PoweredBy` is still prop-less,
+with no configuration surface. **Measured in a browser** at 1280, 768, 375 and
+320 px with a real name and a ~90-character one: no page overflow, nothing
+clipped, and the attribution never splits. One line at 768 px and above for a
+name the length of the current one.
+
+**Found beside it:** the frontend lint has never been able to run - LINT-01,
+below.
+
+---
+
+## LINT-01 (High, for what it hid) - THE FRONTEND LINT HAS NEVER RUN, AND NOTHING SAID SO
+
+**Found 10 Nov 2026 (DQ1), recorded DS1.** `npm run lint` in `Frontend/` dies
+before reading a file: `ERR_PACKAGE_PATH_NOT_EXPORTED ... './config' is not
+defined by "exports"`.
+
+**Why.** The toolchain is half-upgraded. `eslint.config.js` is written for
+ESLint 9 - it imports `defineConfig` and `globalIgnores` from `eslint/config`,
+uses flat-config `extends`, and asks for `reactHooks.configs['recommended-latest']`
+- and `@eslint/js` is already 9.x. But `package.json` pins `eslint ^8.57.0` and
+`eslint-plugin-react-hooks ^4.6.0`, neither of which has those.
+
+**Why nobody noticed.** No workflow touches `Frontend/` at all: no lint, no
+build. A check that was configured, could never run, and whose absence was
+invisible because nothing reported it - **CI-01's class exactly**, one
+directory over. CI-01's "N/N green" meant nothing for MySQL; the frontend has
+no N at all.
+
+### What it hid: two pages that crash on render, one of them linked from the admin menu
+
+Running the existing config on ESLint 9 (measured below) flags `no-undef` in
+two files. **Both reproduced** in a production build of `main`, under an
+admin-role token planted client-side (the API was not involved):
+
+| | Page | Error on render | Since | Reached from |
+|---|---|---|---|---|
+| **FE-02 (High)** | `/donations`, the admin donations list | `ReferenceError: useBranding is not defined` - the hook is called, never imported | `6566b41`, SPEC-5 5.4, which replaced the hardcoded name | **The admin navbar (twice) and the admin dashboard.** Production serves this code: an admin opening Donations gets a crashed page |
+| FE-03 (Low) | `/admin/categories` | `ReferenceError: ConfirmModal is not defined`; `deleteModal`, `setDeleteModal` and `confirmDelete` are never defined either | `e11a09e`, the first commit | Nothing links to it. The working pages are `/admin/categories-list` and `/admin/add-category` |
+
+**Lint understates it.** `no-undef` caught `deleteModal`, not `ConfirmModal`:
+an undefined JSX component needs `react/jsx-no-undef`, which this config does
+not load. The page crashed on the component first.
+
+### The fix, sized
+
+| Option | Change | Verdict |
+|---|---|---|
+| **Upgrade to ESLint 9** | `eslint ^9`, `eslint-plugin-react-hooks ^5.2` in `package.json`. **The config stays as written** | **The smaller change.** Measured: `eslint.config.js` loads unmodified on ESLint 9.39.5 with react-hooks 5.2.0 |
+| Rewrite the config for ESLint 8 | Drop `eslint/config`, `defineConfig`, `globalIgnores` and flat `extends`; wire the hooks plugin by hand; downgrade `@eslint/js` to 8 | More change, onto a major version that is no longer maintained |
+
+**It does not pass on the current code - it surfaces a backlog.** On ESLint 9,
+45 files: **17 errors and 8 warnings in 14 files.** `no-unused-vars` 12,
+`no-undef` 4 (FE-02 and FE-03 above), `react-refresh/only-export-components`
+1, and `react-hooks/exhaustive-deps` 8 warnings. The unused variables are dead
+code (unused `err` in catches, an unused `getHeaders`, state never read); the
+hook warnings are effects that call a fetch function they do not list.
+
+**Plan, as its own PR:** fix FE-02 and FE-03 first (FE-02 is one import);
+upgrade the two packages; clear the 17 errors; decide the 8 warnings case by
+case; and **add a CI job that runs `npm run lint` and `npm run build` in
+`Frontend/`**, so the next breakage is reported rather than discovered.
+
+---
+
+## DW4 - FOUR PR DESCRIPTIONS WERE WRONG, AND STAYED WRONG, BECAUSE NOBODY RE-READ THEM
+
+Found 10 Nov 2026, rewriting every PR description in plain English. The first
+three were accurate when written, became false when the facts changed, and
+were never re-read. The fourth was my own error in the first pass of the
+rewrite, caught by re-reading it against the record before it was relied on:
+
+| PR | It said | What was true |
+|---|---|---|
+| #33 | Merging deploys nothing | The hosting project had been connected to the repository by then; the merge deployed the backend to production (DF3) |
+| #9 | The licence change, as settled | It was withdrawn later the same day; the licence became Apache-2.0 in #31 |
+| #11 | A unique index on PayU's payment id closes replayed callbacks | A later commit on the same branch withdrew that: the field is not covered by PayU's signature, so the index is an integrity check only |
+| #13, #15-#23 | (as first rewritten) their checks had passed | Their checks were **red** - the database jobs could not start (CI-01) |
+
+**The class:** a statement written once and left alone while the facts under it
+moved. It is the same failure as the map carrying two contradictory sequences
+("Map maintenance: a sequence stated twice is a sequence that will contradict
+itself") - a document that is not re-read when its subject changes is not
+documentation, it is history that looks current. The rewrite corrected all
+four; each corrected description says what changed.
+
+**And my own slip, which belongs here:** publishing the rewritten #31 was
+chained to the step that scanned it for internal IDs, so it went out before
+I read the scan. The one hit was a false positive (a measurement, "3.6 ms"),
+so nothing wrong was published - **by luck, not by the check.** A check whose
+result is not read before acting is the occupied slot in miniature. #28 and
+#30 were scanned, read, then published.
 
 ---
 

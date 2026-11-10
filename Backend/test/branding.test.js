@@ -20,6 +20,7 @@ const { once } = require('node:events');
 
 process.env.NODE_ENV = 'production';
 process.env.VERCEL = '1';
+require('./support/email-off'); // CP1: a transport that cannot deliver
 process.env.JWT_SECRET =
   process.env.JWT_SECRET || 'test-only-jwt-secret-at-least-32-chars-long';
 process.env.ADMIN_CREATION_KEY = process.env.ADMIN_CREATION_KEY || 'test-admin-key';

@@ -230,6 +230,10 @@ jobs:
         working-directory: Backend
         run: npm run test:rate-limiter-redis
 
+      - name: Email transport - Resend, SMTP fallback, refusal, branding (CP1, CB2-9)
+        working-directory: Backend
+        run: npm run test:email
+
       - name: Category characterisation (SPEC-3 package 3.1)
         working-directory: Backend
         # CHARACTERISATION, not specification: these capture what
@@ -573,6 +577,12 @@ jobs:
           SCHEDULER_ENABLED=false
           PRISMA_CONNECTION_LIMIT=10
           HEALTH_DIAGNOSTIC_SECRET=ci-only-health-diagnostic-secret
+          # CP1: the api refuses to start with no email transport. SMTP to a
+          # closed port inside the container - configured, and delivers nothing.
+          EMAIL_USER=ci@invalid.test
+          EMAIL_PASSWORD=ci-only
+          SMTP_HOST=127.0.0.1
+          SMTP_PORT=1
           ENVEOF
           echo "wrote .env with $(grep -c . .env) settings"
 

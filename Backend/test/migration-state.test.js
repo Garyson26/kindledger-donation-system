@@ -29,6 +29,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 process.env.NODE_ENV = 'production';
+// CP1: the PAY-02 test boots app.js in a child process, which inherits this
+// environment - and app.js refuses to load with no email transport.
+require('./support/email-off');
 
 const migrationState = require('../config/migrationState');
 const destructiveJobs = require('../config/destructiveJobs');

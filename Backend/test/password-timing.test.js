@@ -49,6 +49,7 @@ process.env.NODE_ENV = 'production';
 // Set here like every other suite that boots the app. Without it config/jwt.js
 // throws on load; it only ever passed inside the api container, whose
 // environment supplies one (found on the first CI run, CM1).
+require('./support/email-off'); // CP1: a transport that cannot deliver
 process.env.JWT_SECRET = 'test-only-jwt-secret-at-least-32-chars-long';
 process.env.MONGODB_URI =
   process.env.TEST_MONGODB_URI || 'mongodb://127.0.0.1:27017/kindledger_pwtiming_test';

@@ -389,6 +389,7 @@ jobs:
         run: |
           DATABASE_URL="mysql://root:ci-root-password@127.0.0.1:3307/kindledger" \
           NODE_ENV=production VERCEL=1 JWT_SECRET=ci-only-jwt-secret-at-least-32-characters \
+          EMAIL_USER=ci@invalid.test EMAIL_PASSWORD=ci-only SMTP_HOST=127.0.0.1 SMTP_PORT=1 \
           node -e '
             const app = require("./app.js");
             const server = app.listen(0, async () => {
