@@ -5531,7 +5531,7 @@ findings rather than configuration.
 | CB2-6 | **Logo upload and the scheduler cannot work on Vercel.** Read-only filesystem; no long-running process. `UPLOADS_DIR=/tmp` or `SCHEDULER_ENABLED=true` would turn a loud failure into a silent one | Recorded | Documented as unsupported on Vercel. DEF-05 |
 | CB2-7 | **A MongoDB credential was set on the FRONTEND project** (Atlas Marketplace integration, production). Vite only bundles `VITE_*`, so it was not shipped to browsers | Low | Not carried over |
 | CB2-8 | **Four secrets were stored as readable, not Sensitive.** Vercel flagged `MONGODB_URI`, `JWT_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` as `readable-secret` | Low | New project: create all as Sensitive |
-| CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **UNPINNED.** Queue for a follow-up: read from branding |
+| CB2-9 | **Email `from` is hardcoded `"For Ocean Foundation"`** in four places in `config/email.js`. BU1's whitelabel class, missed by SPEC-5 because SPEC-5 covered the UI | Low. Wrong for any other installer | **CLOSED by CP1.** All 17 occurrences - not 4: the sender, greetings, sign-offs and footers - come from branding's organisation name. Pinned by `test:email` "CB2-9" |
 | CB2-10 | **`npm run test:bridge` points at a test deleted in 3.6** | Trivial. Fails loud | **CLOSED in E (#31), CM1.** The script and its CI step were removed with the bridge. CI found it the first time the PayU job could start |
 
 **And one correction to how ENV-02 had been described.** "The stack refuses to
@@ -6506,6 +6506,54 @@ occasional ~2 s request. **Candidate:** a longer `pingTimeout` (it cannot be
 set from `DATABASE_URL` today). Not changed: it is a latency trade-off, and
 `wait_timeout = 20` means validation is what keeps a server-closed connection
 from failing a request (DB1).
+
+---
+
+## CP1 - EMAIL: RESEND FIRST, SMTP AS THE FALLBACK, NEITHER REFUSES
+
+**What changed in `config/email.js`:**
+
+| | |
+|---|---|
+| **Resend** | Used when `RESEND_API_KEY` is set, with `EMAIL_FROM` (an address on a domain verified in Resend). One `POST /emails` over `fetch` - no SDK - with the `User-Agent` Resend requires (it answers 403 without one). `RESEND_BASE_URL` exists only so the suite can point it at a local server |
+| **SMTP** | The fallback, unchanged: `EMAIL_SERVICE=gmail` or `SMTP_*`, as `EMAIL_USER`. `EMAIL_FROM` is optional here |
+| **Neither** | **The module refuses to load**, so the API does not start, and the error names both options. Before, it started, defaulted to `smtp.gmail.com` with no credentials and failed each login separately |
+| **Contract kept** | Sends never throw: `{ success, messageId }` or `{ success: false, error }`. `/login` still answers 500 when its code cannot be sent; the SEC-08 paths stay fire-and-forget |
+| **CB2-9** | The organisation name comes from branding in the sender, greetings, sign-offs and footers of all four emails; branding unreadable falls back to the default row's name rather than failing a login code. The two pieces of ocean-specific copy (the wave emoji in two headers, "a difference for our oceans") went with it |
+| **Header safety** | The name in `From:` has CR, LF, quotes and angle brackets removed: a branding name cannot add a header |
+
+**Proof:** `test/email-transport.test.js`, 11 tests, against a fake Resend over
+HTTP and SMTP on a closed port - **8 failed on the old module, 11 pass on the
+new.** Mutation-checked: removing the header sanitising, preferring SMTP over
+Resend, and removing the refusal each fail exactly their test.
+
+**What the refusal cost elsewhere, and how it was paid:** every app-booting
+suite now sets `require('./support/email-off')` - SMTP to `127.0.0.1:1`, which
+refuses at once - and the compose stack CI starts for `trust-proxy` gets the
+same in its `.env`. Before, those suites set nothing and every send went out to
+`smtp.gmail.com`. Local runs against MySQL 8.4 and MongoDB: `auth-char` 25/25,
+`auth` 6/6, `admin` 22/22, `signup-timing` 8/8, `password-timing` 6/6 -
+unchanged counts.
+
+**Production needs nothing:** it has `EMAIL_USER`/`EMAIL_PASSWORD`, so it
+selects SMTP exactly as before. Switching to Resend is two variables
+(deployment-environment §6, rows 37-38) and a verified domain.
+
+## DQ1 - THE FOOTER IS ONE LINE
+
+The copyright and "Powered by [GitHub mark] KindLedger Donation System" share
+one centred, wrapping line, joined by a middot shown from `md` up; below that
+they stack as two lines, so a wrapped footer never leaves a dot at a line end.
+`footer_text` stays its own line (SPEC-5 §5.2). `PoweredBy` is still prop-less,
+with no configuration surface. **Measured in a browser** at 1280, 768, 375 and
+320 px with a real name and a ~90-character one: no page overflow, nothing
+clipped, and the attribution never splits. One line at 768 px and above for a
+name the length of the current one.
+
+**Found beside it, not fixed:** `npm run lint` in `Frontend/` cannot start.
+`package.json` pins `eslint ^8.57.0`, and `eslint.config.js` imports
+`eslint/config`, which only ESLint 9 has. So the frontend has had no working
+lint, and CI does not run one.
 
 ---
 

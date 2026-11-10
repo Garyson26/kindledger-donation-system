@@ -35,8 +35,9 @@ self-hosted deployment.
 the API and nginx. For running the API outside Docker you also need Node >= 20
 and npm >= 10, plus a MySQL 8.4 instance and Redis.
 
-PayU credentials and an SMTP account (a Gmail App Password works) are needed for
-payments and email respectively; the rest of the system runs without them.
+PayU credentials are needed for payments. **An email transport is required to
+start at all**, because every login sends a code: a Resend API key with a
+verified sending domain, or an SMTP account (a Gmail App Password works).
 
 ```bash
 git clone https://github.com/Garyson26/kindledger-donation-system.git
@@ -73,7 +74,8 @@ boot without the first two.
 | `PAYU_MERCHANT_KEY`, `PAYU_MERCHANT_SALT`, `PAYU_BASE_URL` | PayU credentials and environment. **`PAYU_MERCHANT_SALT` is the secret the callback signature is built from — without it the API refuses to build or verify a PayU hash rather than computing one anybody could forge (ENV-01)** |
 | `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL` | Backend `/api/payment/*` callback URLs |
 | `FRONTEND_SUCCESS_URL`, `FRONTEND_FAILURE_URL` | Where donors are redirected after payment |
-| `EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_SERVICE` | SMTP / Gmail credentials for OTP email |
+| `RESEND_API_KEY`, `EMAIL_FROM` | **Email, option 1 (used first):** Resend, sending from `EMAIL_FROM` on a domain verified in Resend |
+| `EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_SERVICE` | **Email, option 2 (fallback):** SMTP / Gmail credentials. One of the two options is required, or the API refuses to start |
 
 `Frontend/.env` needs only `VITE_API_URL` — the backend origin, without `/api`.
 Vite inlines `VITE_*` values into the public bundle, so never put a secret there.

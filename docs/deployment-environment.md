@@ -11,7 +11,7 @@ at the cutover (4b runbook §3.4 and §6a). So values marked COPY below are copi
 from the old backend project, not recovered from source systems. Every COPY
 value is stored there as a readable `encrypted` variable, not `sensitive`, so the
 dashboard can reveal it. **Start with §6: it says what to do with each of the
-36 names.**
+39 names.**
 
 > **A new project starts with nothing, and the Vercel CLI cannot tell you what
 > is missing.** Most of these variables, if absent, do not stop the deploy. They
@@ -280,7 +280,9 @@ The **Action** column is defined in §6.
 | `NOTIFY_URL` | **REWRITE** | **Yes** | **FAILS SILENT**: the server-to-server confirmation never arrives, so a donor who closes the tab before the redirect leaves a donation stuck Pending | New backend domain | `https://<backend>/api/payment/webhook`. **Check whether a webhook URL is also set in the PayU dashboard, and update it there as well** |
 | `FRONTEND_SUCCESS_URL` | **REWRITE** | **Yes** | FAILS LOUD: the donor is redirected to `undefined?txnid=…` after paying. The donation IS recorded | New frontend domain | `https://<frontend>/payment-success` |
 | `FRONTEND_FAILURE_URL` | **REWRITE** | **Yes** | FAILS LOUD, same | New frontend domain | `https://<frontend>/payment-failure` |
-| `EMAIL_USER` | COPY | **Yes** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Old backend | The sending address |
+| `RESEND_API_KEY` | NEW (CP1), optional | No: SMTP is used | Uses SMTP | Resend dashboard | `re_...`. Sensitive. When set, Resend is used **instead of** SMTP |
+| `EMAIL_FROM` | NEW (CP1) | **Yes with Resend** | With Resend: **REFUSES** to start. With SMTP: `EMAIL_USER` is the sender | Choice | `no-reply@foroceanfoundation.com`. Its domain must be verified in Resend |
+| `EMAIL_USER` | COPY | **Yes, unless Resend** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Old backend | The sending address |
 | `EMAIL_PASSWORD` | COPY | **Yes** | Login fails loud; every other flow **FAILS SILENT** (§2.3) | Old backend | For Gmail, an **App Password** (16 chars), not the account password |
 | `EMAIL_SERVICE` | COPY | Optional | Uses the SMTP settings below | Old backend | `gmail`, or unset for generic SMTP |
 | `SMTP_HOST` | COPY | If not `gmail` | Defaults to `smtp.gmail.com` | Old backend | `smtp-relay.brevo.com` |
@@ -327,6 +329,13 @@ browser's every request to the API is refused by CORS (FAILS CLOSED).
 
 ### 2.3 Email: loud in one place, silent in the rest
 
+**The transport (CP1).** Resend when `RESEND_API_KEY` is set (with `EMAIL_FROM`),
+SMTP otherwise. **With neither, the backend refuses to start** and the log names
+both options: every login sends a code, so a backend that cannot send mail
+cannot let anyone in. Before CP1 it started anyway and failed one login at a
+time. Every email's sender name, greeting and footer now come from branding's
+organisation name (CB2-9), not a hardcoded one.
+
 Checked per call site in `routes/auth.js`:
 
 | Flow | Send | A failed send |
@@ -340,7 +349,8 @@ failed would be an account-enumeration oracle (SEC-08, 3.5a).
 **There is a worse case that is silent everywhere: credentials the SMTP server
 accepts, and mail that is never delivered.** That covers spam folders, an
 unverified sender domain and provider sandboxes. Login reports success and no
-code arrives. Every login, signup and reset needs an emailed code, so nobody
+code arrives. (Resend, unlike SMTP, refuses an unverified domain outright -
+`Resend answered 403` in the log, and login answers 500.) Every login, signup and reset needs an emailed code, so nobody
 can sign in, admins included. **The 4b runbook's step 7b ("one real OTP") is
 the only check for this.**
 
@@ -415,12 +425,12 @@ refused at use) and retention purges do not run. Both are recorded, not hidden.
 
 ---
 
-## 6. Setting them up by hand: what to do with each of the 36 names (CD3)
+## 6. Setting them up by hand: what to do with each of the 39 names (CD3)
 
-The code reads **36 names** on the backend (33 directly, plus the three `JOB_*`
+The code reads **39 names** on the backend (36 directly, plus the three `JOB_*`
 names read through `config/destructiveJobs.js`) and **1** on the frontend.
-**You type in 21 of them on the backend and 1 on the frontend.** The other 15
-stay unset.
+**You type in 21 of them on the backend and 1 on the frontend.** The other 18
+stay unset. (CP1 added three: `RESEND_API_KEY`, `EMAIL_FROM`, `RESEND_BASE_URL`.)
 
 > **PRODUCTION ONLY. Untick Preview and Development on every variable, every
 > time, and re-check after every edit (DEPLOY-02, DEPLOY-03).** On this
@@ -462,7 +472,7 @@ stay unset.
 > problem arriving through configuration. A copied `VITE_API_URL` does the same
 > for every request (§1.2).
 
-### Backend: 36 names
+### Backend: 39 names
 
 | # | Name | Action | On the old backend? |
 |---|---|---|---|
@@ -502,14 +512,18 @@ stay unset.
 | 34 | `JOB_RETENTION_PURGE` | DO NOT SET (§5) | No |
 | 35 | `JOB_INACTIVE_ACCOUNT_PURGE` | DO NOT SET (§5) | No |
 | 36 | `JOB_PENDING_SIGNUP_SWEEP` | DO NOT SET (§5) | No |
+| 37 | `RESEND_API_KEY` | NEW (CP1): **leave unset while SMTP works**. Set it, with `EMAIL_FROM`, to send through Resend instead; it then takes priority over SMTP | No |
+| 38 | `EMAIL_FROM` | NEW (CP1): **required with Resend**, an address on a domain verified in Resend. Optional with SMTP (defaults to `EMAIL_USER`) | No |
+| 39 | `RESEND_BASE_URL` | **DO NOT SET**: it exists so the test suite can point Resend at a local server | No |
 
 Two names on the old backend are not read by the code at all, so they are not
-among the 36: `foroceanfoundation_MONGODB_URI` and `ADMIN_EMAIL`. **Do not copy
+among the 39: `foroceanfoundation_MONGODB_URI` and `ADMIN_EMAIL`. **Do not copy
 either** (§4).
 
 **Count check:** 4 generate fresh that are set + 9 copy + 7 rewrite + 1 new =
 **21 typed in.** `ADMIN_CREATION_KEY` (generate fresh, left unset) +
-`RATE_LIMIT_PREFIX` (new, left unset) + 13 do-not-set = **15 left off.**
+`RATE_LIMIT_PREFIX` (new, left unset) + `RESEND_API_KEY` and `EMAIL_FROM` (new,
+left unset while SMTP is the transport) + 14 do-not-set = **18 left off.**
 
 **Rotation list (CG2):** `JWT_SECRET`, `HEALTH_DIAGNOSTIC_SECRET`,
 `ADMIN_CREATION_KEY`, `DATABASE_URL`, `REDIS_URL`. **Rotating `JWT_SECRET`
