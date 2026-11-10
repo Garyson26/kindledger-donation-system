@@ -67,6 +67,37 @@ jobs:
         run: npm run test:no-secrets
 
   # ---------------------------------------------------------------------------
+  # 0b. The frontend builds (LINT-01)
+  # ---------------------------------------------------------------------------
+  # Until this job no workflow touched Frontend/ at all. A build catches an
+  # import of a name the target module does not export (Vite 8 fails on it);
+  # it does NOT catch a name that is used but never imported - that is FE-02,
+  # the admin Donations page that crashed on render for seven weeks while
+  # every deploy built. Only the lint sees that shape.
+  #
+  # THE LINT IS NOT A STEP YET, deliberately. `npm run lint` now runs (ESLint
+  # 9) and reports a backlog of 17 errors; a step that is red on main would be
+  # removed or ignored, and continue-on-error would be the occupied slot
+  # again. It joins this job when the backlog is cleared.
+  frontend-build:
+    name: Frontend builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: Frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        working-directory: Frontend
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
   # 1. PayU callbacks and reset controls (MongoDB data layer)
   # ---------------------------------------------------------------------------
   app-tests:
