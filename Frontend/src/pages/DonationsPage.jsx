@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { generateDonationReceipt, generateUserDonationReport } from "../utils/pdfGenerator";
 import { API_BASE_URL } from "../config/constants";
+// FE-02: called on the first line of the component since SPEC-5 5.4 and never
+// imported, so the admin Donations page threw on every render. A build does
+// not evaluate the component, so nothing failed until someone opened it.
+import { useBranding } from "../branding/BrandingProvider";
 
 function DonationsPage() {
   const { organisationName } = useBranding();
