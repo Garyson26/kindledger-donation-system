@@ -411,17 +411,29 @@ async function main() {
   // Positive confirmation that CHECKs are actually enforced, not merely
   // supported by version number. Cheap, and catches an exotic build. This is
   // the one DDL step, and why it lives here rather than in the app-start check.
+  //
+  // INSERT IGNORE, AND COUNT (DM2(c)). The probe used to INSERT the violating
+  // row and treat the thrown error as success - correct, but the shared Prisma
+  // client logs every query error, so a SUPPORTED server printed
+  // `prisma:error ... ck_probe` above "Database server OK", and on the first
+  // real install that read as a failure. With IGNORE, MySQL 8.4 and MariaDB
+  // 11.8 both skip a CHECK-violating row with a warning instead of an error,
+  // strict session or not (measured on both): zero rows means enforced, one
+  // means the server accepted the violation. Nothing is thrown, so nothing is
+  // logged, and the CI guard step asserts there is no prisma:error.
+  let checkConfirmed = false;
   try {
     await prisma.$executeRawUnsafe('DROP TABLE IF EXISTS _kl_check_probe');
     await prisma.$executeRawUnsafe(
       'CREATE TABLE _kl_check_probe (n INT, CONSTRAINT ck_probe CHECK (n > 0)) ENGINE=InnoDB'
     );
-    let enforced = false;
-    try {
-      await prisma.$executeRawUnsafe('INSERT INTO _kl_check_probe (n) VALUES (0)');
-    } catch {
-      enforced = true;
-    }
+    await prisma.$executeRawUnsafe('INSERT IGNORE INTO _kl_check_probe (n) VALUES (0)');
+    // `rows_kept`, not `stored`: STORED is a reserved word in MySQL 8.
+    const [{ rows_kept: rowsKept }] = await prisma.$queryRawUnsafe(
+      'SELECT COUNT(*) AS rows_kept FROM _kl_check_probe'
+    );
+    const enforced = Number(rowsKept) === 0;
+    checkConfirmed = enforced;
     await prisma.$executeRawUnsafe('DROP TABLE IF EXISTS _kl_check_probe');
 
     if (!enforced) {
@@ -441,7 +453,13 @@ async function main() {
   }
 
   for (const w of result.warnings) console.warn(`  WARNING: ${w}`);
-  console.log(`  Database server OK: ${result.server} (CHECK constraints enforced, strict session, 0900 collations behave)`);
+  // Claim CHECK enforcement only when the probe CONFIRMED it. A probe that
+  // could not run does not block (above), but the OK line used to say
+  // "CHECK constraints enforced" straight after saying it could not check.
+  const checks = checkConfirmed
+    ? 'CHECK constraints enforced'
+    : 'CHECK enforcement NOT confirmed - the probe could not run, see the note above';
+  console.log(`  Database server OK: ${result.server} (${checks}, strict session, 0900 collations behave)`);
 }
 
 // Only connect and exit when run as a script. Required as a module (by

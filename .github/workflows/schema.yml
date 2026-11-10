@@ -145,7 +145,17 @@ jobs:
 
       - name: Server compatibility guard
         working-directory: Backend
-        run: npm run db:check-server
+        # DM2(c). The installer reads this output, so its shape is asserted: a
+        # supported server prints "Database server OK" and NO "prisma:error".
+        # The CHECK probe used to print one, for the refusal it exists to
+        # provoke, and on the first real install it read as a failure.
+        run: |
+          out=$(npm run db:check-server 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "Database server OK" || { echo "::error::no 'Database server OK' line"; exit 1; }
+          if echo "$out" | grep -q "prisma:error"; then
+            echo "::error::a supported server printed prisma:error - the installer will read it as a failure"; exit 1
+          fi
 
       - name: Server guard unit tests
         working-directory: Backend
@@ -261,7 +271,17 @@ jobs:
 
       - name: Server compatibility guard
         working-directory: Backend
-        run: npm run db:check-server
+        # DM2(c). The installer reads this output, so its shape is asserted: a
+        # supported server prints "Database server OK" and NO "prisma:error".
+        # The CHECK probe used to print one, for the refusal it exists to
+        # provoke, and on the first real install it read as a failure.
+        run: |
+          out=$(npm run db:check-server 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "Database server OK" || { echo "::error::no 'Database server OK' line"; exit 1; }
+          if echo "$out" | grep -q "prisma:error"; then
+            echo "::error::a supported server printed prisma:error - the installer will read it as a failure"; exit 1
+          fi
 
       - name: Server guard unit tests
         working-directory: Backend

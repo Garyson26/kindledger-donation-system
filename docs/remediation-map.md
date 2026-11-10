@@ -6436,6 +6436,79 @@ first-run depends on it. Nothing asserted the refusal before.
 
 ---
 
+## DM1 - THE PRODUCTION SCHEMA IS INSTALLED (10 Nov 2026)
+
+Gary ran `npm run db:migrate` against Hostinger: `20260910120000_init` applied,
+the drift gate clean (structural diff, 6 CHECK constraints, the email collation,
+7 tables on `utf8mb4_0900_ai_ci`, 5 maintained `updated_at` columns), and the
+GLOBAL `sql_mode` warning as expected. The database password was rotated
+afterwards and updated on Vercel.
+
+Read from production after #40 deployed (`dpl_6UFbo3nHtktiQWNmtDRabE31hbQn`,
+`7be5544`):
+
+| Check | Result |
+|---|---|
+| `/api/health` | 200 |
+| `/api/categories` | 200, `[]` - an empty install |
+| `/api/branding` | 200, the default row: `"Your Organisation"`, `INR`, everything else null |
+| Boot log | `[serverGuard] MariaDB 11.8.9-MariaDB-log supported`, the GLOBAL warning, `[rateLimiters] store=redis`. **No `ERR_ERL_STORE_REUSE`**: RATE-01's fix is live. `ERR_ERL_KEY_GEN_IPV6` remains, the known false positive |
+
+## DM2 - WHAT THE FIRST HAND INSTALL FOUND
+
+**(a) `npm ci` no longer generates the Prisma client.** npm blocked Prisma's
+install scripts (allowScripts), so the client was never generated and every
+`npm run db:` command failed with `MODULE_NOT_FOUND`. CI and Vercel both run
+`npx prisma generate` explicitly, so only a hand install could hit it - ADR-049's
+class, inverted: green in every automated environment, broken for a person.
+`docs/first-run.md`, the README quick start and runbook §1.9 now carry
+`npx prisma generate` explicitly; Phase 6 checklist §5.1a explains why.
+*Not done, and worth considering:* making the `db:` scripts run `prisma
+generate` themselves would remove the step instead of documenting it.
+
+**(b) Installing from a OneDrive-synced folder** gave `EBUSY` file locks in
+`node_modules` and an incomplete install. Windows often puts `Documents` inside
+OneDrive. In the self-hosting notes (§5.1a) and first-run.
+
+**(c) The `ck_probe` "error" was the guard working, and it no longer looks
+like a failure.** The guard proves CHECK constraints are enforced by inserting
+a violating row; the server's refusal *is* the proof. But the guard uses the
+application's Prisma client, which logs every query error, so a supported
+server printed `prisma:error ... CONSTRAINT ck_probe failed` above `Database
+server OK`. **Reproduced locally on MariaDB 11.8.9 and MySQL 8.4.13.**
+
+- **Fixed:** the probe now uses `INSERT IGNORE` and counts rows. Measured on
+  both servers, strict session or not: a CHECK-violating row is skipped with a
+  warning and nothing is thrown. Zero rows means enforced.
+- **Test:** both CI "Server compatibility guard" steps now assert a supported
+  server prints `Database server OK` and no `prisma:error`. That fails on the
+  old code on both servers and passes on the new one, run locally verbatim.
+  **Mutation checked:** with the probe table's constraint removed - a server
+  that ignores CHECKs - both servers are **refused** (`accepted a CHECK
+  violation`, exit 1). The new assertion caught my own first attempt, which
+  named the count `stored`, a reserved word in MySQL 8.
+- **Found beside it, and fixed:** when the probe could not run, the guard said
+  `note: ... could not run` and then `Database server OK (CHECK constraints
+  enforced ...)` - claiming what it had just failed to check. It now says
+  `CHECK enforcement NOT confirmed`. Not blocking a supported server on a probe
+  that cannot run is unchanged; it was a deliberate choice.
+
+### Measured, not acted on: the pool's validation ping sits at its own timeout
+
+The production log showed `ER_PING_TIMEOUT` on the request after a cold
+start's first. The MariaDB driver pings a connection idle for over 500 ms
+(`minDelayValidation`) before reuse, with a **250 ms** `pingTimeout`. Measured
+from outside on `/api/categories`: back to back, about **0.5 s**; two seconds
+apart, about **0.75 s**. So the ping costs about 250 ms and usually succeeds -
+**it sits at the edge of its own timeout**, and when it goes over, a healthy
+connection is discarded and rebuilt (TCP, TLS, auth, `initSql`), which is the
+occasional ~2 s request. **Candidate:** a longer `pingTimeout` (it cannot be
+set from `DATABASE_URL` today). Not changed: it is a latency trade-off, and
+`wait_timeout = 20` means validation is what keeps a server-closed connection
+from failing a request (DB1).
+
+---
+
 ## DI1 - PAYU IS ON TEST MODE DELIBERATELY: TRACKED, NOT A FINDING
 
 **State (10 Nov 2026):** `PAYU_BASE_URL=https://test.payu.in`, with the sandbox

@@ -183,6 +183,27 @@ Prebuilt for common platforms. A self-hoster on an unusual architecture —
 32-bit ARM, musl without the prebuilt, a BSD — needs a build toolchain, and
 **that belongs here rather than being discovered at install time**.
 
+### 5.1a Installing by hand: generate the Prisma client, and not from a synced folder (DM2)
+
+Two things the first production install hit, on Windows, that CI and Vercel
+never will - both run `npx prisma generate` explicitly, on unsynced disks:
+
+- **`npm ci` no longer generates the Prisma client.** Recent npm blocks
+  packages' install scripts until they are approved (`npm warn install-scripts
+  ... not yet covered by allowScripts`), and `@prisma/client`'s postinstall is
+  one of them. The install reports no error; every `npm run db:` command then
+  fails with `MODULE_NOT_FOUND`. **Run `npx prisma generate` after every
+  install.** ADR-049's class, inverted: there the image worked only because the
+  developer's machine supplied `node_modules`; here every automated path
+  supplies the generate step, so only a person installing by hand finds it
+  missing.
+- **Not from OneDrive, Dropbox or any synced folder.** Windows often puts
+  `Documents` inside OneDrive, which locks files while uploading them, so
+  `npm ci` fails with `EBUSY: resource busy or locked` and leaves `node_modules`
+  incomplete. Clone to an unsynced folder (`C:\dev\...`), or pause syncing.
+
+`docs/first-run.md` carries both, in the commands an installer copies.
+
 ### 5.2 The general form worth passing on (BT1)
 
 > **An image library's INPUT FORMAT LIST is an attack surface list. A decoder
