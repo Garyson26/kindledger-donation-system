@@ -6254,11 +6254,27 @@ the same reason DC1 does: only some instances are affected.
 failed one is forgotten, and the next request runs it again before counting.
 Only the library's public store methods are used.
 
-**Not changed, and now pinned as a decision:** while Redis is unreachable, a
-limited request is **refused** (500), not let through uncounted (fail closed).
-The module's old comment said it "fails open on that request"; it never did,
-because `passOnStoreError` is off. Whether it should is Gary's call; the test
-named "PINNED, A DECISION" changes with it.
+**Not changed, and DECIDED (DK3, Gary, 10 Nov 2026): fail closed.** While Redis
+is unreachable, a limited request is **refused** (500), not let through
+uncounted. **Why:** these are login, signup, password reset and donation
+initiation, and a limiter that failed open could be switched off by anyone
+able to make Redis unreachable - it would disable itself exactly when attacked.
+The test "PINNED, A DECISION" holds it; changing it is a change of decision.
+
+### DK3 - a comment described behaviour the code never had
+
+`config/rateLimiters.js` said that if the Redis connection never succeeded,
+"the limiter fails open on that request rather than taking the process down".
+**It never failed open**: `passOnStoreError` was always off, so the request was
+refused. ADR-042's "the limiter degrades instead" was read the same way. Both
+are corrected; the ADR is amended rather than rewritten.
+
+**The same class as SEC-19's vacuous test** (CM1, row D): there, a test's regex
+matched a *comment* saying the leak was removed, so it passed whether or not
+the code was fixed. Here a comment asserted a security property - and the
+opposite one - that nothing checked. In both, prose about the code was
+standing in for the code. The remedy is the same: a test that exercises the
+behaviour. The fail-closed behaviour now has one, and the comment cites it.
 
 ### RATE-01 and RATE-02: proved broken, fixed, proved fixed
 
@@ -6341,23 +6357,62 @@ database and failed closed; and the PayU values were still the sandbox's
 (DI1). Neither is a control. Both were luck about which variables happened to
 be unticked.
 
-**Why an installer hits it.** **Vercel's form ticks Production, Preview and
-Development by default**, and an integration adds its own variable without
-asking: the Redis one put `REDIS_URL` on Preview as well as Production. Following the guide without being told
+**Why an installer hits it.** **On this project Preview ended up ticked unless
+someone unticked it**: every one of the twelve was added in the dashboard and
+arrived on Preview (none on Development), and the Redis integration put
+`REDIS_URL` on Preview without asking. *Corrected 10 Nov: this entry first said
+the form ticks all three environments by default. None of the fourteen
+variables targets Development, so that was not what happened here; what was
+observed is stated instead.* Following the guide without being told
 otherwise produces exactly this. deployment-environment §6 said "Production
 only" since DF4, as a callout; it now gives the reasons and says how to check.
 Recorded in the self-hosting notes too (Phase 6 checklist §5.6), because every
 NGO deploying to Vercel gets the same default.
 
-**Being corrected (DJ2), and the first pass made it worse.** Read from the
-project at 10:18 UTC, 10 Nov: nothing unticked yet; the four new callback URLs
-added with Preview ticked; and the edit that corrected `DATABASE_URL`'s host
-**added Preview to it**, so previews now get the donor database - the one
-variable that had been Production-only. Git is connected, so the next branch
+**Being corrected (DJ2, DK1), and the first pass made it worse (DEPLOY-03).**
+Read from the project at 10:18 UTC, 10 Nov: nothing unticked yet; the four new
+callback URLs added with Preview ticked; and after the edit that corrected
+`DATABASE_URL`'s host, it **targeted Preview too**, so previews would get the
+donor database - the one variable that had been Production-only. Git is connected, so the next branch
 push builds a preview with all of it. **Pushes are held until Preview is empty.**
 
 **Closes when** the project's Environment Variables page, filtered to Preview,
 lists nothing. Read back from the API, not assumed.
+
+---
+
+## DEPLOY-03 (High, deployment) - the correction made it worse: editing a value put the donor database on Preview
+
+**Found 10 Nov 2026 (DK2).** The first fix for DEPLOY-02 was correcting
+`DATABASE_URL`'s placeholder host. **After that edit, `DATABASE_URL` targeted
+Production and Preview** - read from the API, with `updatedAt` matching the
+edit. Before it, it was Production-only: **the one variable on the project
+that had been right.** Git was connected, so the next branch push would have
+built a preview holding the donor database's credentials, running whatever
+code that branch carried.
+
+**What is known, and what is not.** The API shows the result, not the click.
+Whether the edit form re-applied a Preview default or Preview was ticked during
+the edit cannot be told from here, and Vercel's documentation does not describe
+the form doing it. **The conclusion does not depend on which:** an environment
+setting that does not reliably survive an edit to an unrelated field - the
+value - **cannot be set once and trusted.** It has to be re-checked after
+every edit, and it has to be checked by reading it back, because the person
+making the edit was fixing the host and had no reason to look at the
+environments.
+
+**Same shape as AP4's**, one layer out: a correct change to one thing
+produced a wrong state somewhere nobody was looking.
+
+**Recorded where installers will see it:** Phase 6 checklist §5.3a and
+deployment-environment §6 now say re-check the Preview filter **after every
+edit**, not once at setup, and give the CLI (`vercel env add ... --environment
+production`, `vercel env ls --environment preview`) as the way to set and
+audit it explicitly. **Held in this repository's practice:** no branch is
+pushed to the Git-connected project until the Preview filter has been read back
+empty.
+
+**Closes with DEPLOY-02**, when Preview lists nothing after the last edit.
 
 ---
 

@@ -244,10 +244,11 @@ test('RATE-02: after recovering, the limiter counts - recovery is not a bypass',
 });
 
 test('PINNED, A DECISION: while Redis is unreachable, a limited route is refused rather than let through unlimited', async () => {
-  // Fail CLOSED. Unchanged by RATE-02's fix, which is about recovering once
-  // Redis is back. Whether a limiter that cannot count should instead let the
-  // request through is Gary's decision (remediation map DH1); if it is made,
-  // this test changes with it, deliberately.
+  // Fail CLOSED - DECIDED (DK3, Gary, 10 Nov 2026). Failing open would let
+  // anyone who can make Redis unreachable switch the limiter off, on login,
+  // signup and password reset. RATE-02's fix is about recovering once Redis is
+  // back, and does not change this. A change here is a change of decision, and
+  // is recorded as one first.
   await startApp();
   fake.down = true;
 

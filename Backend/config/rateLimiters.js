@@ -40,11 +40,21 @@ let announced = false;
  *
  * Connection is started but NOT awaited: a limiter factory must not make module
  * loading depend on Redis being up. node-redis queues commands while
- * connecting. If Redis cannot be reached, a limited request is REFUSED (an
- * error, so 500), not let through: express-rate-limit's passOnStoreError is
- * off. That is pinned in test/rate-limiter-redis.test.js, and whether it should
- * fail open instead is a recorded decision (remediation map DH1), not this
- * file's to make. What it must never do is take the process down - ADR-039.
+ * connecting.
+ *
+ * IF REDIS CANNOT BE REACHED, A LIMITED REQUEST IS REFUSED (an error, so 500),
+ * NOT LET THROUGH. DECIDED, not incidental (DK3, Gary, 10 Nov 2026): these are
+ * login, signup, OTP, password reset and donation initiation, and a limiter
+ * that failed open could be switched off by anyone able to make Redis
+ * unreachable - the limiter would then disable itself exactly when attacked.
+ * express-rate-limit's passOnStoreError stays off; the test named "PINNED, A
+ * DECISION" in test/rate-limiter-redis.test.js holds it. Refusing a request is
+ * not the same as taking the process down, which must never happen (ADR-039).
+ *
+ * THIS COMMENT ONCE SAID THE OPPOSITE: that if the connection never succeeded
+ * "the limiter fails open on that request". It never did - passOnStoreError
+ * was always off. A comment describing behaviour the code never had is the
+ * same class as the SEC-19 test that matched a comment (remediation map DK3).
  */
 function connectRedis() {
   const url = process.env.REDIS_URL;
@@ -81,7 +91,7 @@ function connectRedis() {
     })
     .catch((err) => {
       // eslint-disable-next-line no-console
-      console.error('[rateLimiters] redis connect failed, limiters degrade:', err && err.message);
+      console.error('[rateLimiters] redis connect failed; limited routes are refused until it connects:', err && err.message);
     });
 
   storeKind = 'redis';

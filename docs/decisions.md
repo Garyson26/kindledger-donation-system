@@ -1770,6 +1770,14 @@ failed connection; unhandled, that is an uncaught exception and the process
 dies, reintroducing precisely the behaviour ADR-039 exists to remove. The
 handler logs, and the limiter degrades instead.
 
+*[Amended, DK3, 10 Nov 2026: "degrades" meant the process survives. It never
+meant requests go through. With Redis unreachable a limited request is
+**refused** (500), because `passOnStoreError` is off, and that is now decided
+rather than incidental: failing open would let anyone who can make Redis
+unreachable switch off the limits on login, signup and password reset. The
+module's comment had said it "fails open"; corrected. See remediation map
+DH1/DK3.]*
+
 ---
 
 ## ADR-043 — Nginx overwrites `X-Forwarded-For` with `$remote_addr`, and the `set_real_ip_from` block is removed

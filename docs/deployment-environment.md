@@ -423,9 +423,11 @@ names read through `config/destructiveJobs.js`) and **1** on the frontend.
 stay unset.
 
 > **PRODUCTION ONLY. Untick Preview and Development on every variable, every
-> time (DEPLOY-02).** Vercel's form ticks all three by default, and an
-> integration adds its own variable to Preview without asking - the Redis one
-> did. With the project connected to Git, Vercel builds a preview of **every
+> time, and re-check after every edit (DEPLOY-02, DEPLOY-03).** On this
+> project Preview ended up ticked unless someone unticked it: twelve variables
+> added in the dashboard arrived on Preview, the Redis integration put its own
+> there without asking, and **editing `DATABASE_URL`'s value left it on Preview
+> too**, though it had been Production-only. With the project connected to Git, Vercel builds a preview of **every
 > branch**, and a preview gets the Preview variables. Ticked, they hand any
 > branch's code:
 >
