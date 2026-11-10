@@ -72,7 +72,12 @@ const restrictiveCors = cors({
     if (!origin) return cb(null, true); // allow same-origin / server-to-server
     if (configuredOrigins.includes(origin)) return cb(null, true);
     if (process.env.NODE_ENV !== 'production' && localhostPattern.test(origin)) return cb(null, true);
-    return cb(new Error('Not allowed by CORS'));
+    // Refused by raising, so the request stops HERE, before its route runs -
+    // a `cb(null, false)` would only omit the CORS headers and let a simple
+    // cross-site POST execute. Tagged so the error handler answers 403 (DP2).
+    const refused = new Error('Not allowed by CORS');
+    refused.corsRefused = true;
+    return cb(refused);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -146,6 +151,13 @@ registerShutdownHandlers();
 
 // Generic error handler — never expose raw error messages to clients (BE-MED-08)
 app.use((err, req, res, next) => {
+  // DP2. An origin outside ALLOWED_ORIGINS is the CALLER's problem: 403, and no
+  // stack in the log. It used to be a 500 like any crash, so alerting on 500s
+  // fired on every blocked cross-origin request and real faults were lost.
+  if (err && err.corsRefused) {
+    if (res.headersSent) return next(err);
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
   console.error(err);
   if (res.headersSent) return next(err);
   res.status(err.status || 500).json({
