@@ -6231,8 +6231,8 @@ builds its own MemoryStore. The comment above `createLimiter` ("every limiter
 shares one store instance ... kept apart by key prefixing") is right about the
 keys and wrong about the window.
 
-**Fix:** one `RedisStore` per limiter, each with its own prefix, on the one
-shared client. Not yet done.
+**FIXED (DJ1):** one `RedisStore` per limiter, on the one shared connection.
+Keys are unchanged; each limiter's `name` already kept them apart.
 
 ### RATE-02 (High for availability) - one Redis timeout at cold start breaks every limited route on that instance
 
@@ -6250,10 +6250,61 @@ password reset and **donation initiation** answer 500 until Vercel recycles
 the instance - with Redis healthy the whole time. It looks intermittent for
 the same reason DC1 does: only some instances are affected.
 
-**Fix:** reload the script on any failure, not only `NOSCRIPT` (a store
-wrapper, or a fresh `init` on error). Whether a limiter that cannot count
-should then fail open or closed is a decision, and is recorded as one when it
-is made. Not yet done.
+**FIXED (DJ1):** the store remembers `init()` instead of running it once. A
+failed one is forgotten, and the next request runs it again before counting.
+Only the library's public store methods are used.
+
+**Not changed, and DECIDED (DK3, Gary, 10 Nov 2026): fail closed.** While Redis
+is unreachable, a limited request is **refused** (500), not let through
+uncounted. **Why:** these are login, signup, password reset and donation
+initiation, and a limiter that failed open could be switched off by anyone
+able to make Redis unreachable - it would disable itself exactly when attacked.
+The test "PINNED, A DECISION" holds it; changing it is a change of decision.
+
+### DK3 - a comment described behaviour the code never had
+
+`config/rateLimiters.js` said that if the Redis connection never succeeded,
+"the limiter fails open on that request rather than taking the process down".
+**It never failed open**: `passOnStoreError` was always off, so the request was
+refused. ADR-042's "the limiter degrades instead" was read the same way. Both
+are corrected; the ADR is amended rather than rewritten.
+
+**The same class as SEC-19's vacuous test** (CM1, row D): there, a test's regex
+matched a *comment* saying the leak was removed, so it passed whether or not
+the code was fixed. Here a comment asserted a security property - and the
+opposite one - that nothing checked. In both, prose about the code was
+standing in for the code. The remedy is the same: a test that exercises the
+behaviour. The fail-closed behaviour now has one, and the comment cites it.
+
+### RATE-01 and RATE-02: proved broken, fixed, proved fixed
+
+`test/rate-limiter-redis.test.js` replaces only the `redis` client, through
+`require.cache`, with an in-memory Redis that answers rate-limit-redis's two
+scripts on a clock the test controls. Everything above it is real:
+`config/rateLimiters.js`, rate-limit-redis, express-rate-limit, mounted on
+routes, created in production's order. The assertions are HTTP status codes.
+
+| Test | Before the fix | After |
+|---|---|---|
+| RATE-01: the reset cap still refuses 61 s after it refused | **200** (expected 429) | 429 |
+| RATE-01: the login window is still 60 s | pass | pass - guards against giving every limiter 15 minutes |
+| RATE-02: Redis down at start-up, then back: three logins | **500, 500, 500** | 200, 200, 200 |
+| RATE-02: after recovering, the sixth login is 429 | **500 ×6** | 200 ×5, then 429 - recovery is not a bypass |
+| PINNED: Redis down, a limited route is refused | pass | pass |
+
+**2/5 before, 5/5 after.** Mutations checked: removing the retry fails both
+RATE-02 tests; sharing one store again fails RATE-01.
+
+### How they were found, and why nothing earlier could
+
+**Only a real Redis shows either one.** Every suite, CI and local alike, runs
+without `REDIS_URL`, so each limiter builds its own MemoryStore - its own
+window, and no scripts to fail to load. The first production log carried
+`ERR_ERL_STORE_REUSE` and the start-up `TimeoutError` within an hour of the
+first deploy with variables. **The same class as CM1's** "three of the five
+passed only inside the api container": the configuration the suites exercised
+was not the one that ships, so green meant "green in an environment nobody
+deploys". The new suite runs the Redis configuration on every CI run.
 
 ### Not a defect: `ERR_ERL_KEY_GEN_IPV6`
 
@@ -6270,15 +6321,118 @@ test. Leave it, or silence that one validation with a comment saying why.
   §2.1; not yet observed, since no donation has been attempted). No sandbox
   donation can complete until they are set.
 - **Twelve of the fourteen variables target Preview as well as Production.**
-  Only `DATABASE_URL` and `PRISMA_CONNECTION_LIMIT` are Production-only. With
-  no database a preview fails closed, but every branch preview gets
-  `JWT_SECRET`, the PayU salt and the mail password. And because `REDIS_URL` is
-  shared (the integration adds it to both), a preview shares production's
-  limiter buckets (DEPLOY-01) unless it sets its own `RATE_LIMIT_PREFIX`.
+  Recorded as **DEPLOY-02**, below.
 - **Four secrets are `encrypted`, not `sensitive`** - `JWT_SECRET`,
   `HEALTH_DIAGNOSTIC_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` - so the
   dashboard can reveal them (Vercel flags them `readable-secret`). §6 says
   Sensitive. The salt is `encrypted` too.
+
+---
+
+## DEPLOY-02 (High, deployment) - production secrets were given to every branch preview
+
+**Found 10 Nov 2026 (DH1). Corrected on the project by Gary (DJ2).**
+
+Twelve of the fourteen backend variables targeted **Preview** as well as
+Production: `JWT_SECRET`, `HEALTH_DIAGNOSTIC_SECRET`, `PAYU_MERCHANT_KEY`,
+`PAYU_MERCHANT_SALT`, `PAYU_BASE_URL`, `EMAIL_USER`, `EMAIL_PASSWORD`,
+`EMAIL_SERVICE`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE` and `REDIS_URL`. Only
+`DATABASE_URL` and `PRISMA_CONNECTION_LIMIT` were Production-only.
+
+**Why it matters.** With Git connected, Vercel builds a preview of **every
+branch** pushed to the repository, and a preview runs that branch's code with
+the Preview variables. So any branch could:
+
+- **sign tokens production accepts** - `JWT_SECRET` is the key to every
+  session;
+- **build and verify PayU hashes** with the real salt, which is the only thing
+  that tells a genuine payment callback from a forged one (SEC-01);
+- **send mail as the organisation**, with the mail password;
+- **share production's rate-limit counters** through the shared `REDIS_URL`
+  (DEPLOY-01), so testing a preview spends production's login budget, or the
+  reverse.
+
+What limited it: `DATABASE_URL` was Production-only, so a preview had no
+database and failed closed; and the PayU values were still the sandbox's
+(DI1). Neither is a control. Both were luck about which variables happened to
+be unticked.
+
+**Why an installer hits it.** **On this project Preview ended up ticked unless
+someone unticked it**: every one of the twelve was added in the dashboard and
+arrived on Preview (none on Development), and the Redis integration put
+`REDIS_URL` on Preview without asking. *Corrected 10 Nov: this entry first said
+the form ticks all three environments by default. None of the fourteen
+variables targets Development, so that was not what happened here; what was
+observed is stated instead.* Following the guide without being told
+otherwise produces exactly this. deployment-environment §6 said "Production
+only" since DF4, as a callout; it now gives the reasons and says how to check.
+Recorded in the self-hosting notes too (Phase 6 checklist §5.6), because every
+NGO deploying to Vercel gets the same default.
+
+**Being corrected (DJ2, DK1), and the first pass made it worse (DEPLOY-03).**
+Read from the project at 10:18 UTC, 10 Nov: nothing unticked yet; the four new
+callback URLs added with Preview ticked; and after the edit that corrected
+`DATABASE_URL`'s host, it **targeted Preview too**, so previews would get the
+donor database - the one variable that had been Production-only. Git is connected, so the next branch
+push builds a preview with all of it. **Pushes are held until Preview is empty.**
+
+**Closes when** the project's Environment Variables page, filtered to Preview,
+lists nothing. Read back from the API, not assumed.
+
+---
+
+## DEPLOY-03 (High, deployment) - the correction made it worse: editing a value put the donor database on Preview
+
+**Found 10 Nov 2026 (DK2).** The first fix for DEPLOY-02 was correcting
+`DATABASE_URL`'s placeholder host. **After that edit, `DATABASE_URL` targeted
+Production and Preview** - read from the API, with `updatedAt` matching the
+edit. Before it, it was Production-only: **the one variable on the project
+that had been right.** Git was connected, so the next branch push would have
+built a preview holding the donor database's credentials, running whatever
+code that branch carried.
+
+**What is known, and what is not.** The API shows the result, not the click.
+Whether the edit form re-applied a Preview default or Preview was ticked during
+the edit cannot be told from here, and Vercel's documentation does not describe
+the form doing it. **The conclusion does not depend on which:** an environment
+setting that does not reliably survive an edit to an unrelated field - the
+value - **cannot be set once and trusted.** It has to be re-checked after
+every edit, and it has to be checked by reading it back, because the person
+making the edit was fixing the host and had no reason to look at the
+environments.
+
+**Same shape as AP4's**, one layer out: a correct change to one thing
+produced a wrong state somewhere nobody was looking.
+
+**Recorded where installers will see it:** Phase 6 checklist §5.3a and
+deployment-environment §6 now say re-check the Preview filter **after every
+edit**, not once at setup, and give the CLI (`vercel env add ... --environment
+production`, `vercel env ls --environment preview`) as the way to set and
+audit it explicitly. **Held in this repository's practice:** no branch is
+pushed to the Git-connected project until the Preview filter has been read back
+empty.
+
+**Closes with DEPLOY-02**, when Preview lists nothing after the last edit.
+
+---
+
+## DJ4 - `docker-compose.yml` no longer requires `ADMIN_CREATION_KEY`
+
+It was `${ADMIN_CREATION_KEY:?...}`: the stack refused to start without it, so
+every Compose install carried a **live admin-creation key on the public signup
+endpoint, permanently** - the opposite of deployment-environment §2.4 and of
+`docs/first-run.md`, which set it once and remove it. Now
+`${ADMIN_CREATION_KEY:-}`: unset or empty is the normal state.
+
+**Proved by behaviour:** `docker compose config` with no key at all - before,
+`required variable ADMIN_CREATION_KEY is missing a value`, exit 1; after, it
+renders `ADMIN_CREATION_KEY: ""` and exits 0.
+
+**What makes empty safe is pinned:** `auth-characterisation` "DJ4" asserts that
+an empty or unset key refuses admin signup with 403 and writes nothing - **even
+when `adminKey` is empty too**, the case a check written as
+`adminKey === key` would accept - and that the matching key still works, since
+first-run depends on it. Nothing asserted the refusal before.
 
 ---
 

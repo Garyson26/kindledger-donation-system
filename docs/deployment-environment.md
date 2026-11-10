@@ -422,11 +422,28 @@ names read through `config/destructiveJobs.js`) and **1** on the frontend.
 **You type in 21 of them on the backend and 1 on the frontend.** The other 15
 stay unset.
 
-> **Tick Production only, not Preview or Development.** Vercel's form ticks all
-> three by default. With the project connected to Git, it builds a preview of
-> **every branch**, and a preview given these values is any branch's code
-> running against the donor database, with the real PayU salt (DF3). A preview
-> without them fails closed, as every deployment on the project does today.
+> **PRODUCTION ONLY. Untick Preview and Development on every variable, every
+> time, and re-check after every edit (DEPLOY-02, DEPLOY-03).** On this
+> project Preview ended up ticked unless someone unticked it: twelve variables
+> added in the dashboard arrived on Preview, the Redis integration put its own
+> there without asking, and **editing `DATABASE_URL`'s value left it on Preview
+> too**, though it had been Production-only. With the project connected to Git, Vercel builds a preview of **every
+> branch**, and a preview gets the Preview variables. Ticked, they hand any
+> branch's code:
+>
+> - `JWT_SECRET`, so it can sign sessions production accepts;
+> - `PAYU_MERCHANT_SALT`, the only thing that tells a real payment callback from
+>   a forged one;
+> - the mail password, so it can send as the organisation;
+> - `DATABASE_URL`, the donor database itself;
+> - `REDIS_URL`, so previews and production share rate-limit counters.
+>
+> **This happened on the first deployment**, with this callout in place: twelve
+> variables were on Preview, and the first correction moved `DATABASE_URL` onto
+> it as well. **Check it, do not assume it:** filter the Environment Variables
+> page to Preview and it must list nothing. A preview with no variables fails
+> closed, which is what you want. Phase 6 checklist §5.3a says the same for
+> self-hosters.
 
 | Action | Means |
 |---|---|

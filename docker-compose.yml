@@ -111,7 +111,13 @@ services:
       # deployments share one Redis, or they throttle each other.
       RATE_LIMIT_PREFIX: ${RATE_LIMIT_PREFIX:-kl:rl:}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-      ADMIN_CREATION_KEY: ${ADMIN_CREATION_KEY:?set ADMIN_CREATION_KEY in .env}
+      # DJ4: OPTIONAL, AND UNSET IS THE NORMAL STATE. It lets anyone holding it
+      # create an admin through the PUBLIC signup endpoint, so it is set once,
+      # for the first admin, and removed (docs/first-run.md). `:?` here made
+      # that impossible: the stack refused to start without it, so every
+      # install kept a live admin-creation key forever. Unset or empty, admin
+      # signup is refused (403) - routes/auth.js fails closed on a falsy key.
+      ADMIN_CREATION_KEY: ${ADMIN_CREATION_KEY:-}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
       # BH5: DECLARED, NOT REQUIRED, AND THAT IS DELIBERATE.
       #

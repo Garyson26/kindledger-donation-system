@@ -237,6 +237,32 @@ DI1), so the frontend can be tested end to end. When it works, these are the
 3. **One real donation of the smallest amount, confirmed IN THE BANK** - steps
    1 to 4 above. Not the dashboard.
 
+### 5.3a On Vercel: every variable is Production only, and stays so only if you keep checking (DEPLOY-02, DEPLOY-03)
+
+With the project connected to Git, Vercel builds a preview of **every branch**,
+and a preview gets the Preview variables. Any backend variable on Preview
+hands any branch the session-signing key, the payment salt, the mail password,
+the donor database, or production's rate-limit counters.
+
+**On the first KindLedger deployment, Preview was ticked on twelve variables
+added in the dashboard, a Marketplace integration put its own there without
+asking, and editing one variable's value left it on Preview although it had
+been Production-only** (remediation map DEPLOY-02, DEPLOY-03). The guide
+already said "Production only". **So the setting cannot be made once and
+trusted:**
+
+1. **Untick Preview and Development on every backend variable** as you add it.
+2. **Re-check the Preview filter AFTER EVERY EDIT** - a changed value, a
+   re-added secret, a new integration - not once at setup. The page, filtered
+   to Preview, must list nothing. A preview with no variables fails closed,
+   which is correct.
+3. **Before pushing a branch** to a Git-connected project, check again.
+4. **Or use the CLI, where the environment is explicit, and audit with it:**
+   ```
+   vercel env add JWT_SECRET --environment production --sensitive --yes
+   vercel env ls --environment preview        # must list nothing
+   ```
+
 ### 5.4 The uploads volume must be persistent
 
 Logos are stored on local disk in the `uploads` volume, deliberately — an NGO
@@ -283,7 +309,8 @@ changes status without changing content.
 | `vite` major (frontend build tooling) | **Queued.** `npm audit --omit=dev` reports 0; the advisories are dev-server only. `vite@8` is its own package |
 | Guest donation retrieval (D1 / AG4) | **Deferred with triggers**, not a phase |
 | PayU on test mode (DI1) | **Tracked, deliberate.** Trigger: the frontend works end to end against the sandbox. Then §5.3's last three items. Closes when the first real donation is in the bank |
-| `RATE-01`, `RATE-02` (remediation map DH1) | **Open, NOT YET PINNED.** The limiters share one Redis store, so every window is 60 s; and one Redis timeout at cold start leaves an instance answering 500 on every limited route. Fix before announcing |
+| `RATE-01`, `RATE-02` (remediation map DH1) | **Fixed (DJ1), PINNED** by `test:rate-limiter-redis` on a fake Redis: one store per limiter, and a failed store start-up is retried. With Redis unreachable a limited route is refused, not let through: **decided** (DK3), and pinned |
+| `DEPLOY-02`, `DEPLOY-03`: production secrets on Preview, and an edit that put the donor database there | **Being corrected** on the Vercel project. Closes when Preview lists no variables after the last edit (§5.3a) |
 
 **Every one carries a test.** An open residual with a test cannot change without
 somebody noticing; one with a prose note can.

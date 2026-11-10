@@ -191,6 +191,14 @@ jobs:
         working-directory: Backend
         run: npm run test:auth
 
+      # RATE-01/02 (remediation map DH1). Every other suite runs the limiters
+      # without REDIS_URL, on per-limiter memory stores, where neither defect
+      # exists. This one runs them on Redis - a fake one, so no service is
+      # needed - in production's configuration.
+      - name: Rate limiters on a Redis store (RATE-01, RATE-02)
+        working-directory: Backend
+        run: npm run test:rate-limiter-redis
+
       - name: Category characterisation (SPEC-3 package 3.1)
         working-directory: Backend
         # CHARACTERISATION, not specification: these capture what

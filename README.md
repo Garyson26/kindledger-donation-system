@@ -67,7 +67,7 @@ boot without the first two.
 | `DATABASE_URL` | MySQL connection string, e.g. `mysql://user:pass@db:3306/kindledger`. Reserved characters must be percent-encoded |
 | `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` | Used by the `db` service in the compose stack |
 | `JWT_SECRET` | **Must be >= 32 characters.** `openssl rand -hex 32` |
-| `ADMIN_CREATION_KEY` | Required before any admin account can be self-registered |
+| `ADMIN_CREATION_KEY` | **Leave unset**, except briefly to create the first admin ([`docs/first-run.md`](docs/first-run.md)). While set, it lets anyone holding it create an admin through public signup |
 | `ALLOWED_ORIGINS` | Comma-separated frontend origins, no trailing slash |
 | `PAYU_MERCHANT_KEY`, `PAYU_MERCHANT_SALT`, `PAYU_BASE_URL` | PayU credentials and environment. **`PAYU_MERCHANT_SALT` is the secret the callback signature is built from — without it the API refuses to build or verify a PayU hash rather than computing one anybody could forge (ENV-01)** |
 | `SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL`, `NOTIFY_URL` | Backend `/api/payment/*` callback URLs |
