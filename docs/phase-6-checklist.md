@@ -222,6 +222,21 @@ So, on every new deployment and after any change to that variable:
 Step 3 is the whole step. Steps 1 and 2 pass identically against the sandbox,
 which is exactly what makes this necessary.
 
+#### The last items before announcing: leaving test mode (DI1)
+
+The new backend starts on PayU's **sandbox, deliberately** (remediation map
+DI1), so the frontend can be tested end to end. When it works, these are the
+**last three things done before the site is announced**, in this order:
+
+1. **Switch all three PayU values together**: `PAYU_BASE_URL` to
+   `https://secure.payu.in`, `PAYU_MERCHANT_KEY` and `PAYU_MERCHANT_SALT` to the
+   production pair. Never one at a time: a production salt with the test URL,
+   or the reverse, fails hash verification, and the symptom points at the
+   hashing code, which is correct.
+2. **Redeploy.** A changed variable reaches only new deployments.
+3. **One real donation of the smallest amount, confirmed IN THE BANK** - steps
+   1 to 4 above. Not the dashboard.
+
 ### 5.4 The uploads volume must be persistent
 
 Logos are stored on local disk in the `uploads` volume, deliberately — an NGO
@@ -267,6 +282,8 @@ changes status without changing content.
 | AE1-a's partial-overlap case | **Open, PINNED.** An old snapshot of the right database shares most ids, so the identity guard passes by construction |
 | `vite` major (frontend build tooling) | **Queued.** `npm audit --omit=dev` reports 0; the advisories are dev-server only. `vite@8` is its own package |
 | Guest donation retrieval (D1 / AG4) | **Deferred with triggers**, not a phase |
+| PayU on test mode (DI1) | **Tracked, deliberate.** Trigger: the frontend works end to end against the sandbox. Then §5.3's last three items. Closes when the first real donation is in the bank |
+| `RATE-01`, `RATE-02` (remediation map DH1) | **Open, NOT YET PINNED.** The limiters share one Redis store, so every window is 60 s; and one Redis timeout at cold start leaves an instance answering 500 on every limited route. Fix before announcing |
 
 **Every one carries a test.** An open residual with a test cannot change without
 somebody noticing; one with a prose note can.

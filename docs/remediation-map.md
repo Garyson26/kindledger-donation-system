@@ -6184,6 +6184,130 @@ merge, not a redeploy.**
 
 ---
 
+## DH1 - THE FIRST DEPLOY WITH VARIABLES: WHAT IT SHOWED (10 Nov 2026)
+
+#38's merge deployed `182a23e` to production (`dpl_DGtCDa81aKVbF6BAeU8x6mRPAK1V`,
+READY), the first deploy with variables. Read from the live URL and its
+runtime log:
+
+| Check | Result |
+|---|---|
+| `/api/health` | **503 after 10 s**, `{"status":"unavailable"}` |
+| Data routes | 500 after 20 s (two queries, each waiting the 10 s pool timeout) |
+| Why | **`[prisma] the database refused a new connection: -3008 ENOTFOUND getaddrinfo ENOTFOUND srvNNNN.hstgr.io`**. The `DATABASE_URL` on the project holds deployment-environment §1.4's **placeholder** hostname, not Hostinger's |
+| `[serverGuard] ... supported`, the GLOBAL `sql_mode` warning | **Absent**, correctly: no connection, so no verdict. An unreachable server is not cached and not refused (ADR-039) |
+| `[rateLimiters] store=redis` | **Present** |
+| `db:migrate` | **Not run.** `DATABASE_URL` is Sensitive on Vercel, so it cannot be read back, and with a placeholder host there was nothing to migrate against. The guard runs before any DDL, so a run against this URL could not have left a partial schema |
+
+**DC1's log line paid for itself on the first request.** Without it the log
+would show only `pool timeout ... active=0 idle=0`, which reads like the
+connection ceiling or a slow network. With it the cause was the first line.
+(It says "refused" for a DNS failure. The wording is DC1's and is broader than
+the case; the code it carries is what to read.)
+
+The same log carried three things nobody had seen in CI, because CI never runs
+the limiters against Redis. Two are defects; one is not.
+
+### RATE-01 (Medium) - every limiter shares one Redis store, so they all get the LAST limiter's window
+
+`config/rateLimiters.js` hands **one** `RedisStore` to every limiter.
+`rate-limit-redis`'s `init()` does `this.windowMs = options.windowMs`, and its
+increment script sets each new key's expiry from that one field. The last
+limiter to initialise sets the window for all of them. Module-load order is
+`authLimiter` (60 s), `resetAttemptLimiter` (15 min), `paymentInitiateLimiter`
+(60 s), so **every key expires after 60 seconds.**
+
+**Proved, not inferred:** the real `rate-limit-redis` 6.0.1 and
+`express-rate-limit` 8.7.0, wired as `createLimiter` wires them, with a stub
+`sendCommand` recording what reaches Redis. A reset-attempt key goes out as
+`EVALSHA sha 1 rl:reset-attempt:addr:x 60000` - **60,000 ms, not 900,000.**
+
+**The consequence:** AQ1's per-address reset cap is 5 guesses per **minute**,
+not per 15 minutes - about 75 per code lifetime instead of 5. The cap's main
+job (the response is uniform, so the count is not an oracle) still holds; its
+rate does not. `express-rate-limit` says so itself: `ERR_ERL_STORE_REUSE` in
+the production log. **Invisible without Redis**, because each limiter then
+builds its own MemoryStore. The comment above `createLimiter` ("every limiter
+shares one store instance ... kept apart by key prefixing") is right about the
+keys and wrong about the window.
+
+**Fix:** one `RedisStore` per limiter, each with its own prefix, on the one
+shared client. Not yet done.
+
+### RATE-02 (High for availability) - one Redis timeout at cold start breaks every limited route on that instance
+
+`init()` stores the `SCRIPT LOAD` promise. If it rejects (the pdx1 cold start
+at 09:44 logged `async error during store initialization. TimeoutError` three
+times), it stays rejected: every later `increment` awaits it and re-throws, and
+the only retry path is a `NOSCRIPT` reply, which never comes.
+`passOnStoreError` is false, so each request errors.
+
+**Proved with the same stub:** Redis times out once, during init, and is
+healthy afterwards. Three requests to a limited route: **500, 500, 500.**
+
+**The consequence:** on an affected instance, login, signup, the OTP routes,
+password reset and **donation initiation** answer 500 until Vercel recycles
+the instance - with Redis healthy the whole time. It looks intermittent for
+the same reason DC1 does: only some instances are affected.
+
+**Fix:** reload the script on any failure, not only `NOSCRIPT` (a store
+wrapper, or a fresh `init` on error). Whether a limiter that cannot count
+should then fail open or closed is a decision, and is recorded as one when it
+is made. Not yet done.
+
+### Not a defect: `ERR_ERL_KEY_GEN_IPV6`
+
+A false positive. `express-rate-limit` checks the keyGenerator's **source text**
+for `req.ip` without `ipKeyGenerator`. Ours passes `req.ip` to `keyFor()`, which
+calls `ipKeyGenerator` (ADR-048). The collapse is asserted by `keyFor`'s own
+test. Leave it, or silence that one validation with a comment saying why.
+
+### Also found on the project
+
+- **`SUCCESS_URL`, `FAILURE_URL`, `CANCEL_URL` and `NOTIFY_URL` are not set.**
+  Without them `/api/payment/initiate` builds a form with no `surl`, `furl`,
+  `curl` or `notify_url`, which PayU rejects (FAILS LOUD, deployment-environment
+  §2.1; not yet observed, since no donation has been attempted). No sandbox
+  donation can complete until they are set.
+- **Twelve of the fourteen variables target Preview as well as Production.**
+  Only `DATABASE_URL` and `PRISMA_CONNECTION_LIMIT` are Production-only. With
+  no database a preview fails closed, but every branch preview gets
+  `JWT_SECRET`, the PayU salt and the mail password. And because `REDIS_URL` is
+  shared (the integration adds it to both), a preview shares production's
+  limiter buckets (DEPLOY-01) unless it sets its own `RATE_LIMIT_PREFIX`.
+- **Four secrets are `encrypted`, not `sensitive`** - `JWT_SECRET`,
+  `HEALTH_DIAGNOSTIC_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` - so the
+  dashboard can reveal them (Vercel flags them `readable-secret`). §6 says
+  Sensitive. The salt is `encrypted` too.
+
+---
+
+## DI1 - PAYU IS ON TEST MODE DELIBERATELY: TRACKED, NOT A FINDING
+
+**State (10 Nov 2026):** `PAYU_BASE_URL=https://test.payu.in`, with the sandbox
+key and salt. **Gary's choice, for end-to-end testing.** This is not ENV-02:
+ENV-02 was the sandbox reached by accident, through a default. This is the
+sandbox chosen, named and dated.
+
+| | |
+|---|---|
+| **Trigger to switch** | The frontend works end to end against the sandbox: a donation from the donor app completes, the callback is verified and the admin list shows it |
+| **The switch** | All three values together: `PAYU_BASE_URL=https://secure.payu.in`, the production `PAYU_MERCHANT_KEY`, the production `PAYU_MERCHANT_SALT` |
+| **Then** | Redeploy (variables reach only new deployments), then one real donation of the smallest amount, **confirmed in the bank** (Phase 6 checklist §5.3) |
+| **Closes when** | That donation is seen in the bank account |
+
+**The three values change together, or the result is a hash failure that
+points at correct code.** A production salt with the test URL, or the reverse,
+fails hash verification - at PayU, or at our callback as `invalid_hash` - and
+the hashing code is correct. The same shape as PAY-03 and AP4: the fix is the
+variables, never `verifyHash`.
+
+**While on test mode, PAY-03 applies:** the sandbox truncates `firstname` to
+20 characters and signs the truncated value. **Keep test donor names under 20
+characters**, or run the one long-name payment PAY-03 asks for, deliberately.
+
+---
+
 ## Counts
 
 | State | Count | Rows |
