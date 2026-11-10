@@ -5627,6 +5627,51 @@ already say 4c is cleanup after 4b. Nothing else stated the order. The same
 pass caught runbook §7a. It still said "the stack refuses to start" without
 `PAYU_BASE_URL`, which is the compose-only claim CB2 corrected. Fixed.
 
+## THE OCCUPIED SLOT: A CONFIGURED CHECK THAT CANNOT RUN IS WORSE THAN NO CHECK (DT1)
+
+Named on 10 Nov 2026, after the third real defect found the same way: **by
+making a check that already existed actually run.** A missing check is visible
+- someone asks "do we lint?" and the answer is no. A configured check that
+cannot run answers "yes" to that question for ever. It occupies the slot where
+the real one would go, and nothing reports its absence.
+
+| | The check that existed | Why it could not run, or ran on the wrong thing | What it hid |
+|---|---|---|---|
+| **CI-01** (below) | The Schema and MySQL CI jobs | mysqld flags in a service's `options:`; Docker refused them, every run, since Phase 1a | Every "N/N green" for MySQL was nobody's result. Five defects surfaced the day it ran (CM1) |
+| **RATE-01 / RATE-02** (DH1) | Every suite that exercises a rate limiter | All of them run without `REDIS_URL`, on per-limiter memory stores - never the configuration that ships | The reset-code cap at 5 a minute, not 5 per 15; an instance answering 500 on every limited route after one Redis timeout |
+| **FE-02** (below) | `npm run lint`, configured in `Frontend/` | ESLint 8 pinned against an ESLint 9 config; it died before reading a file, and no workflow ran it to notice (LINT-01) | **The admin Donations page crashing on every render, for seven weeks, in production** |
+
+**The rule it gives:** a check counts only once it has been seen to fail. A
+check nobody has watched go red has not been shown to run at all.
+
+### FE-02 (High) - the admin Donations page crashed on every render, from 22 Sep to 10 Nov. FIXED (DT1)
+
+`Frontend/src/pages/DonationsPage.jsx` calls `useBranding()` on its first line.
+SPEC-5 5.4 (`6566b41`, 22 Sep 2026) added that call when it replaced the
+hardcoded organisation name - **and never added the import.** Every render
+threw `ReferenceError: useBranding is not defined`. The page is `/donations`,
+linked from the admin navbar twice and from the admin dashboard.
+
+**Why seven weeks.** A missing import is not a build error. `vite build`
+resolves imports, and there is no import here to resolve - only a free name,
+which is looked up when the function *runs*, and a build never runs a
+component. So every Vercel deployment of the frontend **built successfully**
+with the crash inside it. (CI builds nothing in `Frontend/`; no workflow touches
+it.) Two things could have caught it: the lint, which had never been able to
+run (LINT-01's `no-undef`), or opening the page, which no test does.
+
+**Fixed:** the one import. **Proved both ways** in a production build, with an
+admin-role token planted client-side (no API involved): before,
+`ReferenceError: useBranding is not defined` on render; after, the page mounts
+and runs its effects - it requests `/api/donations` and
+`/api/donations/filter-options`.
+
+**Not fixed here:** FE-03, the same shape in `/admin/categories`
+(`ConfirmModal` and the delete-modal state never defined, since the first
+commit). Nothing links to that route; it goes with the lint fix.
+
+---
+
 ## CI-01 (HIGH, for what it hid) - NO MYSQL JOB HAD EVER STARTED IN CI. FIXED (CM1)
 
 Found when the stack was pushed on 3 Nov and every branch went red.
