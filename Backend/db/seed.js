@@ -28,9 +28,12 @@
 
 const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
+// The application's client, not a bare PrismaClient: its connections are made
+// strict on connect (DB1), and a seed that wrote through a non-strict session
+// on a shared host would be the one writer the guarantee missed.
+const { getPrisma } = require('../config/prisma');
 
-const prisma = new PrismaClient();
+const prisma = getPrisma();
 
 // SEC-18 asks for cost 12 rather than the 10 used throughout the current code.
 const BCRYPT_COST = 12;

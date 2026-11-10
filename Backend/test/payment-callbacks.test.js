@@ -297,6 +297,11 @@ after(async () => {
   } finally {
     if (server) server.close();
     await mongoose.connection.close();
+    // DB1. Every other suite that boots the app already did this. It was
+    // harmless to omit while Prisma's own engine held the pool, which does not
+    // keep Node's event loop alive; the MariaDB driver's pool is ordinary
+    // sockets that do, so without it this file never exits.
+    await require('../config/prisma').disconnect();
   }
 });
 

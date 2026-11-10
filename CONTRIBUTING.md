@@ -2,13 +2,14 @@
 
 ## Database requirements
 
-**MySQL 8.0.16 or later. MariaDB is not supported.**
+**MySQL 8.0.16 or later, or MariaDB 11.4.5 or later.**
 
-The server must also run in **strict SQL mode** (`STRICT_TRANS_TABLES`).
+Every application connection must be in **strict SQL mode** (`STRICT_TRANS_TABLES`). `config/prisma.js` sets it on connect, so a server whose own default is not strict is accepted with a warning (DB1). **Anything that writes must use `getPrisma()`**; a test fails if a source file builds its own `PrismaClient`.
 
-All three are enforced, not merely requested — `npm run db:migrate` and
+All of it is enforced, not merely requested. `npm run db:migrate` and
 `npm run db:seed` run `Backend/db/require-mysql-version.js` first and refuse to
-proceed otherwise.
+proceed otherwise, and the application runs the same checks on its first
+request and answers 503 on an unsupported server (CX1).
 
 Strict mode is load-bearing: without it MySQL does not reject an out-of-set
 `ENUM` value, it stores the **empty string** with a warning. A donation whose
@@ -23,10 +24,15 @@ ignored, so the schema applies without a single error and without any of its
 guarantees: a category could be priced at zero, a donation recorded for zero
 rupees, and `branding_settings` could hold more than one row.
 
-MariaDB is excluded because it has no `utf8mb4_0900_*` collations at all. The
-email uniqueness guarantee depends on `utf8mb4_0900_as_ci`, and a silent
-fallback to another collation either merges distinct donor accounts or permits
-duplicate ones.
+MariaDB below 11.4.5 is excluded because it has no `utf8mb4_0900_*`
+collations. 11.4.5 added them as aliases of its UCA 14.0 collations, and on
+11.8 they behave identically for every case tested (CX1). The email uniqueness
+guarantee depends on `utf8mb4_0900_as_ci` being case-insensitive and
+accent-sensitive, so the guard compares strings and checks the answers rather
+than trusting a version number. CI runs the schema suite on both servers.
+
+**Write SQL both servers accept.** MariaDB has no `REGEXP_LIKE()`; use the
+`REGEXP` operator. When in doubt, the `schema-mariadb` CI job is where it shows.
 
 The bundled `docker-compose.yml` provides a correctly configured `mysql:8.4`:
 
@@ -86,7 +92,7 @@ npx prisma migrate diff --from-empty \
    database agree on everything Prisma *can* see. Give every `@unique` an
    explicit `map:` so index names match the DDL rather than Prisma's
    `*_key` convention.
-4. **Apply it**: `npm run db:migrate` (which is `prisma migrate deploy`).
+4. **Apply it**: `npm run db:migrate` (the server guard, then `prisma migrate deploy`). Never run `prisma migrate deploy` on its own: DDL cannot roll back, so a migration the server cannot apply stops partway and leaves half a schema (CY2).
 5. **Verify**:
 
 ```bash

@@ -30,6 +30,7 @@ const crypto = require('node:crypto');
 const router = express.Router();
 
 const { checkDatabase } = require('../config/prisma');
+const { getServerVerdict } = require('../config/serverGuard');
 
 /**
  * Timing-safe comparison of the diagnostics secret.
@@ -59,13 +60,23 @@ router.get('/', async (req, res) => {
 
   const db = await checkDatabase();
 
+  // CX1(b). A reachable database is not a usable one. If the server guard has
+  // refused it, every data route answers 503 - and a health check answering
+  // 200 beside them would tell a monitor the opposite of the truth. Asked only
+  // when the database answered, so a dead one is not inspected twice.
+  const server = db.ok ? await getServerVerdict() : null;
+  const ok = db.ok && Boolean(server && server.supported);
+
   if (diagnosticsRequested && secretMatches(req.get('x-health-secret'))) {
-    return res.status(db.ok ? 200 : 503).json({
-      status: db.ok ? 'ok' : 'unavailable',
+    return res.status(ok ? 200 : 503).json({
+      status: ok ? 'ok' : 'unavailable',
       database: {
         reachable: db.ok,
         latencyMs: db.latencyMs,
         ...(db.ok ? {} : { error: db.error }),
+        ...(server && !server.unreachable
+          ? { server: server.server, supported: server.supported, problems: server.problems, warnings: server.warnings }
+          : {}),
       },
       redis: {
         configured: Boolean(process.env.REDIS_URL),
@@ -95,7 +106,7 @@ router.get('/', async (req, res) => {
 
   // Unauthenticated: a status string and nothing more. Not the error, not the
   // latency, not whether Redis is configured.
-  return res.status(db.ok ? 200 : 503).json({ status: db.ok ? 'ok' : 'unavailable' });
+  return res.status(ok ? 200 : 503).json({ status: ok ? 'ok' : 'unavailable' });
 });
 
 module.exports = router;

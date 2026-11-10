@@ -90,39 +90,140 @@ longer allows that hostname** (§3.1, CX2), so the browser now blocks it as well
 The boot log says which store is in use (`[rateLimiters]`). **After the first
 deploy, check the log says redis.** No user-visible symptom will tell you.
 
-### 1.4 `DATABASE_URL` — the MySQL database
+### 1.4 `DATABASE_URL` — the database (Hostinger MariaDB, CX1)
 
 | | |
 |---|---|
 | Required | **Yes** |
-| Format | `mysql://<user>:<password>@<host>:3306/<database>?sslaccept=strict` |
-| Source | **A choice of provider.** Vercel does not host MySQL. It must be MySQL **8.4** (the schema and `db/require-mysql-version.js` assume it) |
+| Format | `mysql://<user>:<password>@<host>:3306/<database>?sslaccept=strict`. On Hostinger the host is the Remote MySQL hostname hPanel shows (`srvNNNN.hstgr.io`) |
+| Source | Hostinger shared hosting, which runs **MariaDB 11.8**. Supported since CX1: MySQL **8.0.16+** or MariaDB **11.4.5+**, with a strict `sql_mode` |
 | If missing | REFUSES. `/api/health` answers 503 and every data route errors |
+| **If the server is unsupported** | **REFUSES (CX1(b)).** Every data route and `/api/health` answer 503 `Service unavailable`; the log says `[serverGuard] REFUSING:` and why. Before CX1 it booted and wrote data |
+| **If the URL has no SSL parameter** | **REFUSES (DB4)** for any host that is not loopback, RFC 1918 or a single-label service name. The log says `NOT ENCRYPTED` |
+| **Hostinger's GLOBAL `sql_mode` is not strict** | **Solved for the application (DB1).** The application makes every connection of its own strict, and refuses if that fails; the log warns on every cold start that the *server* is not. Only out-of-band SQL is exposed - see "What this leaves" below |
 
-**Use TLS** (`sslaccept=strict`). This connection crosses the public internet,
-which it never did in the compose stack.
+#### Two things this deployment cannot fix, said plainly
+
+**1. The database holding donor details is reachable from the whole internet,
+protected by a password and nothing else.** Remote MySQL has to allow **any
+host** (`%`), because Vercel functions have no fixed outbound address to put on
+an allow list. Anyone who learns the hostname - and `srvNNNN.hstgr.io` names are
+not secret - can try passwords against it. There is no network control in front
+of it. So:
+
+- **Use the longest random password hPanel accepts.** Generate 64 characters of
+  `A-Z a-z 0-9` only (the §1.6 generator, with symbols removed), so nothing in it
+  needs percent-encoding in the URL. If hPanel refuses 64, use the longest it
+  takes; Hostinger does not document its limit, and I could not test it.
+- **The password lives in exactly one place:** this variable, set as Sensitive.
+  Not in a note, not in the 4b runbook log, not on the old backend.
+- **Rotate it if it is ever pasted anywhere else.**
+
+**2. TLS is the only thing protecting it in transit.** Hostinger reports
+`have_ssl = YES` and `require_secure_transport = 0`: TLS works, and the server
+does not insist on it. **So the application does (DB4).** Measured through the
+application's own driver against mariadb:11.8, from a host the guard treats as
+public:
+
+| `DATABASE_URL` ends with | Result |
+|---|---|
+| nothing | **REFUSED.** Before DB4 this connected in PLAINTEXT and everything worked - the password and every donor row readable on the wire. Now every data route answers 503 and the log says `NOT ENCRYPTED` |
+| `?sslaccept=strict` | **Encrypted. Use this.** It also accepted MariaDB 11.8's own self-signed certificate: MariaDB 11.4+ clients can verify that certificate against the account's password (MariaDB's zero-configuration TLS). Measured to connect and encrypt; **an interception attempt was not tested** |
+| `?sslaccept=accept_invalid_certs` | Encrypted, certificate **not** verified. Stops eavesdropping, not an attacker who can impersonate the server. **Only if `strict` will not connect** |
+
+**Check it rather than assume it.** The guard checks `Ssl_cipher` on the
+application's own connection and refuses if it is empty, so a deploy that
+answers 200 is encrypted.
+
+#### Installing the schema: `npm run db:migrate`, never bare `prisma migrate deploy`
+
+Run it once, from a workstation whose address is on the Remote MySQL list:
+
+```
+DATABASE_URL='<the URL above>' npm run db:migrate
+```
+
+`db:migrate` runs the server guard first, then the migration. **The order is
+the protection (CY2).** DDL on MySQL and MariaDB commits statement by statement,
+so a migration that fails partway cannot be rolled back: before CX1, the init
+migration stopped at `branding_settings` on MariaDB with six tables already
+created and a failed row in `_prisma_migrations` - a schema that looks nearly
+right. `npx prisma migrate deploy` on its own skips the guard.
+
+**If a migration ever does stop partway:** do not retry it on top. In
+phpMyAdmin, drop every table in the database (including `_prisma_migrations`),
+then run `npm run db:migrate` again. A fresh install has no data to lose; a
+database with data needs a backup taken first.
 
 **Fresh.** New database, new credential. **It goes on the new backend only.
 The old backend must never be given it** (CD2c, 4b runbook §1.6).
 
-### 1.5 `PRISMA_CONNECTION_LIMIT` — the default is wrong for serverless
+### 1.5 The connection limit: `PRISMA_CONNECTION_LIMIT`, and Hostinger's 75
 
-| | |
+Measured on the account (DB4, DC1): `max_user_connections = 75`,
+`wait_timeout = 20` seconds. **There is no hourly cap:** `SHOW GRANTS` carries
+no `MAX_CONNECTIONS_PER_HOUR` or `MAX_QUERIES_PER_HOUR` clause. So the one
+limit that matters is how many connections are open **at the same moment**.
+
+| Setting | Value | Why |
+|---|---|---|
+| `PRISMA_CONNECTION_LIMIT` | **`1`** | One connection per function instance. Measured: 200 queries, sequential or 50 at a time, used **one** connection; `10` used ten for the same burst. With 10, seven busy instances would take every slot |
+| idle lifetime | **none to set** | The application's pool keeps a connection until the server closes it, then opens a new one before the next query, with no failed request (measured, DB1). With `wait_timeout = 20`, an instance that has been quiet for 20 seconds holds **no** connection - which frees its slot for someone else |
+
+#### The ceiling: about 70 function instances active within any 20 seconds
+
+Each instance holds at most **one** connection, and holds it only while it has
+served a request in the last 20 seconds. So the number that must stay under 75
+is **instances that were busy in the last 20 seconds**. Keep **5** for things
+that are not the application - a migration, phpMyAdmin, the ETL, a person at a
+prompt - which leaves **about 70**.
+
+One Vercel instance serves many concurrent requests, so 70 simultaneously busy
+instances is far more traffic than this site has had. **The event that could
+reach it is a burst** - a campaign email to the whole donor list, or a link
+shared widely - not ordinary daily traffic.
+
+#### What it looks like past 70 - measured, so it is recognisable
+
+**Recognise it by:** donors waiting about **30 seconds** and then getting an
+error, while other donors at the same moment are fine. It looks intermittent
+because it is per instance: only the instances that could not get a connection
+fail, and which instance a donor lands on is chance. Confirm it with the `1226`
+log line below. **Do not raise the pool size or the timeout** - both ask the
+server for more of what it has just refused.
+
+Reproduced locally with a user capped at two connections, two "instances"
+holding both, and the real application booted as a third (DC1):
+
+| Where | What you see |
 |---|---|
-| Required | **Set it explicitly on Vercel** |
-| Default | `10`, derived for ONE long-running container (SPEC-1A §3.4) |
-| **If left at 10** | **FAILS LOUD, later.** Each concurrent function instance opens its own pool. Twenty concurrent instances × 10 = 200 connections, and many managed MySQL plans allow fewer. Under a donation spike, new requests are refused |
+| A donor on an instance that could not connect | **A slow failure, not a fast one.** Each database query waits the pool's 10-second timeout before failing. The category list answered **500 after 30 seconds**. If the Vercel function's time limit is shorter, Vercel answers 504 instead |
+| `/api/health` on that instance | **503 after 10 seconds** |
+| Donors on instances that DID connect | **Nothing.** They keep working. That is what makes it look intermittent |
+| **The function log - the line to search for** | `[prisma] the database refused a new connection: 1226 ER_USER_LIMIT_REACHED User 'u433859718_...' has exceeded the 'max_user_connections' resource (current value: 75)` |
+| Also in the log, less useful on its own | `pool timeout: failed to retrieve a connection from pool after 10000ms (pool connections: active=0 idle=0 limit=1)` - `active=0 idle=0` means the instance never got a connection at all |
 
-**Derivation (BJ2), not a number:**
+**The `1226` line exists because of DC1.** Before it, the driver dropped the
+server's reason and the log showed only the pool timeout, which reads like a
+network fault. It is logged at most once a minute per instance.
 
-```
-PRISMA_CONNECTION_LIMIT = floor( (provider max_connections − headroom) / peak concurrent instances )
-```
+**It clears by itself.** Once the burst passes, instances go quiet and the
+server closes their connections 20 seconds later, freeing slots. Measured: the
+moment one slot freed, the refused instance answered **200 in 313 ms**. Nothing
+needs restarting or redeploying - a redeploy starts fresh instances that each
+want a connection, which makes it worse while the burst lasts.
 
-`headroom` covers the ETL, migrations and a human at a prompt. Use 5.
-`peak concurrent instances` is the unknown. **Start at `1`.** That is the safe
-end, because one connection per instance cannot exhaust the server before the
-instance count does. Raise it only once you have measured the instance count.
+**If it happens more than once,** 75 is too small for the traffic, and only
+leaving shared hosting changes it (`docs/roadmap.md`).
+
+#### What this leaves: out-of-band SQL (DB3)
+
+Every connection the **application** opens is strict. Anything else that
+connects is not: phpMyAdmin, a hand-run SQL session, a future import script
+with its own client. There, an out-of-set ENUM is stored as `''` - a donation in
+the table and in no report - long text is cut and numbers are clipped. **Write
+nothing by hand.** If a correction must be made in phpMyAdmin, run
+`SET SESSION sql_mode = 'STRICT_TRANS_TABLES';` first, in the same SQL tab.
 
 ### 1.6 `JWT_SECRET`
 
@@ -167,7 +268,7 @@ The **Action** column is defined in §6.
 |---|---|---|---|---|---|
 | `DATABASE_URL` | **GENERATE FRESH** | **Yes** | REFUSES | Provider (fresh) | §1.4 |
 | `REDIS_URL` | **GENERATE FRESH** | **Yes** | **FAILS SILENT** | Provider (fresh) | §1.3 |
-| `PRISMA_CONNECTION_LIMIT` | NEW | **Set it** | Fails loud under load | Derived | §1.5. Start at `1` |
+| `PRISMA_CONNECTION_LIMIT` | NEW | **Set it** | Fails loud under load | Derived | §1.5. `1` |
 | `JWT_SECRET` | **GENERATE FRESH** | **Yes** | REFUSES | **Generated fresh** | §1.6 |
 | `ALLOWED_ORIGINS` | **REWRITE** | **Yes** | FAILS CLOSED: every browser request rejected by CORS | The new frontend domain(s) | `https://donate.example.org`. Comma-separated, exact scheme and host, **no trailing slash, no path**. Compared character for character |
 | `PAYU_BASE_URL` | COPY, **then check** | **Yes** | Fails loud. **Wrong = FAILS SILENT** | Old backend | Must read `https://secure.payu.in`. If it reads `test.payu.in`, stop: the key and salt beside it are sandbox ones too (§1.7) |
@@ -293,6 +394,12 @@ The code reads **36 names** on the backend (33 directly, plus the three `JOB_*`
 names read through `config/destructiveJobs.js`) and **1** on the frontend.
 **You type in 21 of them on the backend and 1 on the frontend.** The other 15
 stay unset.
+
+> **Tick Production only, not Preview or Development.** Vercel's form ticks all
+> three by default. With the project connected to Git, it builds a preview of
+> **every branch**, and a preview given these values is any branch's code
+> running against the donor database, with the real PayU salt (DF3). A preview
+> without them fails closed, as every deployment on the project does today.
 
 | Action | Means |
 |---|---|
@@ -443,3 +550,19 @@ one, because each costs something:**
 
 The first deploy of the new project gets the same rule: **confirm `READY` and
 check the behaviour, not just the merge.**
+
+**#33's merge already deployed it, with no variables (remediation map DF3).**
+Every path on `kindledger-api.vercel.app` answers 500 because `JWT_SECRET` is
+missing. That is safe. **What is not safe is redeploying it after adding the
+variables:** that deployment is `824fef4`, from before #38, so it would connect
+to Hostinger without the server guard, strict sessions or the TLS refusal. The
+order is:
+
+1. Add the variables (§6). Adding them does not change a running deployment.
+2. Merge #38. **That merge is the first deploy with variables.** Do not press
+   Redeploy on `824fef4`.
+3. Install the schema (`npm run db:migrate`, §1.4) **from #38's code**. Main
+   before #38 refuses MariaDB outright ("MariaDB is not supported"), and its
+   init migration still uses `REGEXP_LIKE()`, which MariaDB does not have.
+4. Check `/api/health` and the boot log: `[serverGuard] MariaDB 11.8... supported`,
+   the GLOBAL `sql_mode` warning, and `[rateLimiters]` saying redis.

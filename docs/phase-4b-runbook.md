@@ -109,7 +109,8 @@ permanently, because after the cutover there is no oracle left to rebuild it.
 
 ### 1.4 Strict mode on the ETL's own connection
 
-`sql_mode` is a session variable. The API checks it at boot; **that says nothing
+`sql_mode` is a session variable. The API checks it on its first request
+(CX1; before CX1 nothing in the API checked it at all); **that says nothing
 about the connection the ETL opens.** Without `STRICT_TRANS_TABLES` an over-long
 value is truncated and an out-of-range number clamped — silently, on the largest
 write this system will ever perform, and it would look like a clean run.
@@ -212,6 +213,33 @@ documents about free clusters, as of 3 Nov 2026:
 A cluster that pauses mid-cutover fails the ETL partway. The load is
 resumable (§4), so that by itself costs time, not data. **The data loss case is
 the cluster going away with no export.** Steps 1 and 2 close that.
+
+### 1.9 Install the schema on Hostinger, days before (CX1, MIG-01)
+
+Nothing else in this runbook creates the production schema, and the ETL needs
+it. Do it days before the freeze, from the ETL machine (its address must be on
+Hostinger's Remote MySQL list), against the **fresh** database:
+
+```
+DATABASE_URL='<the new URL, with ?sslaccept=...>' npm run db:migrate
+DATABASE_URL='<same>' npm run db:check-drift
+```
+
+1. **`npm run db:migrate`, never `npx prisma migrate deploy`.** The guard runs
+   first and refuses before any DDL; bare `migrate deploy` skips it, and a
+   migration that stops partway cannot be rolled back (MIG-01).
+2. **Record the guard's lines in the cutover log:** `Database server OK:
+   MariaDB 11.8.x (CHECK constraints enforced, strict session, 0900 collations
+   behave)`, and the `WARNING: GLOBAL sql_mode is not strict` line above it.
+   The warning is expected: it names what is unprotected outside the
+   application (remediation map DB1/DB3). **A refusal is not:** stop and read it.
+3. **The drift gate must say `No drift.`**
+4. **TLS** is checked by the guard: it refuses a plaintext connection to
+   Hostinger (DB4). If it says `NOT ENCRYPTED`, the URL is missing
+   `?sslaccept=strict`.
+
+If any step fails partway, see deployment-environment §1.4 for the recovery:
+drop every table including `_prisma_migrations`, then run it again.
 
 ---
 

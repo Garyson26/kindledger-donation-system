@@ -7,6 +7,15 @@
 -- edit this one after it has been applied anywhere.
 --
 -- Apply with: prisma migrate deploy   (never 'migrate dev' - see schema.prisma)
+--
+-- THE ONE EXCEPTION TO "never edit this one" (CX1/CY1, 3 Nov 2026). The two
+-- colour CHECKs used REGEXP_LIKE(), which MariaDB does not have, so on MariaDB
+-- this migration stopped at branding_settings with six tables already created
+-- and could not be rolled back. A follow-up migration would never be reached on
+-- a fresh MariaDB install, and no production database had applied this file, so
+-- it was edited in place. A local database that applied the old text keeps the
+-- old, equivalent constraint: `migrate deploy`, `migrate status` and the drift
+-- gate all accept it unchanged (verified on mysql:8.4). Nothing to redo.
 
 -- =============================================================================
 -- KindLedger Donation System - normative schema
@@ -407,10 +416,13 @@ CREATE TABLE IF NOT EXISTS branding_settings (
     ON DELETE SET NULL
     ON UPDATE RESTRICT,
   CONSTRAINT ck_branding_settings_singleton CHECK (id = 1),
+  -- The REGEXP OPERATOR, not REGEXP_LIKE(). MariaDB has no REGEXP_LIKE and
+  -- refused this table outright (CX1); on MySQL 8 the two are the same
+  -- function. Both servers verified to accept and refuse the same values.
   CONSTRAINT ck_branding_settings_primary_colour
-    CHECK (primary_colour IS NULL OR REGEXP_LIKE(primary_colour, '^#[0-9A-Fa-f]{6}$')),
+    CHECK (primary_colour IS NULL OR primary_colour REGEXP '^#[0-9A-Fa-f]{6}$'),
   CONSTRAINT ck_branding_settings_secondary_colour
-    CHECK (secondary_colour IS NULL OR REGEXP_LIKE(secondary_colour, '^#[0-9A-Fa-f]{6}$'))
+    CHECK (secondary_colour IS NULL OR secondary_colour REGEXP '^#[0-9A-Fa-f]{6}$')
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_0900_ai_ci
