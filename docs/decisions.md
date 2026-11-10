@@ -3548,3 +3548,34 @@ hard requirement, GLOBAL is a warning.
   application path. Only out-of-band SQL is unprotected (remediation map DB3,
   pinned in CI), and strict mode is no longer a reason for the roadmap's move
   off shared hosting.
+
+---
+
+## ADR-064: Commit messages already on `main` are not rewritten
+
+**Status** Accepted, 10 Nov 2026 (Gary).
+
+**Context.** From 10 Nov 2026, no PR, commit, comment or document in this
+repository carries tool attribution, and PR descriptions are written in plain
+English without internal finding IDs, because they are used as evidence of
+the work. A count on that date: of the 184 commits reachable from `main`, 134
+end with a tool co-author trailer and 129 use internal finding IDs; 142 carry
+one or both. PR descriptions and titles were rewritten, and the unmerged
+branches' commit messages were rewritten before merging, with each rewritten
+commit checked to have the identical tree.
+
+**Decision.** The 142 commits already on `main` are left as they are.
+
+**Why.**
+- `main` is public. Rewriting it changes every commit hash from the first
+  rewritten commit onward, which breaks every existing clone, fork and
+  open branch, and every link that names a commit - including the hashes this
+  repository's own documents cite as evidence.
+- The 35 merge commits take their messages from PR titles at the time of
+  merge; the titles are now clean, so anyone reading the PR list or the PRs
+  themselves sees the current text.
+- The cost of leaving them is cosmetic and visible to anyone reading `git log`;
+  the cost of rewriting them is structural and falls on everyone else.
+
+**Do not revisit** unless the repository is being re-created from scratch
+anyway. A rewrite of published history is not a clean-up, it is a migration.

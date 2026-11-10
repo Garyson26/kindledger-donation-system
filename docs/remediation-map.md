@@ -6618,6 +6618,36 @@ case; and **add a CI job that runs `npm run lint` and `npm run build` in
 
 ---
 
+## DW4 - FOUR PR DESCRIPTIONS WERE WRONG, AND STAYED WRONG, BECAUSE NOBODY RE-READ THEM
+
+Found 10 Nov 2026, rewriting every PR description in plain English. The first
+three were accurate when written, became false when the facts changed, and
+were never re-read. The fourth was my own error in the first pass of the
+rewrite, caught by re-reading it against the record before it was relied on:
+
+| PR | It said | What was true |
+|---|---|---|
+| #33 | Merging deploys nothing | The hosting project had been connected to the repository by then; the merge deployed the backend to production (DF3) |
+| #9 | The licence change, as settled | It was withdrawn later the same day; the licence became Apache-2.0 in #31 |
+| #11 | A unique index on PayU's payment id closes replayed callbacks | A later commit on the same branch withdrew that: the field is not covered by PayU's signature, so the index is an integrity check only |
+| #13, #15-#23 | (as first rewritten) their checks had passed | Their checks were **red** - the database jobs could not start (CI-01) |
+
+**The class:** a statement written once and left alone while the facts under it
+moved. It is the same failure as the map carrying two contradictory sequences
+("Map maintenance: a sequence stated twice is a sequence that will contradict
+itself") - a document that is not re-read when its subject changes is not
+documentation, it is history that looks current. The rewrite corrected all
+four; each corrected description says what changed.
+
+**And my own slip, which belongs here:** publishing the rewritten #31 was
+chained to the step that scanned it for internal IDs, so it went out before
+I read the scan. The one hit was a false positive (a measurement, "3.6 ms"),
+so nothing wrong was published - **by luck, not by the check.** A check whose
+result is not read before acting is the occupied slot in miniature. #28 and
+#30 were scanned, read, then published.
+
+---
+
 ## DI1 - PAYU IS ON TEST MODE DELIBERATELY: TRACKED, NOT A FINDING
 
 **State (10 Nov 2026):** `PAYU_BASE_URL=https://test.payu.in`, with the sandbox
