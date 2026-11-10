@@ -6559,10 +6559,62 @@ with no configuration surface. **Measured in a browser** at 1280, 768, 375 and
 clipped, and the attribution never splits. One line at 768 px and above for a
 name the length of the current one.
 
-**Found beside it, not fixed:** `npm run lint` in `Frontend/` cannot start.
-`package.json` pins `eslint ^8.57.0`, and `eslint.config.js` imports
-`eslint/config`, which only ESLint 9 has. So the frontend has had no working
-lint, and CI does not run one.
+**Found beside it:** the frontend lint has never been able to run - LINT-01,
+below.
+
+---
+
+## LINT-01 (High, for what it hid) - THE FRONTEND LINT HAS NEVER RUN, AND NOTHING SAID SO
+
+**Found 10 Nov 2026 (DQ1), recorded DS1.** `npm run lint` in `Frontend/` dies
+before reading a file: `ERR_PACKAGE_PATH_NOT_EXPORTED ... './config' is not
+defined by "exports"`.
+
+**Why.** The toolchain is half-upgraded. `eslint.config.js` is written for
+ESLint 9 - it imports `defineConfig` and `globalIgnores` from `eslint/config`,
+uses flat-config `extends`, and asks for `reactHooks.configs['recommended-latest']`
+- and `@eslint/js` is already 9.x. But `package.json` pins `eslint ^8.57.0` and
+`eslint-plugin-react-hooks ^4.6.0`, neither of which has those.
+
+**Why nobody noticed.** No workflow touches `Frontend/` at all: no lint, no
+build. A check that was configured, could never run, and whose absence was
+invisible because nothing reported it - **CI-01's class exactly**, one
+directory over. CI-01's "N/N green" meant nothing for MySQL; the frontend has
+no N at all.
+
+### What it hid: two pages that crash on render, one of them linked from the admin menu
+
+Running the existing config on ESLint 9 (measured below) flags `no-undef` in
+two files. **Both reproduced** in a production build of `main`, under an
+admin-role token planted client-side (the API was not involved):
+
+| | Page | Error on render | Since | Reached from |
+|---|---|---|---|---|
+| **FE-02 (High)** | `/donations`, the admin donations list | `ReferenceError: useBranding is not defined` - the hook is called, never imported | `6566b41`, SPEC-5 5.4, which replaced the hardcoded name | **The admin navbar (twice) and the admin dashboard.** Production serves this code: an admin opening Donations gets a crashed page |
+| FE-03 (Low) | `/admin/categories` | `ReferenceError: ConfirmModal is not defined`; `deleteModal`, `setDeleteModal` and `confirmDelete` are never defined either | `e11a09e`, the first commit | Nothing links to it. The working pages are `/admin/categories-list` and `/admin/add-category` |
+
+**Lint understates it.** `no-undef` caught `deleteModal`, not `ConfirmModal`:
+an undefined JSX component needs `react/jsx-no-undef`, which this config does
+not load. The page crashed on the component first.
+
+### The fix, sized
+
+| Option | Change | Verdict |
+|---|---|---|
+| **Upgrade to ESLint 9** | `eslint ^9`, `eslint-plugin-react-hooks ^5.2` in `package.json`. **The config stays as written** | **The smaller change.** Measured: `eslint.config.js` loads unmodified on ESLint 9.39.5 with react-hooks 5.2.0 |
+| Rewrite the config for ESLint 8 | Drop `eslint/config`, `defineConfig`, `globalIgnores` and flat `extends`; wire the hooks plugin by hand; downgrade `@eslint/js` to 8 | More change, onto a major version that is no longer maintained |
+
+**It does not pass on the current code - it surfaces a backlog.** On ESLint 9,
+45 files: **17 errors and 8 warnings in 14 files.** `no-unused-vars` 12,
+`no-undef` 4 (FE-02 and FE-03 above), `react-refresh/only-export-components`
+1, and `react-hooks/exhaustive-deps` 8 warnings. The unused variables are dead
+code (unused `err` in catches, an unused `getHeaders`, state never read); the
+hook warnings are effects that call a fetch function they do not list.
+
+**Plan, as its own PR:** fix FE-02 and FE-03 first (FE-02 is one import);
+upgrade the two packages; clear the 17 errors; decide the 8 warnings case by
+case; and **add a CI job that runs `npm run lint` and `npm run build` in
+`Frontend/`**, so the next breakage is reported rather than discovered.
 
 ---
 
