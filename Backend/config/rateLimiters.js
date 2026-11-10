@@ -35,21 +35,22 @@ let storeKind = 'memory';
 let announced = false;
 
 /**
- * Build the shared store, or null to fall back to memory.
+ * Open the ONE Redis connection every limiter's store shares, and return its
+ * command function - or null, to fall back to memory.
  *
  * Connection is started but NOT awaited: a limiter factory must not make module
  * loading depend on Redis being up. node-redis queues commands while
- * connecting, and if the connection never succeeds the limiter fails open on
- * that request rather than taking the process down - the same reasoning as
- * ADR-039. A limiter that cannot count is worse than no limiter only if you
- * believed it was counting, which is why the boot log states the store.
+ * connecting. If Redis cannot be reached, a limited request is REFUSED (an
+ * error, so 500), not let through: express-rate-limit's passOnStoreError is
+ * off. That is pinned in test/rate-limiter-redis.test.js, and whether it should
+ * fail open instead is a recorded decision (remediation map DH1), not this
+ * file's to make. What it must never do is take the process down - ADR-039.
  */
-function buildStore() {
+function connectRedis() {
   const url = process.env.REDIS_URL;
   if (!url) return null;
 
   const { createClient } = require('redis');
-  const RedisStore = require('rate-limit-redis').default || require('rate-limit-redis');
 
   redisClient = createClient({ url });
 
@@ -84,8 +85,81 @@ function buildStore() {
     });
 
   storeKind = 'redis';
-  return new RedisStore({
-    sendCommand: (...args) => redisClient.sendCommand(args),
+  return (...args) => redisClient.sendCommand(args);
+}
+
+/**
+ * RATE-02. A RedisStore whose start-up is retried, not kept.
+ *
+ * rate-limit-redis's init() loads its two scripts and keeps the PROMISE. If
+ * Redis times out at that moment - a cold start, measured in production on
+ * 10 Nov 2026 - the promise stays rejected for the life of the instance: every
+ * later request awaits it and fails, and the library's only retry is on a
+ * NOSCRIPT reply, which never comes. The instance answered 500 on login,
+ * signup, password reset and donation initiation, with Redis healthy, until
+ * Vercel happened to recycle it.
+ *
+ * So init() is remembered rather than run once: a failed one is forgotten, and
+ * the next request runs it again before counting. Once it has succeeded,
+ * nothing changes - NOSCRIPT is still the library's to handle. Only the
+ * library's public store methods are used, so no internal field is touched.
+ */
+let RecoveringRedisStore;
+
+function recoveringRedisStore(options) {
+  if (!RecoveringRedisStore) {
+    const RedisStore = require('rate-limit-redis').default || require('rate-limit-redis');
+    RecoveringRedisStore = class extends RedisStore {
+      init(limiterOptions) {
+        this.limiterOptions = limiterOptions;
+        this.ready = null;
+        return this.whenReady();
+      }
+
+      whenReady() {
+        if (!this.ready) {
+          this.ready = super.init(this.limiterOptions).catch((err) => {
+            this.ready = null;
+            throw err;
+          });
+        }
+        return this.ready;
+      }
+
+      // increment() is the only script-backed call a request makes. DECR and
+      // DEL are plain commands, and nothing here calls get().
+      async increment(key) {
+        await this.whenReady();
+        return super.increment(key);
+      }
+    };
+  }
+  return new RecoveringRedisStore(options);
+}
+
+/**
+ * A store for ONE limiter (RATE-01), or null for memory.
+ *
+ * ONE PER LIMITER, NEVER SHARED. A RedisStore takes its window from the limiter
+ * that initialises it (init() sets this.windowMs), and every key it writes
+ * expires on that window. One store shared by every limiter therefore gave all
+ * of them the LAST one's: paymentInitiateLimiter's 60 s, so the 15-minute
+ * reset-code cap (AQ1) expired after a minute - 5 guesses per minute, not per
+ * 15. express-rate-limit says so at start-up (ERR_ERL_STORE_REUSE), and only
+ * on Redis: without REDIS_URL each limiter builds its own MemoryStore, which is
+ * why CI never saw it.
+ *
+ * The CONNECTION is still shared - one socket per process. Keys stay apart
+ * exactly as before, by each limiter's `name` in its key.
+ */
+function storeForOneLimiter() {
+  if (!redisBuilt) {
+    redisBuilt = true;
+    sendCommand = connectRedis();
+  }
+  if (!sendCommand) return null;
+  return recoveringRedisStore({
+    sendCommand,
     // THE PREFIX IS OVERRIDABLE, AND THAT IS NOT A TEST CONVENIENCE.
     //
     // Wiring the Redis store in package 3.2 made the limiter SHARED and
@@ -113,19 +187,11 @@ function buildStore() {
 // It is not only a test problem. A module that dials out on import cannot be
 // required by a migration script, a one-off maintenance task or a --check
 // style smoke test without those inheriting a live socket and a shutdown
-// obligation they never asked for. The store is now built on the first
+// obligation they never asked for. The connection is now opened on the first
 // createLimiter() call, which is wiring time, which is when a connection is
 // actually wanted.
-let sharedStore;
-let storeBuilt = false;
-
-function getStore() {
-  if (!storeBuilt) {
-    storeBuilt = true;
-    sharedStore = buildStore();
-  }
-  return sharedStore;
-}
+let sendCommand = null;
+let redisBuilt = false;
 
 function announceOnce() {
   if (announced) return;
@@ -166,9 +232,11 @@ function keyForAddress(name, email) {
 /**
  * Create a limiter.
  *
- * Every limiter shares one store instance. Separate windows are kept apart by
- * express-rate-limit's own key prefixing plus the `name` below, so an auth
- * burst does not consume a donor's donation-endpoint budget.
+ * Every limiter gets its OWN store, on one shared Redis connection, so each
+ * keeps its own window (RATE-01 - this comment used to say one store was
+ * shared, which was right about the keys and wrong about the windows). Keys are
+ * kept apart by the `name` below, so an auth burst does not consume a donor's
+ * donation-endpoint budget.
  *
  * NOTE ON KEYING. The key is the client address, which is only correct because
  * app.set('trust proxy', 1) is in place AND exactly one proxy that we control
@@ -190,7 +258,7 @@ function keyForAddress(name, email) {
  * caught here - it fired during the SPEC-2 section 8 test run, not in review.
  */
 function createLimiter({ name, windowMs, max, message, keyBy }) {
-  const store = getStore();
+  const store = storeForOneLimiter();
   announceOnce();
   return rateLimit({
     windowMs,
