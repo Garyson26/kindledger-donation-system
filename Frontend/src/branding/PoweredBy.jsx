@@ -40,9 +40,12 @@ import React from "react";
 
 const REPO = "https://github.com/Garyson26/kindledger-donation-system";
 
+// A SPAN, not a paragraph (DQ1): the footer sets it on the same line as the
+// organisation's copyright. inline-flex keeps "Powered by", the mark and the
+// name together as one unit when that line wraps on a narrow screen.
 function PoweredBy() {
   return (
-    <p className="text-sm text-gray-500 flex items-center justify-center gap-1.5">
+    <span className="text-sm text-gray-500 inline-flex items-center justify-center gap-1.5">
       <span>Powered by</span>
       <a
         href={REPO}
@@ -64,7 +67,7 @@ function PoweredBy() {
         </svg>
         KindLedger Donation System
       </a>
-    </p>
+    </span>
   );
 }
 
