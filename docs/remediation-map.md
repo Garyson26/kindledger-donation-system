@@ -6535,6 +6535,15 @@ same in its `.env`. Before, those suites set nothing and every send went out to
 `auth` 6/6, `admin` 22/22, `signup-timing` 8/8, `password-timing` 6/6 -
 unchanged counts.
 
+**The first CI run caught two boots I had missed**, because I listed only
+files that `require('../app')`: `migration-state`'s PAY-02 test boots `app.js`
+in a **child process** (which inherits the environment), and
+`refuse-unsupported` boots it from a **CI shell step** to prove MariaDB 10.11
+gets 503. Both refused to start - the refusal working, in a place that had not
+configured a transport. Both now do; the 10.11 step was reproduced locally
+(503, 503, 503) and `migration-state` passes 11/11. The search that finds them
+is for `app.js` in any form, including `node -e` and child-process scripts.
+
 **Production needs nothing:** it has `EMAIL_USER`/`EMAIL_PASSWORD`, so it
 selects SMTP exactly as before. Switching to Resend is two variables
 (deployment-environment §6, rows 37-38) and a verified domain.
