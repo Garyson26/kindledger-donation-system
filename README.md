@@ -138,8 +138,12 @@ lint` is the only automated check in the repo.
 
 ## Documentation
 
+**Installing on an empty database?** [`docs/first-run.md`](docs/first-run.md)
+creates the first admin and the donation categories, with no SQL.
+
 Detailed documentation is maintained **outside this repository** (the `docs/`
-directory is deliberately untracked — see `.gitignore`). Ask a maintainer for:
+directory is untracked except for the files `.gitignore` names). Ask a
+maintainer for:
 
 | Document | Contents |
 |---|---|

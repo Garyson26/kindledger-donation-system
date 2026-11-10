@@ -89,6 +89,12 @@ for_ocean_security_review.md
 # deployment-environment.md and carries no exploit detail.
 !docs/roadmap.md
 
+# DH2's first-run guide. TRACKED and under the AC3 gate: how an installer
+# creates the first admin and the categories through the API and the admin
+# screens. Public by design - every NGO installing KindLedger needs it - and it
+# carries no exploit detail, no findings and no file:line references.
+!docs/first-run.md
+
 # =============================================================================
 # Node
 # =============================================================================

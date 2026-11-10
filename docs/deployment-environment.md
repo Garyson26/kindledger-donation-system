@@ -95,7 +95,7 @@ deploy, check the log says redis.** No user-visible symptom will tell you.
 | | |
 |---|---|
 | Required | **Yes** |
-| Format | `mysql://<user>:<password>@<host>:3306/<database>?sslaccept=strict`. On Hostinger the host is the Remote MySQL hostname hPanel shows (`srvNNNN.hstgr.io`) |
+| Format | `mysql://<user>:<password>@<host>:3306/<database>?sslaccept=strict`. On Hostinger `<host>` is the Remote MySQL hostname hPanel shows, shaped like `srv` + digits + `.hstgr.io`. **Every `<...>` is a placeholder: type the real value.** The first production deploy carried this row's example hostname literally (DH1); the log says `ENOTFOUND` and names the host it could not find |
 | Source | Hostinger shared hosting, which runs **MariaDB 11.8**. Supported since CX1: MySQL **8.0.16+** or MariaDB **11.4.5+**, with a strict `sql_mode` |
 | If missing | REFUSES. `/api/health` answers 503 and every data route errors |
 | **If the server is unsupported** | **REFUSES (CX1(b)).** Every data route and `/api/health` answer 503 `Service unavailable`; the log says `[serverGuard] REFUSING:` and why. Before CX1 it booted and wrote data |
@@ -299,6 +299,32 @@ The **Action** column is defined in §6.
 That is the only variable the frontend reads. **Nothing else belongs on the
 frontend project** (§4).
 
+**Creating the project (DH3):**
+
+| Setting | Value |
+|---|---|
+| Repository | this one, the same as the backend project |
+| **Root Directory** | **`Frontend`**. The backend project's is `Backend`. Each directory has its own `vercel.json` |
+| Framework preset | Vite. Build `npm run build`, output `dist` (the defaults) |
+| Production branch | `main` |
+| Variables | `VITE_API_URL=https://kindledger-api.vercel.app`, Production. It is read at build time, so set it **before** the first build |
+
+`Frontend/vercel.json` carries the SPA rewrite and the CSP, which already names
+`kindledger-api.vercel.app` and both PayU hosts. **If the backend's domain ever
+changes, the CSP changes with it**, or the browser blocks every API call.
+
+**Then back on the backend**, once the frontend's production domain exists
+(`https://<frontend>`, exact, no trailing slash):
+
+| Name | Value |
+|---|---|
+| `ALLOWED_ORIGINS` | `https://<frontend>`. Add a custom domain here too, comma-separated, if one is attached later |
+| `FRONTEND_SUCCESS_URL` | `https://<frontend>/payment-success` |
+| `FRONTEND_FAILURE_URL` | `https://<frontend>/payment-failure` |
+
+**Redeploy the backend** after setting them. Until `ALLOWED_ORIGINS` is set, the
+browser's every request to the API is refused by CORS (FAILS CLOSED).
+
 ### 2.3 Email: loud in one place, silent in the rest
 
 Checked per call site in `routes/auth.js`:
@@ -323,7 +349,8 @@ the only check for this.**
 When it is set, anyone holding it can create an admin account through the
 **public** signup endpoint. After the cutover, existing admins arrive with the
 migrated data, so no key is needed. If one is ever needed, generate it fresh,
-use it once, and delete it.
+use it once, and delete it. **An empty database needs it once, for the first
+admin:** `docs/first-run.md` gives the steps, including turning it off again.
 
 ---
 
