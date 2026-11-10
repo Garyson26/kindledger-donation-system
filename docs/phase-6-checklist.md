@@ -237,6 +237,24 @@ DI1), so the frontend can be tested end to end. When it works, these are the
 3. **One real donation of the smallest amount, confirmed IN THE BANK** - steps
    1 to 4 above. Not the dashboard.
 
+### 5.3a On Vercel: every variable is Production only (DEPLOY-02)
+
+**Vercel's add-variable form ticks Production, Preview and Development by
+default, and a Marketplace integration adds its variable to Preview by itself.**
+With the project connected to Git, Vercel builds a preview of **every branch**,
+and a preview gets the Preview variables. Leave the defaults and any branch
+runs with the session-signing key, the payment salt, the mail password and the
+donor database - and shares production's rate-limit counters through Redis.
+
+That is what the first KindLedger deployment did (remediation map DEPLOY-02),
+following a guide that said "Production only" in a callout. So, plainly:
+
+1. **Untick Preview and Development on every backend variable** as you add it.
+2. **After adding any integration, check its variables too.** It does not ask.
+3. **Check:** the project's Environment Variables page, filtered to Preview,
+   lists nothing. A preview with no variables fails closed, which is correct.
+4. **Before pushing a branch** to a Git-connected project, do the check again.
+
 ### 5.4 The uploads volume must be persistent
 
 Logos are stored on local disk in the `uploads` volume, deliberately — an NGO
@@ -283,7 +301,8 @@ changes status without changing content.
 | `vite` major (frontend build tooling) | **Queued.** `npm audit --omit=dev` reports 0; the advisories are dev-server only. `vite@8` is its own package |
 | Guest donation retrieval (D1 / AG4) | **Deferred with triggers**, not a phase |
 | PayU on test mode (DI1) | **Tracked, deliberate.** Trigger: the frontend works end to end against the sandbox. Then §5.3's last three items. Closes when the first real donation is in the bank |
-| `RATE-01`, `RATE-02` (remediation map DH1) | **Open, NOT YET PINNED.** The limiters share one Redis store, so every window is 60 s; and one Redis timeout at cold start leaves an instance answering 500 on every limited route. Fix before announcing |
+| `RATE-01`, `RATE-02` (remediation map DH1) | **Fixed (DJ1), PINNED** by `test:rate-limiter-redis` on a fake Redis: one store per limiter, and a failed store start-up is retried. Open within it, as a decision: with Redis unreachable a limited route is refused, not let through |
+| `DEPLOY-02`: production secrets on Preview | **Being corrected** on the Vercel project. Closes when Preview lists no variables (§5.3a) |
 
 **Every one carries a test.** An open residual with a test cannot change without
 somebody noticing; one with a prose note can.

@@ -599,6 +599,50 @@ test('3.5a: a signup attempt on a known address creates NO pending signup', asyn
   assert.deepEqual(resendKnown.body, resendUnknown.body);
 });
 
+test('DJ4: admin signup is REFUSED with ADMIN_CREATION_KEY empty or unset - even when adminKey is empty too', async () => {
+  // docker-compose.yml now leaves the key EMPTY unless an installer sets it for
+  // the first admin (docs/first-run.md), so "empty" is the normal production
+  // state and this refusal is what keeps public signup from minting admins.
+  // The case that matters is empty == empty: a check written as
+  // `adminKey === process.env.ADMIN_CREATION_KEY` would ACCEPT it.
+  const saved = process.env.ADMIN_CREATION_KEY;
+  const prisma = getPrisma();
+  const pendingRole = async (email) =>
+    (await prisma.pendingSignup.findFirst({ where: { email: email.toLowerCase() } }))?.role ?? null;
+  try {
+    for (const [label, key] of [['empty', ''], ['unset', undefined]]) {
+      if (key === undefined) delete process.env.ADMIN_CREATION_KEY;
+      else process.env.ADMIN_CREATION_KEY = key;
+      const email = uniqEmail(`noadmin-${label}`);
+      const res = await post('/api/auth/signup', {
+        name: 'x', email, password: 'ValidPassword1!', role: 'admin', adminKey: '',
+      });
+      assertRefused(res, 403);
+      assert.equal(await pendingRole(email), null, `${label} key: nothing is written`);
+    }
+
+    process.env.ADMIN_CREATION_KEY = 'test-admin-key';
+    const wrong = uniqEmail('noadmin-wrong');
+    assertRefused(
+      await post('/api/auth/signup', { name: 'x', email: wrong, password: 'ValidPassword1!', role: 'admin', adminKey: 'not-it' }),
+      403
+    );
+    assert.equal(await pendingRole(wrong), null, 'wrong key: nothing is written');
+
+    // CONTROL: the matching key is how docs/first-run.md creates the first
+    // admin, so it must work - and the pending signup carries the admin role.
+    const right = uniqEmail('admin-control');
+    const ok = await post('/api/auth/signup', {
+      name: 'x', email: right, password: 'ValidPassword1!', role: 'admin', adminKey: 'test-admin-key',
+    });
+    assert.equal(ok.status, 200, ok.raw.slice(0, 200));
+    assert.equal(await pendingRole(right), 'admin');
+  } finally {
+    if (saved === undefined) delete process.env.ADMIN_CREATION_KEY;
+    else process.env.ADMIN_CREATION_KEY = saved;
+  }
+});
+
 test('SEC-08: the reset and resend paths no longer leak existence (CHANGED IN 3.2)', async () => {
   // WAS: /login/resend-otp, /forgot-password/verify and /forgot-password/reset
   // each answered 404 "User not found" for an unknown address and something

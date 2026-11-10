@@ -86,11 +86,9 @@ instead of a code and creates nothing. Use an address with no account.
 
 - **Vercel:** delete `ADMIN_CREATION_KEY`, then **redeploy**. Deleting it does
   nothing to the deployment that is already running.
-- **Compose:** the file **requires** the variable (`:?`), so it cannot be
-  removed without editing `docker-compose.yml`. Replace it in `.env` with a
-  **new** random value that you do not write down, then
-  `docker compose up -d api`. The old key stops working, and nobody holds the
-  new one.
+- **Compose:** empty it in `.env` (`ADMIN_CREATION_KEY=`), then
+  `docker compose up -d api`. The stack starts without it; unset is the normal
+  state.
 
 **Check it is off.** Repeat the step 2 signup with the old key. It must
 answer **403**.

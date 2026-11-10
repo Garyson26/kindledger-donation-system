@@ -6231,8 +6231,8 @@ builds its own MemoryStore. The comment above `createLimiter` ("every limiter
 shares one store instance ... kept apart by key prefixing") is right about the
 keys and wrong about the window.
 
-**Fix:** one `RedisStore` per limiter, each with its own prefix, on the one
-shared client. Not yet done.
+**FIXED (DJ1):** one `RedisStore` per limiter, on the one shared connection.
+Keys are unchanged; each limiter's `name` already kept them apart.
 
 ### RATE-02 (High for availability) - one Redis timeout at cold start breaks every limited route on that instance
 
@@ -6250,10 +6250,45 @@ password reset and **donation initiation** answer 500 until Vercel recycles
 the instance - with Redis healthy the whole time. It looks intermittent for
 the same reason DC1 does: only some instances are affected.
 
-**Fix:** reload the script on any failure, not only `NOSCRIPT` (a store
-wrapper, or a fresh `init` on error). Whether a limiter that cannot count
-should then fail open or closed is a decision, and is recorded as one when it
-is made. Not yet done.
+**FIXED (DJ1):** the store remembers `init()` instead of running it once. A
+failed one is forgotten, and the next request runs it again before counting.
+Only the library's public store methods are used.
+
+**Not changed, and now pinned as a decision:** while Redis is unreachable, a
+limited request is **refused** (500), not let through uncounted (fail closed).
+The module's old comment said it "fails open on that request"; it never did,
+because `passOnStoreError` is off. Whether it should is Gary's call; the test
+named "PINNED, A DECISION" changes with it.
+
+### RATE-01 and RATE-02: proved broken, fixed, proved fixed
+
+`test/rate-limiter-redis.test.js` replaces only the `redis` client, through
+`require.cache`, with an in-memory Redis that answers rate-limit-redis's two
+scripts on a clock the test controls. Everything above it is real:
+`config/rateLimiters.js`, rate-limit-redis, express-rate-limit, mounted on
+routes, created in production's order. The assertions are HTTP status codes.
+
+| Test | Before the fix | After |
+|---|---|---|
+| RATE-01: the reset cap still refuses 61 s after it refused | **200** (expected 429) | 429 |
+| RATE-01: the login window is still 60 s | pass | pass - guards against giving every limiter 15 minutes |
+| RATE-02: Redis down at start-up, then back: three logins | **500, 500, 500** | 200, 200, 200 |
+| RATE-02: after recovering, the sixth login is 429 | **500 ×6** | 200 ×5, then 429 - recovery is not a bypass |
+| PINNED: Redis down, a limited route is refused | pass | pass |
+
+**2/5 before, 5/5 after.** Mutations checked: removing the retry fails both
+RATE-02 tests; sharing one store again fails RATE-01.
+
+### How they were found, and why nothing earlier could
+
+**Only a real Redis shows either one.** Every suite, CI and local alike, runs
+without `REDIS_URL`, so each limiter builds its own MemoryStore - its own
+window, and no scripts to fail to load. The first production log carried
+`ERR_ERL_STORE_REUSE` and the start-up `TimeoutError` within an hour of the
+first deploy with variables. **The same class as CM1's** "three of the five
+passed only inside the api container": the configuration the suites exercised
+was not the one that ships, so green meant "green in an environment nobody
+deploys". The new suite runs the Redis configuration on every CI run.
 
 ### Not a defect: `ERR_ERL_KEY_GEN_IPV6`
 
@@ -6270,15 +6305,79 @@ test. Leave it, or silence that one validation with a comment saying why.
   §2.1; not yet observed, since no donation has been attempted). No sandbox
   donation can complete until they are set.
 - **Twelve of the fourteen variables target Preview as well as Production.**
-  Only `DATABASE_URL` and `PRISMA_CONNECTION_LIMIT` are Production-only. With
-  no database a preview fails closed, but every branch preview gets
-  `JWT_SECRET`, the PayU salt and the mail password. And because `REDIS_URL` is
-  shared (the integration adds it to both), a preview shares production's
-  limiter buckets (DEPLOY-01) unless it sets its own `RATE_LIMIT_PREFIX`.
+  Recorded as **DEPLOY-02**, below.
 - **Four secrets are `encrypted`, not `sensitive`** - `JWT_SECRET`,
   `HEALTH_DIAGNOSTIC_SECRET`, `EMAIL_PASSWORD`, `PAYU_MERCHANT_KEY` - so the
   dashboard can reveal them (Vercel flags them `readable-secret`). §6 says
   Sensitive. The salt is `encrypted` too.
+
+---
+
+## DEPLOY-02 (High, deployment) - production secrets were given to every branch preview
+
+**Found 10 Nov 2026 (DH1). Corrected on the project by Gary (DJ2).**
+
+Twelve of the fourteen backend variables targeted **Preview** as well as
+Production: `JWT_SECRET`, `HEALTH_DIAGNOSTIC_SECRET`, `PAYU_MERCHANT_KEY`,
+`PAYU_MERCHANT_SALT`, `PAYU_BASE_URL`, `EMAIL_USER`, `EMAIL_PASSWORD`,
+`EMAIL_SERVICE`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE` and `REDIS_URL`. Only
+`DATABASE_URL` and `PRISMA_CONNECTION_LIMIT` were Production-only.
+
+**Why it matters.** With Git connected, Vercel builds a preview of **every
+branch** pushed to the repository, and a preview runs that branch's code with
+the Preview variables. So any branch could:
+
+- **sign tokens production accepts** - `JWT_SECRET` is the key to every
+  session;
+- **build and verify PayU hashes** with the real salt, which is the only thing
+  that tells a genuine payment callback from a forged one (SEC-01);
+- **send mail as the organisation**, with the mail password;
+- **share production's rate-limit counters** through the shared `REDIS_URL`
+  (DEPLOY-01), so testing a preview spends production's login budget, or the
+  reverse.
+
+What limited it: `DATABASE_URL` was Production-only, so a preview had no
+database and failed closed; and the PayU values were still the sandbox's
+(DI1). Neither is a control. Both were luck about which variables happened to
+be unticked.
+
+**Why an installer hits it.** **Vercel's form ticks Production, Preview and
+Development by default**, and an integration adds its own variable without
+asking: the Redis one put `REDIS_URL` on Preview as well as Production. Following the guide without being told
+otherwise produces exactly this. deployment-environment §6 said "Production
+only" since DF4, as a callout; it now gives the reasons and says how to check.
+Recorded in the self-hosting notes too (Phase 6 checklist §5.6), because every
+NGO deploying to Vercel gets the same default.
+
+**Being corrected (DJ2), and the first pass made it worse.** Read from the
+project at 10:18 UTC, 10 Nov: nothing unticked yet; the four new callback URLs
+added with Preview ticked; and the edit that corrected `DATABASE_URL`'s host
+**added Preview to it**, so previews now get the donor database - the one
+variable that had been Production-only. Git is connected, so the next branch
+push builds a preview with all of it. **Pushes are held until Preview is empty.**
+
+**Closes when** the project's Environment Variables page, filtered to Preview,
+lists nothing. Read back from the API, not assumed.
+
+---
+
+## DJ4 - `docker-compose.yml` no longer requires `ADMIN_CREATION_KEY`
+
+It was `${ADMIN_CREATION_KEY:?...}`: the stack refused to start without it, so
+every Compose install carried a **live admin-creation key on the public signup
+endpoint, permanently** - the opposite of deployment-environment §2.4 and of
+`docs/first-run.md`, which set it once and remove it. Now
+`${ADMIN_CREATION_KEY:-}`: unset or empty is the normal state.
+
+**Proved by behaviour:** `docker compose config` with no key at all - before,
+`required variable ADMIN_CREATION_KEY is missing a value`, exit 1; after, it
+renders `ADMIN_CREATION_KEY: ""` and exits 0.
+
+**What makes empty safe is pinned:** `auth-characterisation` "DJ4" asserts that
+an empty or unset key refuses admin signup with 403 and writes nothing - **even
+when `adminKey` is empty too**, the case a check written as
+`adminKey === key` would accept - and that the matching key still works, since
+first-run depends on it. Nothing asserted the refusal before.
 
 ---
 
