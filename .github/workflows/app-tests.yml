@@ -324,6 +324,10 @@ jobs:
         working-directory: Backend
         run: npm run test:logo
 
+      - name: CORS refusals are 403, before the route (DP2)
+        working-directory: Backend
+        run: npm run test:cors
+
   # ---------------------------------------------------------------------------
   # 2. Phase 2 data layer (MySQL + Redis)
   # ---------------------------------------------------------------------------

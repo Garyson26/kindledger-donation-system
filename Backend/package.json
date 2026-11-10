@@ -44,6 +44,7 @@
     "test:no-secrets": "node --test test/no-committed-secrets.test.js",
     "fixture:legacy-mongo": "node scripts/rebuildLegacyMongo.js",
     "test:branding": "node --test test/branding.test.js",
+    "test:cors": "node --test test/cors.test.js",
     "test:all": "node test/run-all-suites.js",
     "test:logo": "node --test test/logo-upload.test.js",
     "test:rate-limiter-redis": "node --test test/rate-limiter-redis.test.js"
