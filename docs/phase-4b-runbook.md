@@ -221,9 +221,14 @@ it. Do it days before the freeze, from the ETL machine (its address must be on
 Hostinger's Remote MySQL list), against the **fresh** database:
 
 ```
+npm ci
+npx prisma generate     # required: npm blocks the install script that used to (DM2)
 DATABASE_URL='<the new URL, with ?sslaccept=...>' npm run db:migrate
 DATABASE_URL='<same>' npm run db:check-drift
 ```
+
+Not from a OneDrive-synced folder: file locks (`EBUSY`) leave `node_modules`
+half-installed (Phase 6 checklist §5.1a).
 
 1. **`npm run db:migrate`, never `npx prisma migrate deploy`.** The guard runs
    first and refuses before any DDL; bare `migrate deploy` skips it, and a

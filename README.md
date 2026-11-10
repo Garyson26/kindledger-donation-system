@@ -45,6 +45,7 @@ cd kindledger-donation-system
 # Backend - http://localhost:5000
 cd Backend
 npm install
+npx prisma generate         # required: recent npm blocks the install script that used to do this
 cp .env.example .env        # fill in real values, see below
 npm run dev
 
